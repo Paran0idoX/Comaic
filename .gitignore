@@ -1,0 +1,11 @@
+.env
+__pycache__/
+*.py[cod]
+
+data/*.sqlite
+data/*.sqlite3
+data/*.db
+outputs/*
+!outputs/.gitkeep
+frontend/node_modules/
+frontend/dist/
