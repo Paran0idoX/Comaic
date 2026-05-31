@@ -10,6 +10,7 @@ from backend.models.database import Base
 from backend.models.enums import (
     ComicPageStatus,
     GenerationTaskStatus,
+    ImagePromptPresetKind,
     OutlineVersionStatus,
     ScriptGenerationMode,
     ScriptGenerationTaskStatus,
@@ -75,6 +76,19 @@ class ComicProject(TimestampMixin, Base):
         back_populates="project",
         cascade="all, delete-orphan",
     )
+
+
+class ImagePromptPreset(TimestampMixin, Base):
+    """图片 Prompt 通用配置表：维护脚本转图 SystemPrompt 和文生图 Negative Prompt。"""
+
+    __tablename__ = "image_prompt_preset"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(255))
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    kind: Mapped[ImagePromptPresetKind] = enum_column(ImagePromptPresetKind, index=True)
+    content: Mapped[str] = mapped_column(Text)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class Session(TimestampMixin, Base):

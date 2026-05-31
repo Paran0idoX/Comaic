@@ -6,6 +6,7 @@ from backend.models.comic import (
     ComicPage,
     ComicProject,
     GenerationTask,
+    ImagePromptPreset,
     OutlineVersion,
     ScriptSection,
     ScriptGenerationTask,
@@ -13,6 +14,7 @@ from backend.models.comic import (
 )
 from backend.models.enums import (
     ComicPageStatus,
+    ImagePromptPresetKind,
     OutlineVersionStatus,
     ScriptGenerationMode,
     ScriptGenerationTaskStatus,
@@ -424,6 +426,25 @@ class ComicRepository:
 
         return self.session.get(ScriptGenerationTask, task_id)
 
+    def list_script_tasks(
+        self,
+        *,
+        project_id: int | None = None,
+        status: ScriptGenerationTaskStatus | None = None,
+    ) -> list[ScriptGenerationTask]:
+        """读取脚本生成任务列表，供后续 Prompt 生成选择已完成任务。"""
+
+        statement = select(ScriptGenerationTask)
+        if project_id is not None:
+            statement = statement.where(ScriptGenerationTask.project_id == project_id)
+        if status is not None:
+            statement = statement.where(ScriptGenerationTask.status == status)
+        statement = statement.order_by(
+            ScriptGenerationTask.updated_at.desc(),
+            ScriptGenerationTask.id.desc(),
+        )
+        return list(self.session.scalars(statement))
+
     def get_script_task_status(self, task_id: int) -> ScriptGenerationTaskStatus | None:
         """从数据库刷新读取脚本任务状态，供长 SSE 连接感知外部暂停。"""
 
@@ -589,6 +610,130 @@ class ComicRepository:
         self.session.commit()
         self.session.refresh(page)
         return page
+
+    def clear_script_task_image_prompts(self, task_id: int) -> None:
+        """清空某次脚本任务下所有页面的图片 Prompt，重新生成前避免新旧 Prompt 混用。"""
+
+        for page in self.list_script_task_pages(task_id):
+            page.image_prompt = None
+            if page.script:
+                page.status = ComicPageStatus.SCRIPT_READY
+        self.session.commit()
+
+    def list_image_prompt_presets(
+        self,
+        kind: ImagePromptPresetKind | None = None,
+    ) -> list[ImagePromptPreset]:
+        """读取图片 Prompt 配置列表，可按类型筛选。"""
+
+        statement = select(ImagePromptPreset)
+        if kind is not None:
+            statement = statement.where(ImagePromptPreset.kind == kind)
+        statement = statement.order_by(
+            ImagePromptPreset.kind,
+            ImagePromptPreset.is_default.desc(),
+            ImagePromptPreset.updated_at.desc(),
+            ImagePromptPreset.id.desc(),
+        )
+        return list(self.session.scalars(statement))
+
+    def get_image_prompt_preset(self, preset_id: int) -> ImagePromptPreset | None:
+        """根据主键读取图片 Prompt 配置。"""
+
+        return self.session.get(ImagePromptPreset, preset_id)
+
+    def get_default_image_prompt_preset(
+        self,
+        kind: ImagePromptPresetKind,
+    ) -> ImagePromptPreset | None:
+        """读取某个类型下的默认图片 Prompt 配置。"""
+
+        statement = (
+            select(ImagePromptPreset)
+            .where(
+                ImagePromptPreset.kind == kind,
+                ImagePromptPreset.is_default.is_(True),
+            )
+            .order_by(ImagePromptPreset.updated_at.desc(), ImagePromptPreset.id.desc())
+            .limit(1)
+        )
+        return self.session.scalar(statement)
+
+    def create_image_prompt_preset(
+        self,
+        *,
+        name: str,
+        kind: ImagePromptPresetKind,
+        content: str,
+        description: str | None = None,
+        is_default: bool = False,
+    ) -> ImagePromptPreset:
+        """创建图片 Prompt 配置；默认配置在同类型下保持唯一。"""
+
+        if is_default:
+            self._clear_default_image_prompt_presets(kind)
+        preset = ImagePromptPreset(
+            name=name,
+            description=description,
+            kind=kind,
+            content=content,
+            is_default=is_default,
+        )
+        self.session.add(preset)
+        self.session.commit()
+        self.session.refresh(preset)
+        return preset
+
+    def update_image_prompt_preset(
+        self,
+        *,
+        preset_id: int,
+        name: str,
+        kind: ImagePromptPresetKind,
+        content: str,
+        description: str | None = None,
+        is_default: bool = False,
+    ) -> ImagePromptPreset:
+        """更新图片 Prompt 配置；切换默认时只影响同类型配置。"""
+
+        preset = self.session.get(ImagePromptPreset, preset_id)
+        if preset is None:
+            raise ValueError(f"ImagePromptPreset not found: {preset_id}")
+        if is_default:
+            self._clear_default_image_prompt_presets(kind, except_preset_id=preset_id)
+        preset.name = name
+        preset.description = description
+        preset.kind = kind
+        preset.content = content
+        preset.is_default = is_default
+        self.session.commit()
+        self.session.refresh(preset)
+        return preset
+
+    def delete_image_prompt_preset(self, preset_id: int) -> None:
+        """删除图片 Prompt 配置；已保存到页面的 Prompt 不受影响。"""
+
+        preset = self.session.get(ImagePromptPreset, preset_id)
+        if preset is None:
+            raise ValueError(f"ImagePromptPreset not found: {preset_id}")
+        self.session.delete(preset)
+        self.session.commit()
+
+    def _clear_default_image_prompt_presets(
+        self,
+        kind: ImagePromptPresetKind,
+        except_preset_id: int | None = None,
+    ) -> None:
+        """同一类型下只保留一个默认配置。"""
+
+        statement = select(ImagePromptPreset).where(
+            ImagePromptPreset.kind == kind,
+            ImagePromptPreset.is_default.is_(True),
+        )
+        for preset in self.session.scalars(statement):
+            if except_preset_id is not None and preset.id == except_preset_id:
+                continue
+            preset.is_default = False
 
     def add_image(
         self,

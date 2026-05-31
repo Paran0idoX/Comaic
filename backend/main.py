@@ -4,6 +4,7 @@ import logging
 
 from fastapi import FastAPI
 
+from backend.api.image_prompts import router as image_prompts_router
 from backend.api.outline import router as outline_router
 from backend.api.projects import router as projects_router
 from backend.api.scripts import project_pages_router, router as scripts_router
@@ -32,6 +33,7 @@ app.include_router(outline_router)
 app.include_router(projects_router)
 app.include_router(scripts_router)
 app.include_router(project_pages_router)
+app.include_router(image_prompts_router)
 
 
 @app.get("/health")

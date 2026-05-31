@@ -45,6 +45,7 @@ class ScriptPageResponse(BaseModel):
     task_id: int | None = None
     page_no: int
     script: str | None
+    image_prompt: str | None
     status: str
     created_at: datetime
     updated_at: datetime
