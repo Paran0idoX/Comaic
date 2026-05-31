@@ -126,6 +126,17 @@ COMFYUI_BASE_URL=http://127.0.0.1:8188
 - 大纲版本保存逻辑放在 Service/Repository/API 层；只有主 Agent 调用子 Agent 并产出新大纲时，才保存为新的 `outline_version`。
 - Prompt 放在 `backend/prompts/outline_conversation_prompt.md`、`backend/prompts/outline_update_prompt.md`、`backend/prompts/outline_finalize_prompt.md` 和 `backend/prompts/outline_snapshot_prompt.md`，不要硬编码在 Python 中。
 
+## ScriptDeepAgent 约定
+
+`backend/agents/script_deep_agent.py` 负责分页漫画脚本生成，不负责落库。
+
+- 分页脚本使用 `deepagents.create_deep_agent` 实现主 Agent + 子 Agent 编排。
+- 子 Agent 包含故事节奏划分、分页脚本编写、监督审查三类职责。
+- 单页生成可以跳过整体节奏划分，但仍要经过监督审查。
+- 批量生成通过 SSE 暴露长任务进度，脚本任务状态保存到 `script_generation_task`。
+- 生成结果保存到 `comic_page.script`，页面状态使用 `ComicPageStatus.SCRIPT_READY`。
+- 脚本 Agent prompt 放在 `backend/prompts/script_deep_main_prompt.md`、`script_pacing_prompt.md`、`script_writer_prompt.md` 和 `script_supervisor_prompt.md`。
+
 ## 开发与验证
 
 后端安装依赖：

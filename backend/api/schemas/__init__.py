@@ -14,6 +14,14 @@ from backend.api.schemas.project import (
     ProjectResponse,
     UpdateProjectRequest,
 )
+from backend.api.schemas.script import (
+    GenerateBatchScriptRequest,
+    GenerateSinglePageScriptRequest,
+    ScriptPageListResponse,
+    ScriptPageResponse,
+    ScriptTaskResponse,
+    SinglePageScriptResponse,
+)
 
 __all__ = [
     "CreateOutlineSessionRequest",
@@ -26,4 +34,10 @@ __all__ = [
     "ProjectListResponse",
     "ProjectResponse",
     "UpdateProjectRequest",
+    "GenerateBatchScriptRequest",
+    "GenerateSinglePageScriptRequest",
+    "ScriptPageListResponse",
+    "ScriptPageResponse",
+    "ScriptTaskResponse",
+    "SinglePageScriptResponse",
 ]

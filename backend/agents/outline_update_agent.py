@@ -1,9 +1,13 @@
+import logging
 from typing import Any
 
 from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
 from backend.utils.prompt_loader import PromptLoader
+
+
+logger = logging.getLogger(__name__)
 
 
 class OutlineUpdateAgent:
@@ -19,6 +23,7 @@ class OutlineUpdateAgent:
 
         self.llm = llm or self._default_llm()
         self.prompt = PromptLoader.load(prompt_name)
+        logger.info("Initializing OutlineUpdateAgent prompt=%s", prompt_name)
         self._agent = create_agent(
             model=self.llm,
             tools=[],
@@ -36,6 +41,12 @@ class OutlineUpdateAgent:
     ) -> str:
         """调用子 Agent 更新大纲，调用方负责保存返回结果。"""
 
+        logger.info(
+            "OutlineUpdateAgent update started outline_chars=%s user_prompt_chars=%s reason_chars=%s",
+            len(current_outline),
+            len(user_prompt),
+            len(update_reason),
+        )
         user_content = self._build_user_content(
             current_outline=current_outline,
             user_prompt=user_prompt,
@@ -45,7 +56,9 @@ class OutlineUpdateAgent:
         result = await self._agent.ainvoke(
             {"messages": [HumanMessage(content=user_content)]},
         )
-        return self._last_ai_message(result["messages"])
+        outline = self._last_ai_message(result["messages"])
+        logger.info("OutlineUpdateAgent update completed outline_chars=%s", len(outline))
+        return outline
 
     @staticmethod
     def _build_user_content(
