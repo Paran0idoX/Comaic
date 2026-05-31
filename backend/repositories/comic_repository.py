@@ -7,9 +7,16 @@ from backend.models.comic import (
     ComicProject,
     GenerationTask,
     OutlineVersion,
+    ScriptGenerationTask,
     Session as ComicSession,
 )
-from backend.models.enums import ComicPageStatus, OutlineVersionStatus, SessionPurpose
+from backend.models.enums import (
+    ComicPageStatus,
+    OutlineVersionStatus,
+    ScriptGenerationMode,
+    ScriptGenerationTaskStatus,
+    SessionPurpose,
+)
 
 
 class ComicRepository:
@@ -180,6 +187,86 @@ class ComicRepository:
         )
         return list(self.session.scalars(statement))
 
+    def get_outline_version(self, outline_version_id: int) -> OutlineVersion | None:
+        """根据主键读取大纲版本。"""
+
+        return self.session.get(OutlineVersion, outline_version_id)
+
+    def get_active_outline_version_for_project(self, project_id: int) -> OutlineVersion | None:
+        """读取项目最近大纲会话中的 active 大纲版本。"""
+
+        statement = (
+            select(OutlineVersion)
+            .join(ComicSession, OutlineVersion.session_id == ComicSession.id)
+            .where(
+                ComicSession.project_id == project_id,
+                ComicSession.purpose == SessionPurpose.OUTLINE,
+                OutlineVersion.status == OutlineVersionStatus.ACTIVE,
+            )
+            .order_by(OutlineVersion.created_at.desc(), OutlineVersion.id.desc())
+            .limit(1)
+        )
+        return self.session.scalar(statement)
+
+    def create_script_task(
+        self,
+        *,
+        project_id: int,
+        mode: ScriptGenerationMode,
+        total_pages: int,
+        outline_version_id: int | None = None,
+        target_page_no: int | None = None,
+        user_requirement: str | None = None,
+        status: ScriptGenerationTaskStatus = ScriptGenerationTaskStatus.PENDING,
+    ) -> ScriptGenerationTask:
+        """创建分页脚本生成任务，用于跟踪单页或批量生成状态。"""
+
+        project = self.session.get(ComicProject, project_id)
+        if project is None:
+            raise ValueError(f"ComicProject not found: {project_id}")
+
+        task = ScriptGenerationTask(
+            project_id=project_id,
+            outline_version_id=outline_version_id,
+            status=status,
+            mode=mode,
+            total_pages=total_pages,
+            target_page_no=target_page_no,
+            user_requirement=user_requirement,
+        )
+        self.session.add(task)
+        self.session.commit()
+        self.session.refresh(task)
+        return task
+
+    def get_script_task(self, task_id: int) -> ScriptGenerationTask | None:
+        """根据主键读取分页脚本生成任务。"""
+
+        return self.session.get(ScriptGenerationTask, task_id)
+
+    def update_script_task(
+        self,
+        *,
+        task_id: int,
+        status: ScriptGenerationTaskStatus | None = None,
+        section_plan: str | None = None,
+        error_message: str | None = None,
+    ) -> ScriptGenerationTask:
+        """更新分页脚本任务状态和过程信息。"""
+
+        task = self.session.get(ScriptGenerationTask, task_id)
+        if task is None:
+            raise ValueError(f"ScriptGenerationTask not found: {task_id}")
+        if status is not None:
+            task.status = status
+        if section_plan is not None:
+            task.section_plan = section_plan
+        if error_message is not None:
+            task.error_message = error_message
+        self.session.commit()
+        self.session.refresh(task)
+        return task
+
     def list_project_pages(self, project_id: int) -> list[ComicPage]:
         """按页码顺序读取某个项目的全部页面。"""
 
@@ -200,6 +287,33 @@ class ComicRepository:
 
         page = ComicPage(project_id=project_id, page_no=page_no)
         self.session.add(page)
+        self.session.commit()
+        self.session.refresh(page)
+        return page
+
+    def get_project_page(self, *, project_id: int, page_no: int) -> ComicPage | None:
+        """读取项目下指定页码的页面。"""
+
+        statement = select(ComicPage).where(
+            ComicPage.project_id == project_id,
+            ComicPage.page_no == page_no,
+        )
+        return self.session.scalar(statement)
+
+    def upsert_page_script(self, *, project_id: int, page_no: int, script: str) -> ComicPage:
+        """按页码创建或更新页面脚本，并标记为脚本已生成。"""
+
+        project = self.session.get(ComicProject, project_id)
+        if project is None:
+            raise ValueError(f"ComicProject not found: {project_id}")
+
+        page = self.get_project_page(project_id=project_id, page_no=page_no)
+        if page is None:
+            page = ComicPage(project_id=project_id, page_no=page_no)
+            self.session.add(page)
+
+        page.script = script
+        page.status = ComicPageStatus.SCRIPT_READY
         self.session.commit()
         self.session.refresh(page)
         return page

@@ -1,5 +1,6 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,7 @@ from backend.utils.prompt_loader import PromptLoader
 
 USER_PROMPT_START = "<user_prompt>"
 USER_PROMPT_END = "</user_prompt>"
+logger = logging.getLogger(__name__)
 
 
 class OutlineAgent:
@@ -32,6 +34,7 @@ class OutlineAgent:
 
         self.llm = llm or self._default_llm()
         self.memory_path = Path(memory_path)
+        logger.info("Initializing OutlineAgent memory_path=%s", self.memory_path)
         self.conversation_prompt = PromptLoader.load(conversation_prompt_name)
         self.finalize_prompt = PromptLoader.load(finalize_prompt_name)
         self.snapshot_prompt = PromptLoader.load(snapshot_prompt_name)
@@ -46,6 +49,7 @@ class OutlineAgent:
     async def __aenter__(self) -> "OutlineAgent":
         """打开 SQLite checkpoint，并基于 create_agent 构建可对话 Agent。"""
 
+        logger.info("Opening OutlineAgent checkpoint memory_path=%s", self.memory_path)
         self.memory_path.parent.mkdir(parents=True, exist_ok=True)
         self._memory_context = AsyncSqliteSaver.from_conn_string(str(self.memory_path))
         self._checkpointer = await self._memory_context.__aenter__()
@@ -61,6 +65,7 @@ class OutlineAgent:
             )
         ]
         self._agent = self._create_agent()
+        logger.info("OutlineAgent ready tools=%s", [tool.name for tool in self._tools])
         return self
 
     async def __aexit__(self, exc_type, exc_value, traceback) -> None:
@@ -68,6 +73,7 @@ class OutlineAgent:
 
         if self._memory_context is not None:
             await self._memory_context.__aexit__(exc_type, exc_value, traceback)
+        logger.info("OutlineAgent checkpoint closed memory_path=%s", self.memory_path)
 
     async def chat(
         self,
@@ -81,17 +87,32 @@ class OutlineAgent:
         self._current_outline = current_outline
         self._current_user_prompt = user_message
         self._last_updated_outline = None
+        logger.info(
+            "OutlineAgent chat started thread_id=%s user_message_chars=%s current_outline_chars=%s",
+            thread_id,
+            len(user_message),
+            len(current_outline),
+        )
         # 当前大纲作为本轮临时 system context 注入，不写入 checkpoint 的普通对话历史。
         self._agent = self._create_agent(current_outline=current_outline)
 
+        chunk_count = 0
         async for chunk in self._stream(thread_id=thread_id, user_message=user_message):
+            chunk_count += 1
             yield chunk
+        logger.info(
+            "OutlineAgent chat completed thread_id=%s chunks=%s outline_updated=%s",
+            thread_id,
+            chunk_count,
+            self._last_updated_outline is not None,
+        )
 
     def consume_updated_outline(self) -> str | None:
         """取出本轮子 Agent 生成的大纲；取出后清空，避免跨轮误用。"""
 
         updated_outline = self._last_updated_outline
         self._last_updated_outline = None
+        logger.info("OutlineAgent consumed updated outline present=%s", updated_outline is not None)
         return updated_outline
 
     def _create_agent(self, *, current_outline: str = ""):
@@ -130,6 +151,7 @@ class OutlineAgent:
         """基于当前对话历史生成展示用大纲快照，不污染原会话记忆。"""
 
         self._ensure_ready()
+        logger.info("OutlineAgent snapshot generation started thread_id=%s", thread_id)
         messages = await self._get_thread_messages(thread_id=thread_id)
         conversation = self._format_messages(messages)
 
@@ -143,12 +165,20 @@ class OutlineAgent:
         result = await snapshot_agent.ainvoke(
             {"messages": [HumanMessage(content=conversation)]},
         )
-        return self._last_ai_message(result["messages"])
+        outline = self._last_ai_message(result["messages"])
+        logger.info(
+            "OutlineAgent snapshot generation completed thread_id=%s message_count=%s outline_chars=%s",
+            thread_id,
+            len(messages),
+            len(outline),
+        )
+        return outline
 
     async def get_conversation_messages(self, *, thread_id: str) -> list[dict[str, str]]:
         """读取 checkpoint 中的历史对话，供前端重新进入页面时恢复聊天记录。"""
 
         self._ensure_ready()
+        logger.info("OutlineAgent loading conversation messages thread_id=%s", thread_id)
         messages = await self._get_thread_messages(thread_id=thread_id)
         conversation_messages = []
         for message in messages:
@@ -167,11 +197,21 @@ class OutlineAgent:
                         "content": self._display_message_text(message),
                     }
                 )
+        logger.info(
+            "OutlineAgent loaded conversation messages thread_id=%s count=%s",
+            thread_id,
+            len(conversation_messages),
+        )
         return conversation_messages
 
     async def _update_outline_tool(self, update_reason: str) -> str:
         """主 Agent 调用的本地工具：委托子 Agent 生成新大纲，但不直接落库。"""
 
+        logger.info(
+            "OutlineAgent update_outline tool called reason_chars=%s current_outline_chars=%s",
+            len(update_reason),
+            len(self._current_outline),
+        )
         messages = []
         if self._current_user_prompt:
             messages.append(HumanMessage(content=self._current_user_prompt))
@@ -184,6 +224,7 @@ class OutlineAgent:
             conversation_context=conversation_context,
         )
         self._last_updated_outline = updated_outline
+        logger.info("OutlineAgent update_outline tool completed outline_chars=%s", len(updated_outline))
         return "大纲已更新。请用简短自然的话告诉用户你已经根据本轮信息整理了大纲，不要复述完整大纲。"
 
     async def clear_thread(self, *, thread_id: str) -> None:
@@ -196,31 +237,38 @@ class OutlineAgent:
         """从 LangGraph checkpoint 读取某个 thread_id 的消息列表。"""
 
         self._ensure_ready()
+        logger.debug("OutlineAgent reading checkpoint state thread_id=%s", thread_id)
         snapshot = await self._agent.aget_state(  # type: ignore[union-attr]
             config={"configurable": {"thread_id": thread_id}},
         )
         messages = snapshot.values.get("messages", [])
-        return [
+        result = [
             message
             for message in messages
             if isinstance(message, BaseMessage)
         ]
+        logger.debug("OutlineAgent checkpoint state loaded thread_id=%s message_count=%s", thread_id, len(result))
+        return result
 
     async def _invoke(self, *, thread_id: str, user_message: str) -> str:
         """调用底层 create_agent，并用 thread_id 选择对应的会话记忆。"""
 
         self._ensure_ready()
+        logger.info("OutlineAgent invoke started thread_id=%s user_message_chars=%s", thread_id, len(user_message))
         result = await self._agent.ainvoke(  # type: ignore[union-attr]
             {"messages": [HumanMessage(content=user_message)]},
             # LangGraph checkpoint 用 thread_id 区分不同用户/项目的对话历史。
             config={"configurable": {"thread_id": thread_id}},
         )
-        return self._last_ai_message(result["messages"])
+        text = self._last_ai_message(result["messages"])
+        logger.info("OutlineAgent invoke completed thread_id=%s response_chars=%s", thread_id, len(text))
+        return text
 
     async def _stream(self, *, thread_id: str, user_message: str) -> AsyncIterator[str]:
         """调用底层 create_agent 的事件流，只向外暴露模型生成文本。"""
 
         self._ensure_ready()
+        logger.debug("OutlineAgent stream opened thread_id=%s", thread_id)
         async for event in self._agent.astream_events(  # type: ignore[union-attr]
             {"messages": [HumanMessage(content=user_message)]},
             # LangGraph checkpoint 用 thread_id 区分不同用户/项目的对话历史。
@@ -237,6 +285,7 @@ class OutlineAgent:
             text = self._chunk_text(chunk)
             if text:
                 yield text
+        logger.debug("OutlineAgent stream closed thread_id=%s", thread_id)
 
     def _ensure_ready(self) -> None:
         """确保 Agent 已经通过 async with 完成初始化。"""
