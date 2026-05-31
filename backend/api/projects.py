@@ -9,7 +9,7 @@ from backend.api.schemas.project import (
 from backend.models.comic import ComicProject
 from backend.models.database import SessionLocal
 from backend.repositories.comic_repository import ComicRepository
-from backend.services.comic_service import ComicService
+from backend.services.project_service import ProjectService
 
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
@@ -30,7 +30,7 @@ def create_service() -> tuple:
     """创建项目服务及其数据库会话；由路由函数负责关闭会话。"""
 
     db_session = SessionLocal()
-    return db_session, ComicService(ComicRepository(db_session))
+    return db_session, ProjectService(ComicRepository(db_session))
 
 
 @router.get("", response_model=ProjectListResponse)

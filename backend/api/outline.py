@@ -16,7 +16,7 @@ from backend.models.comic import OutlineVersion
 from backend.models.database import SessionLocal
 from backend.models.enums import SessionPurpose
 from backend.repositories.comic_repository import ComicRepository
-from backend.services.comic_service import ComicService
+from backend.services.outline_service import OutlineService
 
 
 router = APIRouter(prefix="/api/outline", tags=["outline"])
@@ -48,7 +48,7 @@ def create_outline_session(request: CreateOutlineSessionRequest) -> OutlineSessi
     """创建一个关联项目的大纲会话，并返回前端后续使用的 thread_id。"""
 
     with SessionLocal() as db_session:
-        service = ComicService(ComicRepository(db_session))
+        service = OutlineService(ComicRepository(db_session))
         try:
             session = service.create_outline_session(project_id=request.project_id)
         except ValueError as exc:
@@ -69,7 +69,7 @@ async def resolve_outline_session(
     """复用项目最近的大纲会话；没有会话时创建一个新的。"""
 
     with SessionLocal() as db_session:
-        service = ComicService(ComicRepository(db_session))
+        service = OutlineService(ComicRepository(db_session))
         try:
             session = service.get_or_create_outline_session(project_id=request.project_id)
             versions = service.list_outline_versions(session_id=session.id)
@@ -111,7 +111,7 @@ def stream_outline_chat(request: OutlineChatStreamRequest) -> EventSourceRespons
     async def event_generator():
         with SessionLocal() as db_session:
             repository = ComicRepository(db_session)
-            service = ComicService(repository)
+            service = OutlineService(repository)
             session = repository.get_session_by_thread_id(request.thread_id)
             if session is None:
                 yield sse_event("error", {"message": "Session not found"})

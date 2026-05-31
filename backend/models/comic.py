@@ -55,6 +55,11 @@ class ComicProject(TimestampMixin, Base):
         back_populates="project",
         cascade="all, delete-orphan",
     )
+    # 大纲版本直接归属于项目；Session 只负责承载 Agent 对话上下文。
+    outline_versions: Mapped[list["OutlineVersion"]] = relationship(
+        back_populates="project",
+        cascade="all, delete-orphan",
+    )
     # 项目被硬删除时，关联任务也应删除，避免任务指向不存在的项目。
     tasks: Mapped[list["GenerationTask"]] = relationship(
         back_populates="project",
@@ -99,6 +104,7 @@ class OutlineVersion(Base):
     __tablename__ = "outline_version"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("comic_project.id"), index=True)
     session_id: Mapped[int] = mapped_column(ForeignKey("session.id"), index=True)
     version_no: Mapped[int] = mapped_column(Integer)
     content: Mapped[str] = mapped_column(Text)
@@ -108,7 +114,11 @@ class OutlineVersion(Base):
     )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
+    project: Mapped["ComicProject"] = relationship(back_populates="outline_versions")
     session: Mapped["Session"] = relationship(back_populates="outline_versions")
+    script_tasks: Mapped[list["ScriptGenerationTask"]] = relationship(
+        back_populates="outline_version",
+    )
 
 
 class ComicPage(TimestampMixin, Base):
@@ -118,6 +128,11 @@ class ComicPage(TimestampMixin, Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("comic_project.id"), index=True)
+    section_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("script_section.id"),
+        nullable=True,
+        index=True,
+    )
     page_no: Mapped[int] = mapped_column(Integer)
     script: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     image_prompt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -132,6 +147,7 @@ class ComicPage(TimestampMixin, Base):
     )
 
     project: Mapped["ComicProject"] = relationship(back_populates="pages")
+    section: Mapped[Optional["ScriptSection"]] = relationship(back_populates="pages")
     images: Mapped[list["ComicImage"]] = relationship(
         back_populates="page",
         cascade="all, delete-orphan",
@@ -211,4 +227,27 @@ class ScriptGenerationTask(TimestampMixin, Base):
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     project: Mapped["ComicProject"] = relationship(back_populates="script_tasks")
-    outline_version: Mapped[Optional["OutlineVersion"]] = relationship()
+    outline_version: Mapped[Optional["OutlineVersion"]] = relationship(
+        back_populates="script_tasks",
+    )
+    sections: Mapped[list["ScriptSection"]] = relationship(
+        back_populates="task",
+        cascade="all, delete-orphan",
+    )
+
+
+class ScriptSection(TimestampMixin, Base):
+    """分页脚本分段表：保存一次脚本任务里的故事节奏划分。"""
+
+    __tablename__ = "script_section"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("script_generation_task.id"), index=True)
+    section_no: Mapped[int] = mapped_column(Integer)
+    page_start: Mapped[int] = mapped_column(Integer)
+    page_end: Mapped[int] = mapped_column(Integer)
+    title: Mapped[str] = mapped_column(String(255), default="")
+    description: Mapped[str] = mapped_column(Text, default="")
+
+    task: Mapped["ScriptGenerationTask"] = relationship(back_populates="sections")
+    pages: Mapped[list["ComicPage"]] = relationship(back_populates="section")

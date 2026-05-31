@@ -24,6 +24,7 @@ class ScriptGenerationTaskStatus(str, Enum):
 
     PENDING = "pending"
     RUNNING = "running"
+    SUSPENDED = "suspended"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
 

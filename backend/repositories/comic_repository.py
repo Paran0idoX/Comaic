@@ -7,6 +7,7 @@ from backend.models.comic import (
     ComicProject,
     GenerationTask,
     OutlineVersion,
+    ScriptSection,
     ScriptGenerationTask,
     Session as ComicSession,
 )
@@ -155,6 +156,7 @@ class ComicRepository:
             version.status = OutlineVersionStatus.ARCHIVED
 
         outline_version = OutlineVersion(
+            project_id=session.project_id,
             session_id=session_id,
             version_no=next_version_no,
             content=content,
@@ -197,10 +199,8 @@ class ComicRepository:
 
         statement = (
             select(OutlineVersion)
-            .join(ComicSession, OutlineVersion.session_id == ComicSession.id)
             .where(
-                ComicSession.project_id == project_id,
-                ComicSession.purpose == SessionPurpose.OUTLINE,
+                OutlineVersion.project_id == project_id,
                 OutlineVersion.status == OutlineVersionStatus.ACTIVE,
             )
             .order_by(OutlineVersion.created_at.desc(), OutlineVersion.id.desc())
@@ -239,10 +239,210 @@ class ComicRepository:
         self.session.refresh(task)
         return task
 
+    def upsert_script_section(
+        self,
+        *,
+        task_id: int,
+        section_no: int,
+        page_start: int,
+        page_end: int,
+        title: str = "",
+        description: str = "",
+    ) -> ScriptSection:
+        """按任务和分段编号创建或更新故事节奏分段。"""
+
+        task = self.session.get(ScriptGenerationTask, task_id)
+        if task is None:
+            raise ValueError(f"ScriptGenerationTask not found: {task_id}")
+
+        section = self.get_script_section_by_no(task_id=task_id, section_no=section_no)
+        if section is None:
+            section = ScriptSection(
+                task_id=task_id,
+                section_no=section_no,
+                page_start=page_start,
+                page_end=page_end,
+                title=title,
+                description=description,
+            )
+            self.session.add(section)
+        else:
+            section.page_start = page_start
+            section.page_end = page_end
+            section.title = title
+            section.description = description
+
+        self.session.commit()
+        self.session.refresh(section)
+        return section
+
+    def get_script_section_by_no(self, *, task_id: int, section_no: int) -> ScriptSection | None:
+        """读取某个脚本任务下指定编号的分段。"""
+
+        statement = select(ScriptSection).where(
+            ScriptSection.task_id == task_id,
+            ScriptSection.section_no == section_no,
+        )
+        return self.session.scalar(statement)
+
+    def list_script_sections(self, task_id: int) -> list[ScriptSection]:
+        """按分段编号读取脚本任务下的全部分段。"""
+
+        statement = (
+            select(ScriptSection)
+            .where(ScriptSection.task_id == task_id)
+            .order_by(ScriptSection.section_no)
+        )
+        return list(self.session.scalars(statement))
+
+    def has_script_sections(self, task_id: int) -> bool:
+        """判断任务是否已有分段；用于实现分段计划首次注册后锁定。"""
+
+        statement = select(ScriptSection.id).where(ScriptSection.task_id == task_id).limit(1)
+        return self.session.scalar(statement) is not None
+
+    def get_script_section_signature(self, task_id: int) -> tuple[tuple[int, int, int], ...] | None:
+        """从数据库读取分段锁定签名，只比较分段编号和页码范围。"""
+
+        sections = self.list_script_sections(task_id)
+        if not sections:
+            return None
+        return tuple(
+            (section.section_no, section.page_start, section.page_end)
+            for section in sections
+        )
+
+    def list_script_task_pages(self, task_id: int) -> list[ComicPage]:
+        """读取某次脚本任务下已经挂载到分段的页面脚本。"""
+
+        statement = (
+            select(ComicPage)
+            .join(ScriptSection, ComicPage.section_id == ScriptSection.id)
+            .where(ScriptSection.task_id == task_id)
+            .order_by(ComicPage.page_no)
+        )
+        return list(self.session.scalars(statement))
+
+    def list_script_task_page_nos(self, task_id: int) -> set[int]:
+        """读取某次任务已经保存的页码集合，供兜底保存时去重。"""
+
+        return {page.page_no for page in self.list_script_task_pages(task_id) if page.script}
+
+    def get_script_task_page(self, *, task_id: int, page_no: int) -> ComicPage | None:
+        """读取某次任务下指定页码的页面脚本。"""
+
+        statement = (
+            select(ComicPage)
+            .join(ScriptSection, ComicPage.section_id == ScriptSection.id)
+            .where(
+                ScriptSection.task_id == task_id,
+                ComicPage.page_no == page_no,
+            )
+            .limit(1)
+        )
+        return self.session.scalar(statement)
+
+    def list_script_section_page_nos(self, section_id: int) -> set[int]:
+        """读取某个分段下已有脚本的页码集合，用于判断分段完成度。"""
+
+        statement = select(ComicPage.page_no).where(
+            ComicPage.section_id == section_id,
+            ComicPage.script.is_not(None),
+        )
+        return set(self.session.scalars(statement))
+
+    def is_script_section_completed(self, section_id: int) -> bool:
+        """判断分段内 page_start 到 page_end 的页面脚本是否已经全部落库。"""
+
+        section = self.session.get(ScriptSection, section_id)
+        if section is None:
+            raise ValueError(f"ScriptSection not found: {section_id}")
+
+        saved_page_nos = self.list_script_section_page_nos(section_id)
+        expected_page_nos = set(range(section.page_start, section.page_end + 1))
+        return expected_page_nos.issubset(saved_page_nos)
+
+    def delete_script_task_sections(self, task_id: int) -> None:
+        """硬删除脚本任务下全部分段，以及这些分段下的页面行。"""
+
+        task = self.session.get(ScriptGenerationTask, task_id)
+        if task is None:
+            raise ValueError(f"ScriptGenerationTask not found: {task_id}")
+
+        sections = self.list_script_sections(task_id)
+        if not sections:
+            return
+
+        pages = [page for section in sections for page in section.pages]
+        page_ids = [page.id for page in pages]
+        if page_ids:
+            # 出图任务是历史记录，删除页面前先断开外键，避免引用已删除页面。
+            tasks = self.session.scalars(
+                select(GenerationTask).where(GenerationTask.page_id.in_(page_ids))
+            )
+            for generation_task in tasks:
+                generation_task.page_id = None
+
+        for page in pages:
+            # 断开最终选中图引用后再删除页面，让候选图级联删除更稳定。
+            page.selected_image_id = None
+            self.session.delete(page)
+
+        for section in sections:
+            self.session.delete(section)
+
+        self.session.commit()
+
+    def find_section_for_page(self, *, task_id: int, page_no: int) -> ScriptSection | None:
+        """按页码查找所属分段，用于人工新增脚本时自动挂载分段。"""
+
+        statement = (
+            select(ScriptSection)
+            .where(
+                ScriptSection.task_id == task_id,
+                ScriptSection.page_start <= page_no,
+                ScriptSection.page_end >= page_no,
+            )
+            .order_by(ScriptSection.section_no)
+            .limit(1)
+        )
+        return self.session.scalar(statement)
+
+    def get_latest_script_task_for_project(self, project_id: int) -> ScriptGenerationTask | None:
+        """读取项目最近一次脚本任务，人工新增页面时可复用其分段。"""
+
+        statement = (
+            select(ScriptGenerationTask)
+            .where(ScriptGenerationTask.project_id == project_id)
+            .order_by(ScriptGenerationTask.created_at.desc(), ScriptGenerationTask.id.desc())
+            .limit(1)
+        )
+        return self.session.scalar(statement)
+
     def get_script_task(self, task_id: int) -> ScriptGenerationTask | None:
         """根据主键读取分页脚本生成任务。"""
 
         return self.session.get(ScriptGenerationTask, task_id)
+
+    def get_script_task_status(self, task_id: int) -> ScriptGenerationTaskStatus | None:
+        """从数据库刷新读取脚本任务状态，供长 SSE 连接感知外部暂停。"""
+
+        # 长任务持有的 session 可能缓存了旧 ORM 对象；先过期再读取最新状态。
+        self.session.expire_all()
+        task = self.session.get(ScriptGenerationTask, task_id)
+        return None if task is None else task.status
+
+    def suspend_script_task(self, task_id: int) -> ScriptGenerationTask:
+        """暂停脚本任务；接口保持幂等，非 running 任务直接返回当前状态。"""
+
+        task = self.session.get(ScriptGenerationTask, task_id)
+        if task is None:
+            raise ValueError(f"ScriptGenerationTask not found: {task_id}")
+        if task.status == ScriptGenerationTaskStatus.RUNNING:
+            task.status = ScriptGenerationTaskStatus.SUSPENDED
+            self.session.commit()
+            self.session.refresh(task)
+        return task
 
     def update_script_task(
         self,
@@ -300,7 +500,14 @@ class ComicRepository:
         )
         return self.session.scalar(statement)
 
-    def upsert_page_script(self, *, project_id: int, page_no: int, script: str) -> ComicPage:
+    def upsert_page_script(
+        self,
+        *,
+        project_id: int,
+        page_no: int,
+        script: str,
+        section_id: int | None = None,
+    ) -> ComicPage:
         """按页码创建或更新页面脚本，并标记为脚本已生成。"""
 
         project = self.session.get(ComicProject, project_id)
@@ -309,14 +516,55 @@ class ComicRepository:
 
         page = self.get_project_page(project_id=project_id, page_no=page_no)
         if page is None:
-            page = ComicPage(project_id=project_id, page_no=page_no)
+            page = ComicPage(project_id=project_id, page_no=page_no, section_id=section_id)
             self.session.add(page)
+        elif section_id is not None:
+            page.section_id = section_id
 
         page.script = script
         page.status = ComicPageStatus.SCRIPT_READY
         self.session.commit()
         self.session.refresh(page)
         return page
+
+    def clear_page_script(self, *, project_id: int, page_no: int) -> ComicPage:
+        """清空指定页脚本；保留页面记录，便于后续继续关联 Prompt 和图片。"""
+
+        page = self.get_project_page(project_id=project_id, page_no=page_no)
+        if page is None:
+            raise ValueError(f"ComicPage not found for project {project_id}: {page_no}")
+
+        page.script = None
+        page.status = ComicPageStatus.DRAFT
+        self.session.commit()
+        self.session.refresh(page)
+        return page
+
+    def delete_project_pages(self, project_id: int) -> None:
+        """硬删除项目下全部页面行，并解除出图任务对这些页面的引用。"""
+
+        project = self.session.get(ComicProject, project_id)
+        if project is None:
+            raise ValueError(f"ComicProject not found: {project_id}")
+
+        pages = self.list_project_pages(project_id)
+        if not pages:
+            return
+
+        page_ids = [page.id for page in pages]
+        # 出图任务是任务历史，不随页面批量删除一起删除；先置空外键避免约束冲突。
+        tasks = self.session.scalars(
+            select(GenerationTask).where(GenerationTask.page_id.in_(page_ids))
+        )
+        for task in tasks:
+            task.page_id = None
+
+        for page in pages:
+            # 页面和候选图之间存在最终选中图的额外引用，删除前先断开更稳妥。
+            page.selected_image_id = None
+            self.session.delete(page)
+
+        self.session.commit()
 
     def update_page_script(self, page_id: int, script: str) -> ComicPage:
         """保存页面脚本，并把页面状态推进到脚本已生成。"""

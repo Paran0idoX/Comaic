@@ -380,9 +380,9 @@ class OutlineAgent:
     def _default_llm() -> Any:
         """懒加载默认 DeepSeek ChatModel，避免导入模块时立刻校验 .env。"""
 
-        from backend.model_clients.deepseek import deepseek_chat_model
+        from backend.llm_clients.deepseek import deepseek_thinking_chat_model
 
-        return deepseek_chat_model
+        return deepseek_thinking_chat_model
 
 
 @asynccontextmanager

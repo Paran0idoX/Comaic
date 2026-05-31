@@ -37,7 +37,7 @@ const activePath = computed(() => route.path)
         <el-icon><ChatLineRound /></el-icon>
         <span>{{ t('nav.outline') }}</span>
       </el-menu-item>
-      <el-menu-item index="/scripts" disabled>
+      <el-menu-item index="/scripts">
         <el-icon><Tickets /></el-icon>
         <span>{{ t('nav.scripts') }}</span>
       </el-menu-item>
