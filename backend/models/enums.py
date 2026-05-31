@@ -47,3 +47,10 @@ class OutlineVersionStatus(str, Enum):
 
     ACTIVE = "active"
     ARCHIVED = "archived"
+
+
+class ImagePromptPresetKind(str, Enum):
+    """图片 Prompt 配置类型，用于区分脚本转图 Prompt 和负向 Prompt。"""
+
+    SCRIPT_TO_IMAGE_SYSTEM_PROMPT = "script_to_image_system_prompt"
+    NEGATIVE_PROMPT = "negative_prompt"

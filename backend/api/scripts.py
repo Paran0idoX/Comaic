@@ -70,6 +70,7 @@ def page_to_response(page: ComicPage) -> ScriptPageResponse:
         task_id=page.section.task_id if page.section is not None else None,
         page_no=page.page_no,
         script=page.script,
+        image_prompt=page.image_prompt,
         status=page.status.value,
         created_at=page.created_at,
         updated_at=page.updated_at,

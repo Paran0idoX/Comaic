@@ -6,6 +6,7 @@ export type ScriptPage = {
   task_id: number | null
   page_no: number
   script: string | null
+  image_prompt: string | null
   status: string
   created_at: string
   updated_at: string
