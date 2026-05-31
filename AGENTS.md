@@ -28,7 +28,7 @@ comaic/
 
 - `backend/main.py`：FastAPI 入口，当前提供启动建表和 `/health`。
 - `backend/agents/`：Agent 层，只负责 LLM 生成、判断或调用工具，不直接写复杂数据库逻辑。
-- `backend/model_clients/`：模型客户端与环境变量读取，例如 Gemini 客户端。
+- `backend/model_clients/`：模型客户端与环境变量读取，例如 DeepSeek 客户端。
 - `backend/prompts/`：system prompt 和 user prompt 模板，Prompt 不要硬编码在 Python 代码里。
 - `backend/tools/`：外部系统封装，例如 `ComfyUIClient`。
 - `backend/models/`：SQLAlchemy ORM 实体、枚举与数据库初始化。
@@ -87,8 +87,8 @@ MVP 核心表位于 `backend/models/comic.py`：
 配置从 `.env` 读取，真实 `.env` 不允许提交到 Git。示例文件位于 `backend/.env.example`：
 
 ```env
-GEMINI_MODEL=gemini-2.5-flash
-GEMINI_KEY=your_gemini_api_key
+DEEPSEEK_MODEL=deepseek-v4-flash
+DEEPSEEK_API_KEY=
 
 DATABASE_URL=sqlite:///data/comaic.sqlite3
 COMFYUI_BASE_URL=http://127.0.0.1:8188
@@ -174,7 +174,7 @@ npm install
 npm run dev
 ```
 
-涉及 Gemini、ComfyUI 或 npm/pip 安装的验证可能调用网络或本地服务，默认不要在导入测试中触发真实生成请求。
+涉及 DeepSeek、ComfyUI 或 npm/pip 安装的验证可能调用网络或本地服务，默认不要在导入测试中触发真实生成请求。
 
 ## 安全注意
 
@@ -182,7 +182,7 @@ npm run dev
 - 避免在异常、print、日志中输出完整 API key。
 - 需要展示 key 状态时，只展示是否存在，或最多展示脱敏后的前后几位。
 - `data/` 中的真实数据库、`outputs/` 中的生成图片不要提交，除非明确是小型 fixture。
-- 网络调用可能产生费用，默认测试应避免实际调用 Gemini。
+- 网络调用可能产生费用，默认测试应避免实际调用 DeepSeek。
 
 ## 给后续代理的工作建议
 

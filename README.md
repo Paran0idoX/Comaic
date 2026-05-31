@@ -24,6 +24,13 @@ pip install -r backend/requirements.txt
 uvicorn backend.main:app --reload
 ```
 
+模型配置写在本地 `.env` 中：
+
+```env
+DEEPSEEK_MODEL=deepseek-v4-flash
+DEEPSEEK_API_KEY=
+```
+
 健康检查：
 
 ```bash
