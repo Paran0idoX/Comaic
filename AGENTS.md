@@ -28,7 +28,7 @@ comaic/
 
 - `backend/main.py`：FastAPI 入口，当前提供启动建表和 `/health`。
 - `backend/agents/`：Agent 层，只负责 LLM 生成、判断或调用工具，不直接写复杂数据库逻辑。
-- `backend/model_clients/`：模型客户端与环境变量读取，例如 DeepSeek 客户端。
+- `backend/llm_clients/`：LLM 客户端与环境变量读取，例如 DeepSeek 客户端。
 - `backend/prompts/`：system prompt 和 user prompt 模板，Prompt 不要硬编码在 Python 代码里。
 - `backend/tools/`：外部系统封装，例如 `ComfyUIClient`。
 - `backend/models/`：SQLAlchemy ORM 实体、枚举与数据库初始化。
@@ -41,6 +41,8 @@ comaic/
 - `frontend/` 使用 Vue 3 + Vite + Element Plus。
 - 当前只放 MVP 占位工作台，后续接入大纲对话、脚本确认、Prompt 确认和图片选择。
 - 前端依赖和脚本写在 `frontend/package.json`。
+- 前端功能如果需要额外 npm 包，可以安装轻量、明确用途的依赖；安装后必须同步更新 `frontend/package.json` 和 `frontend/package-lock.json`，并在完成后运行前端类型检查或构建。
+- LLM 生成的大纲、脚本等富文本内容如果按 Markdown 展示，优先使用成熟 Markdown 渲染库；默认关闭原始 HTML 解析，避免把模型输出当成可执行 HTML。
 
 ## 核心数据模型
 
@@ -72,6 +74,8 @@ MVP 核心表位于 `backend/models/comic.py`：
 - Repository：只处理数据库增删改查，不调用 LLM，也不调用 ComfyUI。
 - Tool：封装外部系统调用，例如 ComfyUI HTTP API，不写业务状态流转。
 - Model client：集中读取模型相关环境变量，避免业务代码散落 API key 读取逻辑。
+  - DeepSeek 客户端拆成两个实例：大纲阶段使用开启 thinking 的 `deepseek_thinking_chat_model`，脚本/工具调用阶段使用关闭 thinking 的 `deepseek_tool_chat_model`。
+  - DeepAgents、`response_format` 或工具调用较多的 Agent 优先使用关闭 thinking 的实例，避免 `tool_choice` 与 thinking 模式冲突。
 
 保持每层轻量。MVP 中可以先用少量类和函数，不要为了“像框架”而增加复杂抽象。
 
@@ -119,6 +123,7 @@ COMFYUI_BASE_URL=http://127.0.0.1:8188
 - 普通对话方法 `chat()` 使用异步流式输出，调用方用 `async for chunk in agent.chat(...)` 接收文本片段。
 - 大纲阶段采用主子 Agent：
   - 主 Agent 负责自然对话、引导用户、判断是否需要更新大纲。
+  - 大纲主 Agent 和大纲更新子 Agent 默认使用 `deepseek_thinking_chat_model`。
   - 当前大纲作为本轮临时 system context 传给主 Agent，不作为用户消息写入 checkpoint。
   - 主 Agent 可以通过本地 tool 调用子 Agent，但不直接落库。
   - 子 Agent 位于 `backend/agents/outline_update_agent.py`，只负责根据当前大纲和用户输入生成新的大纲文本。
@@ -126,16 +131,23 @@ COMFYUI_BASE_URL=http://127.0.0.1:8188
 - 大纲版本保存逻辑放在 Service/Repository/API 层；只有主 Agent 调用子 Agent 并产出新大纲时，才保存为新的 `outline_version`。
 - Prompt 放在 `backend/prompts/outline_conversation_prompt.md`、`backend/prompts/outline_update_prompt.md`、`backend/prompts/outline_finalize_prompt.md` 和 `backend/prompts/outline_snapshot_prompt.md`，不要硬编码在 Python 中。
 
-## ScriptDeepAgent 约定
+## ScriptPlanningAgent / ScriptDeepAgent 约定
 
-`backend/agents/script_deep_agent.py` 负责分页漫画脚本生成，不负责落库。
+`backend/agents/script_planning_agent.py` 负责分页脚本的故事节奏分段规划，不负责落库。
+`backend/agents/script_deep_agent.py` 负责基于已锁定分段生成分页漫画脚本，不负责落库。
 
+- 分段规划 Agent 独立于 ScriptDeepAgent，只输出 `section_plan`，不使用工具。
+- 分段计划必须由 Service 校验并落库锁定后，才能进入页面脚本生成阶段。
 - 分页脚本使用 `deepagents.create_deep_agent` 实现主 Agent + 子 Agent 编排。
-- 子 Agent 包含故事节奏划分、分页脚本编写、监督审查三类职责。
+- 分页脚本 Agent 默认使用 `deepseek_tool_chat_model`，即关闭 thinking 的 DeepSeek 实例。
+- ScriptDeepAgent 的子 Agent 只包含分页脚本编写、监督审查；不包含故事节奏划分。
+- ScriptDeepAgent 不允许注册或修改分段计划，不暴露 `register_section_plan` 类工具。
+- 批量脚本生成由 Service 遍历已锁定分段，逐段调用 ScriptDeepAgent；Agent 每次只生成当前分段，不能自行选择或回退到其他分段。
+- 当前分段脚本必须先由 Service 校验页码完整性、连续性和字段完整性，校验通过后才按 section 粒度批量落库。
 - 单页生成可以跳过整体节奏划分，但仍要经过监督审查。
 - 批量生成通过 SSE 暴露长任务进度，脚本任务状态保存到 `script_generation_task`。
 - 生成结果保存到 `comic_page.script`，页面状态使用 `ComicPageStatus.SCRIPT_READY`。
-- 脚本 Agent prompt 放在 `backend/prompts/script_deep_main_prompt.md`、`script_pacing_prompt.md`、`script_writer_prompt.md` 和 `script_supervisor_prompt.md`。
+- 脚本 Agent prompt 放在 `backend/prompts/script_planning_prompt.md`、`script_deep_main_prompt.md`、`script_writer_prompt.md` 和 `script_supervisor_prompt.md`。
 
 ## 开发与验证
 
