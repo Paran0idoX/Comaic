@@ -95,8 +95,8 @@ class OutlineUpdateAgent:
 
     @staticmethod
     def _default_llm() -> Any:
-        """懒加载默认 Gemini ChatModel，避免导入模块时立刻校验 .env。"""
+        """懒加载默认 DeepSeek ChatModel，避免导入模块时立刻校验 .env。"""
 
-        from backend.model_clients.gemini import gemini_chat_model
+        from backend.model_clients.deepseek import deepseek_chat_model
 
-        return gemini_chat_model
+        return deepseek_chat_model
