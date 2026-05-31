@@ -19,6 +19,22 @@ class GenerationTaskStatus(str, Enum):
     FAILED = "failed"
 
 
+class ScriptGenerationTaskStatus(str, Enum):
+    """分页脚本生成任务的生命周期状态。"""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+
+class ScriptGenerationMode(str, Enum):
+    """分页脚本生成模式。"""
+
+    SINGLE = "single"
+    BATCH = "batch"
+
+
 class SessionPurpose(str, Enum):
     """通用会话的业务用途。"""
 

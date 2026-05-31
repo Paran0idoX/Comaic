@@ -11,6 +11,8 @@ from backend.models.enums import (
     ComicPageStatus,
     GenerationTaskStatus,
     OutlineVersionStatus,
+    ScriptGenerationMode,
+    ScriptGenerationTaskStatus,
     SessionPurpose,
 )
 
@@ -55,6 +57,11 @@ class ComicProject(TimestampMixin, Base):
     )
     # 项目被硬删除时，关联任务也应删除，避免任务指向不存在的项目。
     tasks: Mapped[list["GenerationTask"]] = relationship(
+        back_populates="project",
+        cascade="all, delete-orphan",
+    )
+    # 分页脚本生成任务独立于出图任务，便于跟踪长任务状态。
+    script_tasks: Mapped[list["ScriptGenerationTask"]] = relationship(
         back_populates="project",
         cascade="all, delete-orphan",
     )
@@ -179,3 +186,29 @@ class GenerationTask(TimestampMixin, Base):
 
     project: Mapped["ComicProject"] = relationship(back_populates="tasks")
     page: Mapped[Optional["ComicPage"]] = relationship(back_populates="tasks")
+
+
+class ScriptGenerationTask(TimestampMixin, Base):
+    """分页脚本生成任务表：记录单页/批量脚本生成的状态。"""
+
+    __tablename__ = "script_generation_task"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("comic_project.id"), index=True)
+    outline_version_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("outline_version.id"),
+        nullable=True,
+    )
+    status: Mapped[ScriptGenerationTaskStatus] = enum_column(
+        ScriptGenerationTaskStatus,
+        default=ScriptGenerationTaskStatus.PENDING,
+    )
+    mode: Mapped[ScriptGenerationMode] = enum_column(ScriptGenerationMode)
+    total_pages: Mapped[int] = mapped_column(Integer)
+    target_page_no: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    user_requirement: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    section_plan: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    project: Mapped["ComicProject"] = relationship(back_populates="script_tasks")
+    outline_version: Mapped[Optional["OutlineVersion"]] = relationship()
