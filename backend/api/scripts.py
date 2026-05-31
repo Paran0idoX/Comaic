@@ -69,7 +69,13 @@ def page_to_response(page: ComicPage) -> ScriptPageResponse:
         section_no=page.section.section_no if page.section is not None else None,
         task_id=page.section.task_id if page.section is not None else None,
         page_no=page.page_no,
-        script=page.script,
+        summary=page.summary,
+        characters=page.characters,
+        clothing=page.clothing,
+        scene=page.scene,
+        composition=page.composition,
+        character_action=page.character_action,
+        dialogue=page.dialogue,
         image_prompt=page.image_prompt,
         status=page.status.value,
         created_at=page.created_at,
@@ -124,7 +130,13 @@ async def generate_single_page_script(
             task_id=task.id,
             page_id=page.id,
             page_no=page.page_no,
-            script=page.script or "",
+            summary=page.summary or "",
+            characters=page.characters or "",
+            clothing=page.clothing or "",
+            scene=page.scene or "",
+            composition=page.composition or "",
+            character_action=page.character_action or "",
+            dialogue=page.dialogue or "",
             status=task.status.value,
         )
 
@@ -238,7 +250,13 @@ def create_page_script(project_id: int, request: CreatePageScriptRequest) -> Scr
             page = service.upsert_manual_page_script(
                 project_id=project_id,
                 page_no=request.page_no,
-                script=request.script,
+                summary=request.summary,
+                characters=request.characters,
+                clothing=request.clothing,
+                scene=request.scene,
+                composition=request.composition,
+                character_action=request.character_action,
+                dialogue=request.dialogue,
             )
         except ValueError as exc:
             raise HTTPException(status_code=value_error_status_code(exc), detail=str(exc)) from exc
@@ -259,7 +277,13 @@ def update_page_script(
             page = service.upsert_manual_page_script(
                 project_id=project_id,
                 page_no=page_no,
-                script=request.script,
+                summary=request.summary,
+                characters=request.characters,
+                clothing=request.clothing,
+                scene=request.scene,
+                composition=request.composition,
+                character_action=request.character_action,
+                dialogue=request.dialogue,
             )
         except ValueError as exc:
             raise HTTPException(status_code=value_error_status_code(exc), detail=str(exc)) from exc

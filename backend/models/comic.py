@@ -148,7 +148,13 @@ class ComicPage(TimestampMixin, Base):
         index=True,
     )
     page_no: Mapped[int] = mapped_column(Integer)
-    script: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    characters: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    clothing: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    scene: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    composition: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    character_action: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    dialogue: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     image_prompt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     status: Mapped[ComicPageStatus] = enum_column(
         ComicPageStatus,

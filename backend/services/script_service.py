@@ -33,19 +33,37 @@ class ScriptService:
         self._get_project(project_id)
         return self.repository.list_project_pages(project_id)
 
-    def upsert_manual_page_script(self, *, project_id: int, page_no: int, script: str) -> ComicPage:
-        """人工新增或更新单页脚本；生成任务结束后由前端编辑使用。"""
+    def upsert_manual_page_script(
+        self,
+        *,
+        project_id: int,
+        page_no: int,
+        summary: str,
+        characters: str,
+        clothing: str,
+        scene: str,
+        composition: str,
+        character_action: str,
+        dialogue: str,
+    ) -> ComicPage:
+        """人工新增或更新结构化单页脚本；生成任务结束后由前端编辑使用。"""
 
         self._get_project(project_id)
-        normalized_script = script.strip()
-        if not normalized_script:
-            raise ValueError("Page script cannot be empty")
+        page_payload = self._normalize_manual_page_payload(
+            summary=summary,
+            characters=characters,
+            clothing=clothing,
+            scene=scene,
+            composition=composition,
+            character_action=character_action,
+            dialogue=dialogue,
+        )
         section = self._resolve_manual_section(project_id=project_id, page_no=page_no)
         return self.repository.upsert_page_script(
             project_id=project_id,
             page_no=page_no,
-            script=normalized_script,
             section_id=section.id,
+            **page_payload,
         )
 
     def clear_page_script(self, *, project_id: int, page_no: int) -> ComicPage:
@@ -115,11 +133,11 @@ class ScriptService:
             page = self.repository.upsert_page_script(
                 project_id=project_id,
                 page_no=page_no,
-                script=self._format_page_script(page_payload),
                 section_id=self._create_single_page_section(
                     task_id=task.id,
                     page_no=page_no,
                 ).id,
+                **self._page_payload_for_save(page_payload),
             )
             self.repository.update_script_task(
                 task_id=task.id,
@@ -461,18 +479,52 @@ class ScriptService:
         raise ValueError(f"Generated script missing page_no: {page_no}")
 
     @staticmethod
-    def _format_page_script(page_payload: dict) -> str:
-        """把结构化页面脚本转换为适合保存展示的中文文本。"""
+    def _normalize_manual_page_payload(
+        *,
+        summary: str,
+        characters: str,
+        clothing: str,
+        scene: str,
+        composition: str,
+        character_action: str,
+        dialogue: str,
+    ) -> dict:
+        """校验人工编辑的结构化脚本，确保保存的数据可直接用于后续图片 Prompt。"""
 
-        return "\n".join(
-            [
-                f"页面目标：{page_payload.get('page_goal', '')}",
-                f"画面内容：{page_payload.get('scene', '')}",
-                f"角色动作：{page_payload.get('character_action', '')}",
-                f"对白或旁白：{page_payload.get('dialogue_or_caption', '')}",
-                f"完整脚本：{page_payload.get('script', '')}",
-            ]
-        ).strip()
+        payload = {
+            "summary": summary.strip(),
+            "characters": characters.strip(),
+            "clothing": clothing.strip(),
+            "scene": scene.strip(),
+            "composition": composition.strip(),
+            "character_action": character_action.strip(),
+            "dialogue": dialogue.strip() or "无",
+        }
+        for field_name in (
+            "summary",
+            "characters",
+            "clothing",
+            "scene",
+            "composition",
+            "character_action",
+        ):
+            if not payload[field_name]:
+                raise ValueError(f"Page field cannot be empty: {field_name}")
+        return payload
+
+    @staticmethod
+    def _page_payload_for_save(page_payload: dict) -> dict:
+        """从 Agent 输出中取出真正落库的页面结构化字段。"""
+
+        return {
+            "summary": str(page_payload.get("summary", "")).strip(),
+            "characters": str(page_payload.get("characters", "")).strip(),
+            "clothing": str(page_payload.get("clothing", "")).strip(),
+            "scene": str(page_payload.get("scene", "")).strip(),
+            "composition": str(page_payload.get("composition", "")).strip(),
+            "character_action": str(page_payload.get("character_action", "")).strip(),
+            "dialogue": str(page_payload.get("dialogue", "")).strip() or "无",
+        }
 
     @staticmethod
     def _normalize_section_plan(*, sections: list, total_pages: int) -> list[dict]:
@@ -534,11 +586,13 @@ class ScriptService:
             raise ValueError("section pages cannot be empty")
 
         required_text_fields = [
-            "page_goal",
+            "summary",
+            "characters",
+            "clothing",
             "scene",
+            "composition",
             "character_action",
-            "dialogue_or_caption",
-            "script",
+            "dialogue",
         ]
         normalized_pages: list[dict] = []
         seen_page_nos: set[int] = set()
@@ -566,11 +620,13 @@ class ScriptService:
                 {
                     "section_no": section_no,
                     "page_no": page_no,
-                    "page_goal": str(raw_page.get("page_goal", "")).strip(),
+                    "summary": str(raw_page.get("summary", "")).strip(),
+                    "characters": str(raw_page.get("characters", "")).strip(),
+                    "clothing": str(raw_page.get("clothing", "")).strip(),
                     "scene": str(raw_page.get("scene", "")).strip(),
+                    "composition": str(raw_page.get("composition", "")).strip(),
                     "character_action": str(raw_page.get("character_action", "")).strip(),
-                    "dialogue_or_caption": str(raw_page.get("dialogue_or_caption", "")).strip(),
-                    "script": str(raw_page.get("script", "")).strip(),
+                    "dialogue": str(raw_page.get("dialogue", "")).strip() or "无",
                     "is_revision": bool(raw_page.get("is_revision", False)),
                     "revision_note": str(raw_page.get("revision_note", "")).strip(),
                 }
@@ -601,8 +657,8 @@ class ScriptService:
                 self.repository.upsert_page_script(
                     project_id=project_id,
                     page_no=int(page_payload["page_no"]),
-                    script=self._format_page_script(page_payload),
                     section_id=section.id,
+                    **self._page_payload_for_save(page_payload),
                 )
             )
         return saved_pages
@@ -613,7 +669,7 @@ class ScriptService:
         task_id: int,
         current_section_no: int,
     ) -> dict:
-        """为当前分段生成准备历史上下文：全部摘要 + 最近两个完整分段脚本。"""
+        """为当前分段生成准备历史上下文：全部摘要 + 最近两个完整分段结构化脚本。"""
 
         sections = [
             section
@@ -632,7 +688,7 @@ class ScriptService:
                 pages_by_section_id.get(section.id, []),
                 key=lambda page: page.page_no,
             )
-            page_nos = [page.page_no for page in section_pages if page.script]
+            page_nos = [page.page_no for page in section_pages if page.summary]
             summaries.append(
                 {
                     "section_no": section.section_no,
@@ -644,7 +700,7 @@ class ScriptService:
                         f"{min(page_nos)}-{max(page_nos)}" if page_nos else "无"
                     ),
                     "script_summary": self._script_excerpt(
-                        "\n".join(page.script or "" for page in section_pages),
+                        "\n".join(self._page_context_text(page) for page in section_pages),
                         limit=300,
                     ),
                 }
@@ -665,10 +721,16 @@ class ScriptService:
                     "pages": [
                         {
                             "page_no": page.page_no,
-                            "script": page.script or "",
+                            "summary": page.summary or "",
+                            "characters": page.characters or "",
+                            "clothing": page.clothing or "",
+                            "scene": page.scene or "",
+                            "composition": page.composition or "",
+                            "character_action": page.character_action or "",
+                            "dialogue": page.dialogue or "",
                         }
                         for page in section_pages
-                        if page.script
+                        if page.summary
                     ],
                 }
             )
@@ -688,6 +750,24 @@ class ScriptService:
         return normalized[:limit].rstrip() + "..."
 
     @staticmethod
+    def _page_context_text(page: ComicPage) -> str:
+        """把结构化页面脚本压成历史上下文文本，供后续分段保持衔接。"""
+
+        return " ".join(
+            value
+            for value in [
+                page.summary,
+                page.characters,
+                page.clothing,
+                page.scene,
+                page.composition,
+                page.character_action,
+                page.dialogue,
+            ]
+            if value
+        )
+
+    @staticmethod
     def _page_to_payload(page: ComicPage) -> dict:
         """把页面 ORM 对象转成 SSE 可 JSON 序列化的字典。"""
 
@@ -698,7 +778,13 @@ class ScriptService:
             "section_no": page.section.section_no if page.section is not None else None,
             "task_id": page.section.task_id if page.section is not None else None,
             "page_no": page.page_no,
-            "script": page.script,
+            "summary": page.summary,
+            "characters": page.characters,
+            "clothing": page.clothing,
+            "scene": page.scene,
+            "composition": page.composition,
+            "character_action": page.character_action,
+            "dialogue": page.dialogue,
             "status": page.status.value,
             "created_at": page.created_at.isoformat(),
             "updated_at": page.updated_at.isoformat(),

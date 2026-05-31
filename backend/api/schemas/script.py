@@ -26,13 +26,25 @@ class CreatePageScriptRequest(BaseModel):
     """人工新增页面脚本请求体。"""
 
     page_no: int = Field(gt=0)
-    script: str
+    summary: str
+    characters: str
+    clothing: str
+    scene: str
+    composition: str
+    character_action: str
+    dialogue: str
 
 
 class UpdatePageScriptRequest(BaseModel):
     """人工更新页面脚本请求体。"""
 
-    script: str
+    summary: str
+    characters: str
+    clothing: str
+    scene: str
+    composition: str
+    character_action: str
+    dialogue: str
 
 
 class ScriptPageResponse(BaseModel):
@@ -44,7 +56,13 @@ class ScriptPageResponse(BaseModel):
     section_no: int | None = None
     task_id: int | None = None
     page_no: int
-    script: str | None
+    summary: str | None
+    characters: str | None
+    clothing: str | None
+    scene: str | None
+    composition: str | None
+    character_action: str | None
+    dialogue: str | None
     image_prompt: str | None
     status: str
     created_at: datetime
@@ -72,7 +90,13 @@ class SinglePageScriptResponse(BaseModel):
     task_id: int
     page_id: int
     page_no: int
-    script: str
+    summary: str
+    characters: str
+    clothing: str
+    scene: str
+    composition: str
+    character_action: str
+    dialogue: str
     status: str
 
 
