@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { Delete, Document, EditPen, Plus, Refresh, Tickets, VideoPause, View } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -49,7 +49,15 @@ const detailVisible = ref(false)
 const scriptDialogVisible = ref(false)
 const scriptDialogMode = ref<'create' | 'edit'>('create')
 const scriptFormPageNo = ref(1)
-const scriptFormContent = ref('')
+const scriptForm = reactive({
+  summary: '',
+  characters: '',
+  clothing: '',
+  scene: '',
+  composition: '',
+  character_action: '',
+  dialogue: '无',
+})
 const savingScript = ref(false)
 
 const loadingProjects = ref(false)
@@ -104,15 +112,55 @@ const nowLabel = () =>
     second: '2-digit',
   }).format(new Date())
 
-// 脚本表格只展示摘要，完整脚本通过详情弹窗查看，避免表格被长文本撑开。
-const scriptSummary = (script: string | null) => {
-  if (!script) {
+// 脚本表格只展示摘要，完整结构化脚本通过详情弹窗查看，避免表格被长文本撑开。
+const scriptSummary = (summary: string | null) => {
+  if (!summary) {
     return t('scripts.pages.noScript')
   }
 
-  const compact = script.replace(/\s+/g, ' ').trim()
+  const compact = summary.replace(/\s+/g, ' ').trim()
   return compact.length > 86 ? `${compact.slice(0, 86)}...` : compact
 }
+
+const resetScriptForm = () => {
+  scriptForm.summary = ''
+  scriptForm.characters = ''
+  scriptForm.clothing = ''
+  scriptForm.scene = ''
+  scriptForm.composition = ''
+  scriptForm.character_action = ''
+  scriptForm.dialogue = '无'
+}
+
+const fillScriptForm = (page: ScriptPage) => {
+  scriptForm.summary = page.summary ?? ''
+  scriptForm.characters = page.characters ?? ''
+  scriptForm.clothing = page.clothing ?? ''
+  scriptForm.scene = page.scene ?? ''
+  scriptForm.composition = page.composition ?? ''
+  scriptForm.character_action = page.character_action ?? ''
+  scriptForm.dialogue = page.dialogue ?? '无'
+}
+
+const buildScriptPayload = () => ({
+  summary: scriptForm.summary.trim(),
+  characters: scriptForm.characters.trim(),
+  clothing: scriptForm.clothing.trim(),
+  scene: scriptForm.scene.trim(),
+  composition: scriptForm.composition.trim(),
+  character_action: scriptForm.character_action.trim(),
+  dialogue: scriptForm.dialogue.trim() || '无',
+})
+
+const requiredScriptFieldsFilled = () =>
+  Boolean(
+    scriptForm.summary.trim() &&
+      scriptForm.characters.trim() &&
+      scriptForm.clothing.trim() &&
+      scriptForm.scene.trim() &&
+      scriptForm.composition.trim() &&
+      scriptForm.character_action.trim(),
+  )
 
 const statusLabel = (status: string) => {
   const key = `scripts.status.${status}`
@@ -481,14 +529,14 @@ const openDetail = (page: ScriptPage) => {
 const openCreateScript = () => {
   scriptDialogMode.value = 'create'
   scriptFormPageNo.value = singlePageNo.value
-  scriptFormContent.value = ''
+  resetScriptForm()
   scriptDialogVisible.value = true
 }
 
 const openEditScript = (page: ScriptPage) => {
   scriptDialogMode.value = 'edit'
   scriptFormPageNo.value = page.page_no
-  scriptFormContent.value = page.script ?? ''
+  fillScriptForm(page)
   scriptDialogVisible.value = true
 }
 
@@ -497,8 +545,7 @@ const saveManualScript = async () => {
     ElMessage.warning(t('scripts.errors.selectProject'))
     return
   }
-  const content = scriptFormContent.value.trim()
-  if (!content) {
+  if (!requiredScriptFieldsFilled()) {
     ElMessage.warning(t('scripts.errors.emptyScript'))
     return
   }
@@ -509,10 +556,10 @@ const saveManualScript = async () => {
       scriptDialogMode.value === 'create'
         ? await createPageScript(selectedProjectId.value, {
             page_no: scriptFormPageNo.value,
-            script: content,
+            ...buildScriptPayload(),
           })
         : await updatePageScript(selectedProjectId.value, scriptFormPageNo.value, {
-            script: content,
+            ...buildScriptPayload(),
           })
     upsertPageInList(page)
     scriptDialogVisible.value = false
@@ -869,7 +916,7 @@ onMounted(async () => {
           </el-table-column>
           <el-table-column :label="t('scripts.pages.columns.summary')" min-width="260">
             <template #default="{ row }">
-              <span class="script-results__summary">{{ scriptSummary(row.script) }}</span>
+              <span class="script-results__summary">{{ scriptSummary(row.summary) }}</span>
             </template>
           </el-table-column>
           <el-table-column :label="t('scripts.pages.columns.actions')" width="210" fixed="right">
@@ -897,7 +944,37 @@ onMounted(async () => {
       :title="`${t('scripts.detail.title')} ${selectedPage?.page_no ?? ''}`"
       width="720px"
     >
-      <pre class="script-detail">{{ selectedPage?.script || t('scripts.pages.noScript') }}</pre>
+      <div v-if="selectedPage?.summary" class="script-detail">
+        <section class="script-detail__block">
+          <strong>{{ t('scripts.fields.summary') }}</strong>
+          <p>{{ selectedPage.summary }}</p>
+        </section>
+        <section class="script-detail__block">
+          <strong>{{ t('scripts.fields.characters') }}</strong>
+          <p>{{ selectedPage.characters }}</p>
+        </section>
+        <section class="script-detail__block">
+          <strong>{{ t('scripts.fields.clothing') }}</strong>
+          <p>{{ selectedPage.clothing }}</p>
+        </section>
+        <section class="script-detail__block">
+          <strong>{{ t('scripts.fields.scene') }}</strong>
+          <p>{{ selectedPage.scene }}</p>
+        </section>
+        <section class="script-detail__block">
+          <strong>{{ t('scripts.fields.composition') }}</strong>
+          <p>{{ selectedPage.composition }}</p>
+        </section>
+        <section class="script-detail__block">
+          <strong>{{ t('scripts.fields.characterAction') }}</strong>
+          <p>{{ selectedPage.character_action }}</p>
+        </section>
+        <section class="script-detail__block">
+          <strong>{{ t('scripts.fields.dialogue') }}</strong>
+          <p>{{ selectedPage.dialogue }}</p>
+        </section>
+      </div>
+      <el-empty v-else :description="t('scripts.pages.noScript')" :image-size="96" />
       <template #footer>
         <el-button @click="detailVisible = false">{{ t('scripts.actions.close') }}</el-button>
       </template>
@@ -921,12 +998,35 @@ onMounted(async () => {
             :disabled="scriptDialogMode === 'edit'"
           />
         </el-form-item>
-        <el-form-item :label="t('scripts.editor.scriptContent')">
+        <el-form-item :label="t('scripts.fields.summary')">
           <el-input
-            v-model="scriptFormContent"
+            v-model="scriptForm.summary"
             type="textarea"
-            :rows="12"
-            :placeholder="t('scripts.editor.scriptPlaceholder')"
+            :rows="2"
+            :placeholder="t('scripts.editor.summaryPlaceholder')"
+          />
+        </el-form-item>
+        <el-form-item :label="t('scripts.fields.characters')">
+          <el-input v-model="scriptForm.characters" type="textarea" :rows="3" />
+        </el-form-item>
+        <el-form-item :label="t('scripts.fields.clothing')">
+          <el-input v-model="scriptForm.clothing" type="textarea" :rows="3" />
+        </el-form-item>
+        <el-form-item :label="t('scripts.fields.scene')">
+          <el-input v-model="scriptForm.scene" type="textarea" :rows="3" />
+        </el-form-item>
+        <el-form-item :label="t('scripts.fields.composition')">
+          <el-input v-model="scriptForm.composition" type="textarea" :rows="3" />
+        </el-form-item>
+        <el-form-item :label="t('scripts.fields.characterAction')">
+          <el-input v-model="scriptForm.character_action" type="textarea" :rows="3" />
+        </el-form-item>
+        <el-form-item :label="t('scripts.fields.dialogue')">
+          <el-input
+            v-model="scriptForm.dialogue"
+            type="textarea"
+            :rows="3"
+            :placeholder="t('scripts.editor.dialoguePlaceholder')"
           />
         </el-form-item>
       </el-form>
@@ -1064,6 +1164,8 @@ onMounted(async () => {
 }
 
 .script-detail {
+  display: grid;
+  gap: 12px;
   max-height: 58vh;
   margin: 0;
   padding: 16px;
@@ -1072,11 +1174,22 @@ onMounted(async () => {
   border-radius: 8px;
   background: #f8fafc;
   color: #1f2937;
-  font-family:
-    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
   line-height: 1.7;
-  white-space: pre-wrap;
   word-break: break-word;
+}
+
+.script-detail__block {
+  display: grid;
+  gap: 6px;
+}
+
+.script-detail__block strong {
+  color: #0f172a;
+}
+
+.script-detail__block p {
+  margin: 0;
+  white-space: pre-wrap;
 }
 
 @media (max-width: 1320px) {

@@ -3,13 +3,15 @@ import logging
 from typing import Any
 
 from deepagents import create_deep_agent
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.messages import HumanMessage
 
 from backend.agents.script_agent_models import (
     ScriptDeepAgentResponse,
     PageScriptWriterResponse,
     ScriptSupervisorResponse,
 )
+from backend.agents.deepagent_profiles import ensure_comaic_deepagent_profile
+from backend.agents.structured_output import ainvoke_structured_with_retries
 from backend.utils.prompt_loader import PromptLoader
 
 
@@ -26,10 +28,12 @@ class ScriptDeepAgent:
         main_prompt_name: str = "script_deep_main_prompt.md",
         writer_prompt_name: str = "script_writer_prompt.md",
         supervisor_prompt_name: str = "script_supervisor_prompt.md",
+        max_structured_retries: int = 3,
     ):
         """初始化 Deep Agent 和页面编写/监督两个子 Agent。"""
 
         self.llm = llm or self._default_llm()
+        self.max_structured_retries = max_structured_retries
         logger.info("Initializing ScriptDeepAgent")
         self.main_prompt = PromptLoader.load(main_prompt_name)
         self.writer_prompt = PromptLoader.load(writer_prompt_name)
@@ -37,8 +41,10 @@ class ScriptDeepAgent:
         self._agent = self._create_agent()
 
     def _create_agent(self, *, tools: list[Any] | None = None):
-        """创建 DeepAgents 实例；实时生成时会额外挂载本地提交工具。"""
+        """创建 DeepAgents 实例，并隐藏脚本生成不需要的内置工具。"""
 
+        # tools=[] 只表示不额外添加工具；DeepAgents 内置工具需要通过 HarnessProfile 禁用。
+        ensure_comaic_deepagent_profile()
         return create_deep_agent(
             model=self.llm,
             tools=tools or [],
@@ -80,21 +86,15 @@ class ScriptDeepAgent:
             len(outline),
             len(user_requirement),
         )
-        result = await self._agent.ainvoke(
-            {
-                "messages": [
-                    HumanMessage(
-                        content=self._build_single_page_input(
-                            outline=outline,
-                            total_pages=total_pages,
-                            page_no=page_no,
-                            user_requirement=user_requirement,
-                        )
-                    )
-                ]
-            }
+        parsed = await self._invoke_structured_response(
+            operation="single_page",
+            user_input=self._build_single_page_input(
+                outline=outline,
+                total_pages=total_pages,
+                page_no=page_no,
+                user_requirement=user_requirement,
+            ),
         )
-        parsed = self._parse_agent_result(result)
         logger.info(
             "ScriptDeepAgent single generation completed page_count=%s review_count=%s",
             len(parsed.get("pages", [])),
@@ -122,23 +122,17 @@ class ScriptDeepAgent:
             total_pages,
             len(feedback),
         )
-        result = await self._agent.ainvoke(
-            {
-                "messages": [
-                    HumanMessage(
-                        content=self._build_section_input(
-                            outline=outline,
-                            total_pages=total_pages,
-                            current_section=current_section,
-                            previous_context=previous_context,
-                            user_requirement=user_requirement,
-                            feedback=feedback,
-                        )
-                    )
-                ]
-            }
+        parsed = await self._invoke_structured_response(
+            operation=f"section_{current_section.get('section_no')}",
+            user_input=self._build_section_input(
+                outline=outline,
+                total_pages=total_pages,
+                current_section=current_section,
+                previous_context=previous_context,
+                user_requirement=user_requirement,
+                feedback=feedback,
+            ),
         )
-        parsed = self._parse_agent_result(result)
         logger.info(
             "ScriptDeepAgent section generation completed section_no=%s page_count=%s review_count=%s",
             current_section.get("section_no"),
@@ -198,99 +192,35 @@ class ScriptDeepAgent:
             ]
         )
 
-    def _parse_agent_result(self, result_state: dict[str, Any]) -> dict[str, Any]:
-        """解析 DeepAgents 最终结果，优先读取结构化响应，避免自然语言收尾解析失败。"""
+    async def _invoke_structured_response(
+        self,
+        *,
+        operation: str,
+        user_input: str,
+    ) -> dict[str, Any]:
+        """调用通用结构化输出封装，并保留脚本 Agent 自己的业务校验。"""
 
-        structured_response = result_state.get("structured_response")
-        if isinstance(structured_response, ScriptDeepAgentResponse):
-            logger.debug("ScriptDeepAgent structured response parsed")
-            return structured_response.model_dump()
-        if isinstance(structured_response, dict):
-            logger.debug("ScriptDeepAgent structured response dict parsed")
-            return structured_response
-        if hasattr(structured_response, "model_dump"):
-            logger.debug("ScriptDeepAgent generic structured response parsed")
-            return structured_response.model_dump()
-
-        file_text = self._final_output_file_text(result_state.get("files", {}))
-        if file_text:
-            logger.debug("ScriptDeepAgent final_output file chars=%s", len(file_text))
-            return self._loads_json_text(file_text)
-
-        return self._parse_json_result(result_state["messages"])
-
-    def _parse_json_result(self, messages: list[BaseMessage]) -> dict[str, Any]:
-        """从 Agent 最终消息中解析 JSON，兼容代码块包裹。"""
-
-        text = self._last_ai_message(messages)
-        logger.debug("ScriptDeepAgent raw result chars=%s", len(text))
-        return self._loads_json_text(text)
-
-    def _loads_json_text(self, text: str) -> dict[str, Any]:
-        """把 JSON 文本解析成字典，统一做类型校验。"""
-
-        json_text = self._extract_json_text(text)
-        result = json.loads(json_text)
-        if not isinstance(result, dict):
-            raise ValueError("ScriptDeepAgent result must be a JSON object.")
-        logger.debug("ScriptDeepAgent parsed result keys=%s", list(result.keys()))
-        return result
+        response = await ainvoke_structured_with_retries(
+            self._agent,
+            messages=[HumanMessage(content=user_input)],
+            response_model=ScriptDeepAgentResponse,
+            operation=operation,
+            max_retries=self.max_structured_retries,
+            validator=self._validate_structured_response,
+        )
+        logger.debug(
+            "ScriptDeepAgent structured response validated page_count=%s review_count=%s",
+            len(response.pages),
+            len(response.reviews),
+        )
+        return response.model_dump()
 
     @staticmethod
-    def _final_output_file_text(files: dict[str, Any]) -> str | None:
-        """DeepAgents 可能把最终 JSON 写入 /final_output.json，这里兼容读取。"""
+    def _validate_structured_response(response: ScriptDeepAgentResponse) -> None:
+        """脚本生成必须至少返回一页，页码范围等细节继续交给 Service 校验。"""
 
-        for path in ("/final_output.json", "final_output.json"):
-            file_data = files.get(path)
-            if isinstance(file_data, dict):
-                content = file_data.get("content")
-                if isinstance(content, str) and content.strip():
-                    return content
-            if isinstance(file_data, str) and file_data.strip():
-                return file_data
-        return None
-
-    @staticmethod
-    def _extract_json_text(text: str) -> str:
-        """提取 JSON 对象文本，避免模型输出 ```json 包裹导致解析失败。"""
-
-        stripped = text.strip()
-        if stripped.startswith("```"):
-            lines = stripped.splitlines()
-            if lines and lines[0].startswith("```"):
-                lines = lines[1:]
-            if lines and lines[-1].startswith("```"):
-                lines = lines[:-1]
-            stripped = "\n".join(lines).strip()
-
-        start = stripped.find("{")
-        end = stripped.rfind("}")
-        if start == -1 or end == -1 or end <= start:
-            raise ValueError("ScriptDeepAgent returned no JSON object.")
-        return stripped[start : end + 1]
-
-    @staticmethod
-    def _last_ai_message(messages: list[BaseMessage]) -> str:
-        """从消息列表中提取最后一条 AI 文本。"""
-
-        for message in reversed(messages):
-            if isinstance(message, AIMessage):
-                return ScriptDeepAgent._message_text(message).strip()
-        raise ValueError("ScriptDeepAgent returned no AI message.")
-
-    @staticmethod
-    def _message_text(message: BaseMessage) -> str:
-        """兼容字符串和结构化消息内容，提取可读文本。"""
-
-        if isinstance(message.content, str):
-            return message.content
-        if isinstance(message.content, list):
-            return "".join(
-                item.get("text", "")
-                for item in message.content
-                if isinstance(item, dict)
-            )
-        return str(message.content)
+        if not response.pages:
+            raise ValueError("ScriptDeepAgent structured_response contains no pages.")
 
     @staticmethod
     def _default_llm() -> Any:

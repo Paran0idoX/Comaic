@@ -51,7 +51,7 @@ MVP 核心表位于 `backend/models/comic.py`：
 - `comic_project`：项目标题、时间戳。项目表不保存状态、总页数、prompt、大纲或 `thread_id`。
 - `session`：通用业务会话，使用 `purpose` 区分大纲等场景，并用 `thread_id` 关联 Agent 记忆。
 - `outline_version`：大纲版本快照，归属于具体会话，每个会话只保留最近 5 个版本。
-- `comic_page`：项目页码、页面脚本、图片 prompt、状态、最终选择图片。
+- `comic_page`：项目页码、结构化页面脚本、图片 prompt、状态、最终选择图片。页面脚本不保存单个 `script` 字段，使用 `summary`、`characters`、`clothing`、`scene`、`composition`、`character_action`、`dialogue` 等字段表达。
 - `comic_image`：页面候选图、远程/本地路径、seed、workflow、prompt、评分、是否选中。
 - `generation_task`：ComfyUI prompt id、任务状态、批量大小、错误信息。
 
@@ -76,6 +76,10 @@ MVP 核心表位于 `backend/models/comic.py`：
 - Model client：集中读取模型相关环境变量，避免业务代码散落 API key 读取逻辑。
   - DeepSeek 客户端拆成两个实例：大纲阶段使用开启 thinking 的 `deepseek_thinking_chat_model`，脚本/工具调用阶段使用关闭 thinking 的 `deepseek_tool_chat_model`。
   - DeepAgents、`response_format` 或工具调用较多的 Agent 优先使用关闭 thinking 的实例，避免 `tool_choice` 与 thinking 模式冲突。
+- 使用 `response_format` 的 Agent 必须优先复用 `backend/agents/structured_output.py` 中的 `ainvoke_structured_with_retries()`。
+  - 只读取 `structured_response`，不要从自然语言、Markdown 代码块或文件输出中兜底解析 JSON。
+  - Agent 自己通过 `validator` 传入业务级结构校验，例如页面列表非空、Prompt 非空。
+  - 结构化输出重试只解决模型输出形态问题；页码范围、字段完整性、落库状态流转仍放在 Service/Repository 层。
 
 保持每层轻量。MVP 中可以先用少量类和函数，不要为了“像框架”而增加复杂抽象。
 
@@ -140,13 +144,16 @@ COMFYUI_BASE_URL=http://127.0.0.1:8188
 - 分段计划必须由 Service 校验并落库锁定后，才能进入页面脚本生成阶段。
 - 分页脚本使用 `deepagents.create_deep_agent` 实现主 Agent + 子 Agent 编排。
 - 分页脚本 Agent 默认使用 `deepseek_tool_chat_model`，即关闭 thinking 的 DeepSeek 实例。
+- DeepAgents 默认会注入文件系统、执行、todo 和 task 等内置工具；脚本生成阶段通过 `backend/agents/deepagent_profiles.py` 只保留 `write_todos` 和 `task`。
+- 不要重新启用 `ls`、`read_file`、`write_file`、`edit_file`、`glob`、`grep`、`execute`，除非有明确业务需求和安全边界。
+- `task` 必须保留，因为主 Agent 需要用它调用分页脚本编写和监督审查子 Agent。
 - ScriptDeepAgent 的子 Agent 只包含分页脚本编写、监督审查；不包含故事节奏划分。
 - ScriptDeepAgent 不允许注册或修改分段计划，不暴露 `register_section_plan` 类工具。
 - 批量脚本生成由 Service 遍历已锁定分段，逐段调用 ScriptDeepAgent；Agent 每次只生成当前分段，不能自行选择或回退到其他分段。
 - 当前分段脚本必须先由 Service 校验页码完整性、连续性和字段完整性，校验通过后才按 section 粒度批量落库。
 - 单页生成可以跳过整体节奏划分，但仍要经过监督审查。
 - 批量生成通过 SSE 暴露长任务进度，脚本任务状态保存到 `script_generation_task`。
-- 生成结果保存到 `comic_page.script`，页面状态使用 `ComicPageStatus.SCRIPT_READY`。
+- 分页脚本结果保存到 `comic_page` 的结构化字段：`summary`、`characters`、`clothing`、`scene`、`composition`、`character_action`、`dialogue`，页面状态使用 `ComicPageStatus.SCRIPT_READY`。
 - 脚本 Agent prompt 放在 `backend/prompts/script_planning_prompt.md`、`script_deep_main_prompt.md`、`script_writer_prompt.md` 和 `script_supervisor_prompt.md`。
 
 ## ImagePromptAgent 约定

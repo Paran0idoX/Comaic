@@ -5,6 +5,7 @@ from langchain.agents import create_agent
 from langchain_core.messages import HumanMessage
 
 from backend.agents.script_agent_models import StoryPacingResponse
+from backend.agents.structured_output import ainvoke_structured_with_retries
 from backend.utils.prompt_loader import PromptLoader
 
 
@@ -19,10 +20,12 @@ class ScriptPlanningAgent:
         *,
         llm: Any | None = None,
         prompt_name: str = "script_planning_prompt.md",
+        max_structured_retries: int = 3,
     ):
         """初始化规划 Agent；使用结构化输出约束 section_plan。"""
 
         self.llm = llm or self._default_llm()
+        self.max_structured_retries = max_structured_retries
         self.prompt = PromptLoader.load(prompt_name)
         logger.info("Initializing ScriptPlanningAgent prompt=%s", prompt_name)
         self._agent = create_agent(
@@ -50,26 +53,33 @@ class ScriptPlanningAgent:
             len(user_requirement),
             len(feedback),
         )
-        result = await self._agent.ainvoke(
-            {
-                "messages": [
-                    HumanMessage(
-                        content=self._build_input(
-                            outline=outline,
-                            total_pages=total_pages,
-                            user_requirement=user_requirement,
-                            feedback=feedback,
-                        )
+        response = await ainvoke_structured_with_retries(
+            self._agent,
+            messages=[
+                HumanMessage(
+                    content=self._build_input(
+                        outline=outline,
+                        total_pages=total_pages,
+                        user_requirement=user_requirement,
+                        feedback=feedback,
                     )
-                ]
-            }
+                )
+            ],
+            response_model=StoryPacingResponse,
+            operation="script_section_plan",
+            max_retries=self.max_structured_retries,
+            validator=self._validate_response,
         )
-        structured_response = result.get("structured_response")
-        if not isinstance(structured_response, StoryPacingResponse):
-            raise ValueError("ScriptPlanningAgent returned no structured section plan.")
-        sections = [section.model_dump() for section in structured_response.sections]
+        sections = [section.model_dump() for section in response.sections]
         logger.info("ScriptPlanningAgent generation completed section_count=%s", len(sections))
         return sections
+
+    @staticmethod
+    def _validate_response(response: StoryPacingResponse) -> None:
+        """分段规划至少需要返回一个分段；连续性等细节由 Service 统一校验。"""
+
+        if not response.sections:
+            raise ValueError("ScriptPlanningAgent structured_response contains no sections.")
 
     @staticmethod
     def _build_input(
