@@ -22,16 +22,47 @@ class GenerateBatchScriptRequest(BaseModel):
     user_requirement: str | None = None
 
 
+class CreatePageScriptRequest(BaseModel):
+    """人工新增页面脚本请求体。"""
+
+    page_no: int = Field(gt=0)
+    script: str
+
+
+class UpdatePageScriptRequest(BaseModel):
+    """人工更新页面脚本请求体。"""
+
+    script: str
+
+
 class ScriptPageResponse(BaseModel):
     """页面脚本响应体。"""
 
     id: int
     project_id: int
+    section_id: int | None = None
+    section_no: int | None = None
+    task_id: int | None = None
     page_no: int
     script: str | None
     status: str
     created_at: datetime
     updated_at: datetime
+
+
+class ScriptSectionResponse(BaseModel):
+    """脚本分段响应体。"""
+
+    id: int
+    task_id: int
+    section_no: int
+    page_start: int
+    page_end: int
+    title: str
+    description: str
+    created_at: datetime
+    updated_at: datetime
+    pages: list[ScriptPageResponse] = Field(default_factory=list)
 
 
 class SinglePageScriptResponse(BaseModel):
@@ -65,3 +96,9 @@ class ScriptPageListResponse(BaseModel):
     """项目页面脚本列表响应体。"""
 
     items: list[ScriptPageResponse]
+
+
+class ScriptSectionListResponse(BaseModel):
+    """脚本任务分段列表响应体。"""
+
+    items: list[ScriptSectionResponse]
