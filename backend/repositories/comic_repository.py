@@ -328,7 +328,7 @@ class ComicRepository:
     def list_script_task_page_nos(self, task_id: int) -> set[int]:
         """读取某次任务已经保存的页码集合，供兜底保存时去重。"""
 
-        return {page.page_no for page in self.list_script_task_pages(task_id) if page.script}
+        return {page.page_no for page in self.list_script_task_pages(task_id) if page.summary}
 
     def get_script_task_page(self, *, task_id: int, page_no: int) -> ComicPage | None:
         """读取某次任务下指定页码的页面脚本。"""
@@ -349,7 +349,7 @@ class ComicRepository:
 
         statement = select(ComicPage.page_no).where(
             ComicPage.section_id == section_id,
-            ComicPage.script.is_not(None),
+            ComicPage.summary.is_not(None),
         )
         return set(self.session.scalars(statement))
 
@@ -526,10 +526,16 @@ class ComicRepository:
         *,
         project_id: int,
         page_no: int,
-        script: str,
+        summary: str,
+        characters: str,
+        clothing: str,
+        scene: str,
+        composition: str,
+        character_action: str,
+        dialogue: str,
         section_id: int | None = None,
     ) -> ComicPage:
-        """按页码创建或更新页面脚本，并标记为脚本已生成。"""
+        """按页码创建或更新结构化页面脚本，并标记为脚本已生成。"""
 
         project = self.session.get(ComicProject, project_id)
         if project is None:
@@ -542,7 +548,13 @@ class ComicRepository:
         elif section_id is not None:
             page.section_id = section_id
 
-        page.script = script
+        page.summary = summary
+        page.characters = characters
+        page.clothing = clothing
+        page.scene = scene
+        page.composition = composition
+        page.character_action = character_action
+        page.dialogue = dialogue
         page.status = ComicPageStatus.SCRIPT_READY
         self.session.commit()
         self.session.refresh(page)
@@ -555,7 +567,13 @@ class ComicRepository:
         if page is None:
             raise ValueError(f"ComicPage not found for project {project_id}: {page_no}")
 
-        page.script = None
+        page.summary = None
+        page.characters = None
+        page.clothing = None
+        page.scene = None
+        page.composition = None
+        page.character_action = None
+        page.dialogue = None
         page.status = ComicPageStatus.DRAFT
         self.session.commit()
         self.session.refresh(page)
@@ -587,18 +605,6 @@ class ComicRepository:
 
         self.session.commit()
 
-    def update_page_script(self, page_id: int, script: str) -> ComicPage:
-        """保存页面脚本，并把页面状态推进到脚本已生成。"""
-
-        page = self.session.get(ComicPage, page_id)
-        if page is None:
-            raise ValueError(f"ComicPage not found: {page_id}")
-        page.script = script
-        page.status = ComicPageStatus.SCRIPT_READY
-        self.session.commit()
-        self.session.refresh(page)
-        return page
-
     def update_page_prompt(self, page_id: int, image_prompt: str) -> ComicPage:
         """保存页面图片 Prompt，并把页面状态推进到 Prompt 已生成。"""
 
@@ -616,7 +622,7 @@ class ComicRepository:
 
         for page in self.list_script_task_pages(task_id):
             page.image_prompt = None
-            if page.script:
+            if page.summary:
                 page.status = ComicPageStatus.SCRIPT_READY
         self.session.commit()
 

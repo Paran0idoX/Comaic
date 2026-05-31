@@ -5,7 +5,13 @@ export type ScriptPage = {
   section_no: number | null
   task_id: number | null
   page_no: number
-  script: string | null
+  summary: string | null
+  characters: string | null
+  clothing: string | null
+  scene: string | null
+  composition: string | null
+  character_action: string | null
+  dialogue: string | null
   image_prompt: string | null
   status: string
   created_at: string
@@ -50,18 +56,36 @@ export type GenerateBatchScriptPayload = {
 
 export type CreatePageScriptPayload = {
   page_no: number
-  script: string
+  summary: string
+  characters: string
+  clothing: string
+  scene: string
+  composition: string
+  character_action: string
+  dialogue: string
 }
 
 export type UpdatePageScriptPayload = {
-  script: string
+  summary: string
+  characters: string
+  clothing: string
+  scene: string
+  composition: string
+  character_action: string
+  dialogue: string
 }
 
 export type SinglePageScriptResponse = {
   task_id: number
   page_id: number
   page_no: number
-  script: string
+  summary: string
+  characters: string
+  clothing: string
+  scene: string
+  composition: string
+  character_action: string
+  dialogue: string
   status: string
 }
 

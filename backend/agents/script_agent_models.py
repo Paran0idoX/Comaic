@@ -22,11 +22,13 @@ class PageScriptItem(BaseModel):
 
     section_no: int = Field(description="当前页面所属分段编号。", gt=0)
     page_no: int = Field(description="整部漫画中的全局绝对页码。", gt=0)
-    page_goal: str = Field(description="本页叙事目标。")
-    scene: str = Field(description="本页整张漫画页的画面内容。")
-    character_action: str = Field(description="本页最核心的人物动作或状态。")
-    dialogue_or_caption: str = Field(description="本页需要出现的对白或旁白。")
-    script: str = Field(description="可直接展示给用户的完整中文页面脚本。")
+    summary: str = Field(description="本页内容摘要。")
+    characters: str = Field(description="本页出场人物、身份、表情和状态。")
+    clothing: str = Field(description="本页人物服装、发型、配件和辨识特征。")
+    scene: str = Field(description="本页地点、时间、环境元素和氛围。")
+    composition: str = Field(description="本页整张漫画页的构图、视角、景别、光线和空间关系。")
+    character_action: str = Field(description="本页人物核心动作、姿态、交互和动态。")
+    dialogue: str = Field(description="本页需要出现的对白或旁白；无文字时写“无”。")
     is_revision: bool = Field(default=False, description="是否为监督意见后的修订脚本。")
     revision_note: str = Field(default="", description="修订脚本对应的监督校正意见。")
 

@@ -37,7 +37,7 @@ class ImagePromptSourcePage:
 
     page_id: int
     page_no: int
-    script: str
+    page_description: str
 
 
 class ImagePromptService:
@@ -113,7 +113,7 @@ class ImagePromptService:
         """读取某次脚本任务下已落库的图片 Prompt，用于前端切换任务时回显。"""
 
         task = self._get_succeeded_script_task(task_id)
-        pages = [page for page in self.repository.list_script_task_pages(task.id) if page.script]
+        pages = [page for page in self.repository.list_script_task_pages(task.id) if page.summary]
         items = [
             ImagePromptGenerateItem(
                 page_id=page.id,
@@ -161,7 +161,7 @@ class ImagePromptService:
                     prompt = await agent.generate(
                         system_prompt=system_preset.content,
                         page_no=page.page_no,
-                        script=page.script,
+                        page_description=page.page_description,
                     )
                     if not prompt:
                         raise ValueError("Generated image prompt cannot be empty.")
@@ -239,7 +239,7 @@ class ImagePromptService:
                     prompt = await agent.generate(
                         system_prompt=system_preset.content,
                         page_no=page.page_no,
-                        script=page.script,
+                        page_description=page.page_description,
                     )
                     if not prompt:
                         raise ValueError("Generated image prompt cannot be empty.")
@@ -357,7 +357,7 @@ class ImagePromptService:
             preset_id=system_prompt_preset_id,
             expected_kind=ImagePromptPresetKind.SCRIPT_TO_IMAGE_SYSTEM_PROMPT,
         )
-        pages = [page for page in self.repository.list_script_task_pages(task.id) if page.script]
+        pages = [page for page in self.repository.list_script_task_pages(task.id) if page.summary]
         if not pages:
             raise ValueError(f"Script pages not found for task: {task_id}")
         if clear_existing:
@@ -368,11 +368,27 @@ class ImagePromptService:
                 ImagePromptSourcePage(
                     page_id=page.id,
                     page_no=page.page_no,
-                    script=page.script or "",
+                    page_description=self._page_description(page),
                 )
                 for page in pages
             ],
         )
+
+    @staticmethod
+    def _page_description(page) -> str:
+        """把结构化分页脚本拼成图片 Prompt Agent 可理解的页面描述。"""
+
+        return "\n".join(
+            [
+                f"本页摘要：{page.summary or ''}",
+                f"人物：{page.characters or ''}",
+                f"服装：{page.clothing or ''}",
+                f"场景：{page.scene or ''}",
+                f"构图：{page.composition or ''}",
+                f"人物动作：{page.character_action or ''}",
+                f"对话：{page.dialogue or ''}",
+            ]
+        ).strip()
 
     @staticmethod
     def _item_payload(item: ImagePromptGenerateItem) -> dict:

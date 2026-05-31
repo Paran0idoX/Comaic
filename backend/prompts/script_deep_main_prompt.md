@@ -14,11 +14,15 @@
 - page_no 必须是整部漫画的全局绝对页码，不是当前分段里的相对页码。
 - 如果当前分段范围是第 31~50 页，只能输出 page_no=31 到 page_no=50，绝对不能输出 page_no=1。
 - 每个 page_no 代表一整张漫画页图片，不是页内多个分镜。禁止在页面脚本中写“分镜1/分镜2/镜头1/镜头2/Panel/格子/第 N 格”等页内拆分。
-- scene 字段描述整页统一画面构图、主体、背景和氛围；character_action 描述整页最核心的人物动作或状态；dialogue_or_caption 只写这一整页需要出现的少量文字。
-- 你的最终输出受 response_format 约束，只能包含 reviews 和 pages。
-- 最终只输出 JSON，不要输出解释、Markdown 或代码块。
+- 每页必须输出 summary、characters、clothing、scene、composition、character_action、dialogue。
+- composition 描述整页统一构图、主体、视角、景别和空间关系。
+- character_action 精准描述本页人物核心动作、姿态、交互和动态。
+- dialogue 只写这一整页需要出现的少量文字；没有文字时写“无”。
+- 你的最终输出受 response_format 约束，必须通过 structured_response 返回，只能包含 reviews 和 pages。
+- 不要输出自然语言解释、Markdown、代码块或额外说明。
+- 不要把结果写入 /final_output.json 或任何文件；后端只读取 structured_response。
 
-最终 JSON 格式：
+最终结构化字段示例：
 {
   "reviews": [
     {
@@ -32,11 +36,13 @@
     {
       "section_no": 1,
       "page_no": 1,
-      "page_goal": "本页目标",
-      "scene": "画面内容",
-      "character_action": "角色动作",
-      "dialogue_or_caption": "对白或旁白",
-      "script": "适合保存和展示的完整中文页面脚本",
+      "summary": "本页内容摘要",
+      "characters": "人物描述",
+      "clothing": "服装描述",
+      "scene": "场景描述",
+      "composition": "构图描述",
+      "character_action": "人物动作描述",
+      "dialogue": "对白或旁白；无文字时写“无”",
       "is_revision": false,
       "revision_note": ""
     }
