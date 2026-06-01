@@ -10,6 +10,7 @@ from backend.models.comic import ComicImage, ComicPage, ComfyWorkflowPreset, Gen
 from backend.models.enums import ComicPageStatus, GenerationTaskStatus
 from backend.repositories.comic_repository import ComicRepository
 from backend.tools.comfyui_client import ComfyUIClient
+from backend.i18n.errors import app_error_from_exception
 
 
 class ImageGenerationService:
@@ -219,6 +220,7 @@ class ImageGenerationService:
                         "status": GenerationTaskStatus.SUCCEEDED.value,
                     }
                 except Exception as exc:  # noqa: BLE001 - 单页失败不阻断后续页面
+                    error = app_error_from_exception(exc)
                     self.repository.update_generation_task(
                         task_id=page_task.id,
                         status=GenerationTaskStatus.FAILED,
@@ -231,7 +233,7 @@ class ImageGenerationService:
                         "page_task_id": page_task.id,
                         "page_id": page.id,
                         "page_no": page.page_no,
-                        "message": str(exc),
+                        "code": error.code,
                     }
 
                 yield "progress", {

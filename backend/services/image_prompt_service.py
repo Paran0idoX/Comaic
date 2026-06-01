@@ -3,6 +3,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 from backend.agents.image_prompt_agent import ImagePromptAgent
+from backend.i18n.errors import app_error_from_exception
 from backend.models.comic import ImagePromptPreset, ScriptGenerationTask
 from backend.models.enums import ImagePromptPresetKind, ScriptGenerationTaskStatus
 from backend.repositories.comic_repository import ComicRepository
@@ -18,6 +19,7 @@ class ImagePromptGenerateItem:
     image_prompt: str | None
     status: str
     error: str | None = None
+    error_code: str | None = None
 
 
 @dataclass
@@ -187,6 +189,7 @@ class ImagePromptService:
                     )
                 )
             else:
+                error_code = app_error_from_exception(ValueError(error or "")).code
                 failed += 1
                 items.append(
                     ImagePromptGenerateItem(
@@ -194,7 +197,8 @@ class ImagePromptService:
                         page_no=page.page_no,
                         image_prompt=None,
                         status="failed",
-                        error=error,
+                        error=error_code,
+                        error_code=error_code,
                     )
                 )
 
@@ -265,13 +269,15 @@ class ImagePromptService:
                         status=saved_page.status.value,
                     )
                 else:
+                    error_code = app_error_from_exception(ValueError(error or "")).code
                     failed += 1
                     item = ImagePromptGenerateItem(
                         page_id=page.page_id,
                         page_no=page.page_no,
                         image_prompt=None,
                         status="failed",
-                        error=error,
+                        error=error_code,
+                        error_code=error_code,
                     )
 
                 yield "page_prompt", self._item_payload(item)
@@ -400,6 +406,7 @@ class ImagePromptService:
             "image_prompt": item.image_prompt,
             "status": item.status,
             "error": item.error,
+            "error_code": item.error_code,
         }
 
     @staticmethod

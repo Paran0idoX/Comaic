@@ -47,6 +47,7 @@ class ImagePromptGenerationItemResponse(BaseModel):
     image_prompt: str | None
     status: str
     error: str | None = None
+    error_code: str | None = None
 
 
 class GenerateImagePromptsResponse(BaseModel):

@@ -19,8 +19,10 @@ import {
   type ImagePromptPreset,
   type ImagePromptPresetKind,
 } from '@/api/imagePrompts'
+import { apiErrorMessage } from '@/api/errors'
 import { listProjects, type Project } from '@/api/projects'
 import type { ScriptTask } from '@/api/scripts'
+import { formatLocalDateTime } from '@/utils/datetime'
 
 const { locale, t } = useI18n()
 
@@ -70,8 +72,7 @@ const sortedGenerationItems = computed(() =>
 )
 
 const formatDate = (value: string) => {
-  const formatterLocale = locale.value === 'zh' ? 'zh-CN' : 'en-US'
-  return new Date(value).toLocaleString(formatterLocale)
+  return formatLocalDateTime(value, locale.value)
 }
 
 const taskLabel = (task: ScriptTask) =>
@@ -82,6 +83,17 @@ const shortText = (value: string | null, maxLength = 120) => {
     return t('prompts.emptyText')
   }
   return value.length > maxLength ? `${value.slice(0, maxLength)}...` : value
+}
+
+const itemErrorText = (item: ImagePromptGenerationItem | null) => {
+  if (item?.error_code) {
+    const key = `backendErrors.${item.error_code}`
+    const translated = t(key)
+    if (translated !== key) {
+      return translated
+    }
+  }
+  return item?.error ?? ''
 }
 
 const ensureSelectedPresets = () => {
@@ -305,6 +317,7 @@ const generatePrompts = async () => {
               image_prompt: stringFromPayload(payload, 'image_prompt'),
               status: stringFromPayload(payload, 'status') ?? '',
               error: stringFromPayload(payload, 'error'),
+              error_code: stringFromPayload(payload, 'error_code'),
             })
             return
           }
@@ -320,17 +333,17 @@ const generatePrompts = async () => {
             generationResult.value.total = numberFromPayload(payload, 'total')
           }
         },
-        onError: (message) => {
+        onError: (error) => {
           streamFailed = true
-          ElMessage.error(message || t('prompts.errors.generateFailed'))
+          ElMessage.error(apiErrorMessage(error, t, t('prompts.errors.generateFailed')))
         },
       },
     )
     if (!streamFailed) {
       ElMessage.success(t('prompts.messages.generated'))
     }
-  } catch {
-    ElMessage.error(t('prompts.errors.generateFailed'))
+  } catch (error) {
+    ElMessage.error(apiErrorMessage(error, t, t('prompts.errors.generateFailed')))
   } finally {
     generating.value = false
   }
@@ -565,7 +578,7 @@ onMounted(() => {
     </el-dialog>
 
     <el-dialog v-model="detailVisible" :title="t('prompts.detail.title')" width="760px">
-      <pre class="prompt-detail">{{ detailItem?.error || detailItem?.image_prompt }}</pre>
+      <pre class="prompt-detail">{{ itemErrorText(detailItem) || detailItem?.image_prompt }}</pre>
     </el-dialog>
   </section>
 </template>

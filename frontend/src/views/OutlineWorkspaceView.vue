@@ -8,6 +8,7 @@ import ConversationPanel, {
   type ConversationMessage,
 } from '@/components/outline/ConversationPanel.vue'
 import OutlinePanel, { type OutlineVersionItem } from '@/components/outline/OutlinePanel.vue'
+import { apiErrorMessage } from '@/api/errors'
 import { resolveOutlineSession, streamOutlineChat, type OutlineVersion } from '@/api/outline'
 
 const { t } = useI18n()
@@ -124,20 +125,20 @@ const sendMessage = async (content: string) => {
           streaming: false,
         }))
       },
-      onError: (message) => {
+      onError: (error) => {
         updateMessage(agentMessageId, (currentMessage) => ({
           ...currentMessage,
           streaming: false,
         }))
-        ElMessage.error(message || t('outline.errors.stream'))
+        ElMessage.error(apiErrorMessage(error, t, t('outline.errors.stream')))
       },
     })
-  } catch {
+  } catch (error) {
     updateMessage(agentMessageId, (message) => ({
       ...message,
       streaming: false,
     }))
-    ElMessage.error(t('outline.errors.stream'))
+    ElMessage.error(apiErrorMessage(error, t, t('outline.errors.stream')))
   } finally {
     updateMessage(agentMessageId, (message) => ({
       ...message,
