@@ -118,6 +118,22 @@ COMFYUI_BASE_URL=http://127.0.0.1:8188
 - `backend/prompts/ountline_system_prompt.md` 是历史拼写错误文件，仅为兼容保留；新代码使用 `backend/prompts/outline_system_prompt.md`。
 - Prompt 模板中使用 `{outline}`、`{total_pages}`、`{script}` 这类显式变量。`total_pages` 可以作为生成脚本时的输入参数，但不存入 `comic_project`。
 
+## 文案国际化约定
+
+- 前端 UI 文案、进度时间线文案优先放在 `frontend/src/i18n/messages.ts`，通过 vue-i18n 展示。
+- 后端返回给前端的业务错误必须使用稳定 `code`，响应结构为 `{"code": "...", "message": "..."}`，不要让前端解析英文错误字符串。
+- 后端用户可见文案集中放在 `backend/i18n/`，使用 Python Babel/gettext catalog 管理；运行时可回退到内置中英文表。
+- API 层使用 `backend.i18n.errors.http_exception()` 和 `sse_error_payload()` 统一转换异常；Service/Repository 可以继续抛业务异常，但不要直接把原始外部错误作为用户主文案暴露。
+- Agent 输出、用户输入、Prompt 文件、日志和代码注释不纳入普通 UI 国际化。
+
+Babel catalog 维护命令：
+
+```bash
+pybabel extract -F backend/babel.cfg -o backend/locales/messages.pot backend
+pybabel update -i backend/locales/messages.pot -d backend/locales
+pybabel compile -d backend/locales
+```
+
 ## OutlineAgent 约定
 
 `backend/agents/outline_agent.py` 负责大纲生成阶段的主 Agent 对话，不负责落库。

@@ -1,6 +1,6 @@
 import json
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Request
 from sse_starlette.sse import EventSourceResponse
 
 from backend.agents.outline_agent import OutlineAgent
@@ -16,6 +16,8 @@ from backend.models.comic import OutlineVersion
 from backend.models.database import SessionLocal
 from backend.models.enums import SessionPurpose
 from backend.repositories.comic_repository import ComicRepository
+from backend.i18n.errors import AppError, http_exception, sse_error_payload
+from backend.i18n.locale import request_locale
 from backend.services.outline_service import OutlineService
 
 
@@ -44,7 +46,10 @@ def outline_version_to_response(version: OutlineVersion) -> OutlineVersionRespon
 
 
 @router.post("/sessions", response_model=OutlineSessionResponse)
-def create_outline_session(request: CreateOutlineSessionRequest) -> OutlineSessionResponse:
+def create_outline_session(
+    request: CreateOutlineSessionRequest,
+    http_request: Request,
+) -> OutlineSessionResponse:
     """创建一个关联项目的大纲会话，并返回前端后续使用的 thread_id。"""
 
     with SessionLocal() as db_session:
@@ -52,7 +57,7 @@ def create_outline_session(request: CreateOutlineSessionRequest) -> OutlineSessi
         try:
             session = service.create_outline_session(project_id=request.project_id)
         except ValueError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+            raise http_exception(exc, request_locale(http_request)) from exc
 
         return OutlineSessionResponse(
             session_id=session.id,
@@ -65,6 +70,7 @@ def create_outline_session(request: CreateOutlineSessionRequest) -> OutlineSessi
 @router.post("/sessions/resolve", response_model=ResolveOutlineSessionResponse)
 async def resolve_outline_session(
     request: CreateOutlineSessionRequest,
+    http_request: Request,
 ) -> ResolveOutlineSessionResponse:
     """复用项目最近的大纲会话；没有会话时创建一个新的。"""
 
@@ -74,7 +80,7 @@ async def resolve_outline_session(
             session = service.get_or_create_outline_session(project_id=request.project_id)
             versions = service.list_outline_versions(session_id=session.id)
         except ValueError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+            raise http_exception(exc, request_locale(http_request)) from exc
 
         async with OutlineAgent() as agent:
             history_messages = await agent.get_conversation_messages(
@@ -105,8 +111,10 @@ async def resolve_outline_session(
 
 
 @router.post("/chat/stream")
-def stream_outline_chat(request: OutlineChatStreamRequest) -> EventSourceResponse:
+def stream_outline_chat(request: OutlineChatStreamRequest, http_request: Request) -> EventSourceResponse:
     """用 SSE 流式返回 Agent 回复 token，并在最后返回更新后的大纲版本。"""
+
+    locale = request_locale(http_request)
 
     async def event_generator():
         with SessionLocal() as db_session:
@@ -114,10 +122,16 @@ def stream_outline_chat(request: OutlineChatStreamRequest) -> EventSourceRespons
             service = OutlineService(repository)
             session = repository.get_session_by_thread_id(request.thread_id)
             if session is None:
-                yield sse_event("error", {"message": "Session not found"})
+                yield sse_event(
+                    "error",
+                    sse_error_payload(AppError("session.not_found", status_code=404), locale),
+                )
                 return
             if session.purpose != SessionPurpose.OUTLINE:
-                yield sse_event("error", {"message": "Session is not an outline session"})
+                yield sse_event(
+                    "error",
+                    sse_error_payload(AppError("outline.session_invalid", status_code=400), locale),
+                )
                 return
 
             try:
@@ -149,6 +163,6 @@ def stream_outline_chat(request: OutlineChatStreamRequest) -> EventSourceRespons
                     )
                 yield sse_event("done", {"thread_id": request.thread_id})
             except Exception as exc:
-                yield sse_event("error", {"message": str(exc)})
+                yield sse_event("error", sse_error_payload(exc, locale))
 
     return EventSourceResponse(event_generator())

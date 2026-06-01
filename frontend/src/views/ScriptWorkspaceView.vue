@@ -7,6 +7,7 @@ import { useRoute, useRouter } from 'vue-router'
 
 import { listProjects, type Project } from '@/api/projects'
 import { resolveOutlineSession, type OutlineVersion } from '@/api/outline'
+import { ApiError, apiErrorMessage } from '@/api/errors'
 import {
   clearPageScript,
   createPageScript,
@@ -19,6 +20,7 @@ import {
   updatePageScript,
   type ScriptPage,
 } from '@/api/scripts'
+import { formatLocalDateTime, formatLocalNowTime } from '@/utils/datetime'
 
 // 组件名用于 AppShell 的 KeepAlive include 精准缓存脚本工作台。
 defineOptions({ name: 'ScriptWorkspaceView' })
@@ -96,24 +98,15 @@ const canEditScripts = computed(
 const canDeleteAllScripts = computed(() => canEditScripts.value && pages.value.length > 0)
 
 const formatDateTime = (value: string) => {
-  if (!value) {
-    return '-'
-  }
-
-  return new Intl.DateTimeFormat(locale.value === 'zh' ? 'zh-CN' : 'en-US', {
+  return formatLocalDateTime(value, locale.value, {
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
-  }).format(new Date(value))
+  })
 }
 
-const nowLabel = () =>
-  new Intl.DateTimeFormat(locale.value === 'zh' ? 'zh-CN' : 'en-US', {
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  }).format(new Date())
+const nowLabel = () => formatLocalNowTime(locale.value)
 
 // 脚本表格只展示摘要，完整结构化脚本通过详情弹窗查看，避免表格被长文本撑开。
 const scriptSummary = (summary: string | null) => {
@@ -192,6 +185,24 @@ const outlineVersionLabel = (version: OutlineVersion) =>
 
 // SSE 事件数据来源不完全一致，这里统一提取最有用的信息写入时间线。
 const describePayload = (event: string, payload: Record<string, unknown>) => {
+  if (typeof payload.code === 'string') {
+    const key = `backendEvents.${payload.code}`
+    const translated = t(key, {
+      attempt: String(payload.attempt ?? '-'),
+      sectionNo: String(payload.section_no ?? '-'),
+      pageStart: String(payload.page_start ?? '-'),
+      pageEnd: String(payload.page_end ?? '-'),
+      count: String(payload.count ?? '-'),
+    })
+    if (translated !== key) {
+      return translated
+    }
+    const errorKey = `backendErrors.${payload.code}`
+    const errorText = t(errorKey)
+    if (errorText !== errorKey) {
+      return errorText
+    }
+  }
   if (event === 'task') {
     return `#${String(payload.task_id ?? '-')}: ${String(payload.status ?? '-')}`
   }
@@ -367,20 +378,23 @@ const loadOutlineVersions = async (projectId: number) => {
   }
 }
 
-const isOutlineMissingError = (message: string) => {
-  const normalized = message.toLowerCase()
-  return normalized.includes('outline') && (normalized.includes('active') || normalized.includes('not found'))
-}
+const isOutlineMissingError = (error: unknown) =>
+  error instanceof ApiError &&
+  (error.code === 'outline.required' || error.code === 'outline.version_not_found')
 
-const handleGenerationError = (message: string, fallback: string) => {
-  if (isOutlineMissingError(message)) {
+const handleGenerationError = (error: unknown, fallback: string) => {
+  if (isOutlineMissingError(error)) {
     needsOutline.value = true
     addProgressEvent('missing_outline', { message: t('scripts.needsOutline.description') })
     ElMessage.warning(t('scripts.needsOutline.title'))
     return
   }
 
-  addProgressEvent('error', { message: message || fallback })
+  const message = apiErrorMessage(error, t, fallback)
+  addProgressEvent('error', {
+    code: error instanceof ApiError ? error.code : undefined,
+    message,
+  })
   ElMessage.error(fallback)
 }
 
@@ -432,7 +446,7 @@ const generateSingle = async () => {
     ElMessage.success(t('scripts.messages.singleSuccess'))
     await loadPages()
   } catch (error) {
-    handleGenerationError(error instanceof Error ? error.message : '', t('scripts.errors.singleFailed'))
+    handleGenerationError(error, t('scripts.errors.singleFailed'))
   } finally {
     generatingSingle.value = false
   }
@@ -490,13 +504,13 @@ const generateBatch = async () => {
             ElMessage.warning(t('scripts.messages.batchSuspended'))
           }
         },
-        onError: (message) => {
-          handleGenerationError(message, t('scripts.errors.batchFailed'))
+        onError: (error) => {
+          handleGenerationError(error, t('scripts.errors.batchFailed'))
         },
       },
     )
   } catch (error) {
-    handleGenerationError(error instanceof Error ? error.message : '', t('scripts.errors.batchFailed'))
+    handleGenerationError(error, t('scripts.errors.batchFailed'))
   } finally {
     generatingBatch.value = false
     suspendingBatch.value = false

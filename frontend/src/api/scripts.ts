@@ -1,3 +1,5 @@
+import { ApiError, apiHeaders, normalizeBackendError, parseApiErrorResponse } from './errors'
+
 export type ScriptPage = {
   id: number
   project_id: number
@@ -111,21 +113,17 @@ type SseEvent = {
 
 export type ScriptStreamCallbacks = {
   onEvent: (event: string, payload: Record<string, unknown>) => void
-  onError: (message: string) => void
+  onError: (error: ApiError) => void
 }
 
 const requestJson = async <T>(url: string, options: RequestInit = {}): Promise<T> => {
   const response = await fetch(url, {
     ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
+    headers: apiHeaders(options.headers),
   })
 
   if (!response.ok) {
-    const errorText = await response.text()
-    throw new Error(errorText || response.statusText)
+    throw await parseApiErrorResponse(response)
   }
 
   return (await response.json()) as T
@@ -192,15 +190,12 @@ export const streamBatchScriptGeneration = async (
 ): Promise<void> => {
   const response = await fetch('/api/scripts/batch/stream', {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
+    headers: apiHeaders(),
     body: JSON.stringify(payload),
   })
 
   if (!response.ok || response.body === null) {
-    const errorText = await response.text()
-    throw new Error(errorText || response.statusText)
+    throw await parseApiErrorResponse(response)
   }
 
   const reader = response.body.getReader()
@@ -210,7 +205,13 @@ export const streamBatchScriptGeneration = async (
   const handleEvent = (event: SseEvent) => {
     const payload = event.data ? JSON.parse(event.data) : {}
     if (event.event === 'error') {
-      callbacks.onError(String(payload.message ?? 'Script stream error'))
+      const backendError = normalizeBackendError(payload)
+      callbacks.onError(
+        new ApiError(backendError.message || 'Script stream error', {
+          code: backendError.code,
+          payload,
+        }),
+      )
       return
     }
     callbacks.onEvent(event.event, payload as Record<string, unknown>)

@@ -4,6 +4,8 @@ import MarkdownIt from 'markdown-it'
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 
+import { formatLocalDateTime } from '@/utils/datetime'
+
 export type OutlineVersionItem = {
   version_id: number
   version_no: number
@@ -30,8 +32,7 @@ const markdown = new MarkdownIt({
 const renderedOutline = computed(() => markdown.render(props.outline))
 
 const formatDate = (value: string) => {
-  const formatterLocale = locale.value === 'zh' ? 'zh-CN' : 'en-US'
-  return new Date(value).toLocaleString(formatterLocale)
+  return formatLocalDateTime(value, locale.value)
 }
 </script>
 

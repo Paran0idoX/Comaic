@@ -19,9 +19,11 @@ import {
   type GeneratedImage,
   type ImageGenerationPage,
 } from '@/api/imageGeneration'
+import { apiErrorMessage } from '@/api/errors'
 import { listCompletedScriptTasks } from '@/api/imagePrompts'
 import { listProjects, type Project } from '@/api/projects'
 import type { ScriptTask } from '@/api/scripts'
+import { formatLocalNowTime } from '@/utils/datetime'
 
 type TimelineLevel = 'primary' | 'success' | 'warning' | 'danger' | 'info'
 
@@ -44,7 +46,7 @@ type PromptNodeCandidate = {
   text: string
 }
 
-const { t } = useI18n()
+const { locale, t } = useI18n()
 
 const projects = ref<Project[]>([])
 const tasks = ref<ScriptTask[]>([])
@@ -94,12 +96,7 @@ const canGenerate = computed(
   () => selectedTaskId.value !== null && selectedWorkflowId.value !== null && !generating.value,
 )
 
-const nowLabel = () =>
-  new Intl.DateTimeFormat('zh-CN', {
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  }).format(new Date())
+const nowLabel = () => formatLocalNowTime(locale.value)
 
 const shortText = (value: string | null, maxLength = 120) => {
   if (!value) {
@@ -126,6 +123,13 @@ const eventType = (event: string): TimelineLevel => {
 }
 
 const describePayload = (event: string, payload: Record<string, unknown>) => {
+  if (typeof payload.code === 'string') {
+    const key = `backendErrors.${payload.code}`
+    const translated = t(key)
+    if (translated !== key) {
+      return translated
+    }
+  }
   if (event === 'start') {
     return t('imageGeneration.events.startText', {
       taskId: String(payload.task_id ?? '-'),
@@ -486,13 +490,17 @@ const generateBatch = async () => {
           ElMessage.warning(t('imageGeneration.messages.suspended'))
         }
       },
-      onError: (message) => {
-        addProgressEvent('error', { message })
-        ElMessage.error(message || t('imageGeneration.errors.generateFailed'))
+      onError: (error) => {
+        const message = apiErrorMessage(error, t, t('imageGeneration.errors.generateFailed'))
+        addProgressEvent('error', {
+          code: error.code,
+          message,
+        })
+        ElMessage.error(message)
       },
     })
-  } catch {
-    ElMessage.error(t('imageGeneration.errors.generateFailed'))
+  } catch (error) {
+    ElMessage.error(apiErrorMessage(error, t, t('imageGeneration.errors.generateFailed')))
   } finally {
     generating.value = false
     suspending.value = false
@@ -517,13 +525,17 @@ const generatePage = async (page: ImageGenerationPage) => {
           ElMessage.success(t('imageGeneration.messages.generated'))
         }
       },
-      onError: (message) => {
-        addProgressEvent('error', { message })
-        ElMessage.error(message || t('imageGeneration.errors.generateFailed'))
+      onError: (error) => {
+        const message = apiErrorMessage(error, t, t('imageGeneration.errors.generateFailed'))
+        addProgressEvent('error', {
+          code: error.code,
+          message,
+        })
+        ElMessage.error(message)
       },
     })
-  } catch {
-    ElMessage.error(t('imageGeneration.errors.generateFailed'))
+  } catch (error) {
+    ElMessage.error(apiErrorMessage(error, t, t('imageGeneration.errors.generateFailed')))
   } finally {
     generating.value = false
   }

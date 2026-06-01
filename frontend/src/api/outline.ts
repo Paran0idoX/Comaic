@@ -1,3 +1,5 @@
+import { ApiError, apiHeaders, normalizeBackendError, parseApiErrorResponse } from './errors'
+
 export type OutlineVersion = {
   version_id: number
   version_no: number
@@ -26,7 +28,7 @@ type StreamOutlineChatOptions = {
   onToken: (text: string) => void
   onOutline: (outline: OutlineVersion) => void
   onDone: (threadId: string) => void
-  onError: (message: string) => void
+  onError: (error: ApiError) => void
 }
 
 type SseEvent = {
@@ -37,15 +39,11 @@ type SseEvent = {
 const requestJson = async <T>(url: string, options: RequestInit): Promise<T> => {
   const response = await fetch(url, {
     ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
+    headers: apiHeaders(options.headers),
   })
 
   if (!response.ok) {
-    const errorText = await response.text()
-    throw new Error(errorText || response.statusText)
+    throw await parseApiErrorResponse(response)
   }
 
   return (await response.json()) as T
@@ -68,9 +66,7 @@ export const streamOutlineChat = async ({
 }: StreamOutlineChatOptions): Promise<void> => {
   const response = await fetch('/api/outline/chat/stream', {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
+    headers: apiHeaders(),
     body: JSON.stringify({
       thread_id: threadId,
       message,
@@ -78,8 +74,7 @@ export const streamOutlineChat = async ({
   })
 
   if (!response.ok || response.body === null) {
-    const errorText = await response.text()
-    throw new Error(errorText || response.statusText)
+    throw await parseApiErrorResponse(response)
   }
 
   const reader = response.body.getReader()
@@ -96,7 +91,13 @@ export const streamOutlineChat = async ({
     } else if (event.event === 'done') {
       onDone(String(payload.thread_id ?? threadId))
     } else if (event.event === 'error') {
-      onError(String(payload.message ?? 'Stream error'))
+      const backendError = normalizeBackendError(payload)
+      onError(
+        new ApiError(backendError.message || 'Stream error', {
+          code: backendError.code,
+          payload,
+        }),
+      )
     }
   }
 

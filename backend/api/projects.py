@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Response, status
+from fastapi import APIRouter, Request, Response, status
 
 from backend.api.schemas.project import (
     CreateProjectRequest,
@@ -9,6 +9,8 @@ from backend.api.schemas.project import (
 from backend.models.comic import ComicProject
 from backend.models.database import SessionLocal
 from backend.repositories.comic_repository import ComicRepository
+from backend.i18n.errors import http_exception
+from backend.i18n.locale import request_locale
 from backend.services.project_service import ProjectService
 
 
@@ -46,7 +48,7 @@ def list_projects() -> ProjectListResponse:
 
 
 @router.post("", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED)
-def create_project(request: CreateProjectRequest) -> ProjectResponse:
+def create_project(request: CreateProjectRequest, http_request: Request) -> ProjectResponse:
     """创建项目；标题空白校验放在 Service 层统一处理。"""
 
     db_session, service = create_service()
@@ -54,13 +56,13 @@ def create_project(request: CreateProjectRequest) -> ProjectResponse:
         project = service.create_project(title=request.title)
         return project_to_response(project)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise http_exception(exc, request_locale(http_request)) from exc
     finally:
         db_session.close()
 
 
 @router.get("/{project_id}", response_model=ProjectResponse)
-def get_project(project_id: int) -> ProjectResponse:
+def get_project(project_id: int, http_request: Request) -> ProjectResponse:
     """读取单个项目；不存在时返回 404。"""
 
     db_session, service = create_service()
@@ -68,13 +70,17 @@ def get_project(project_id: int) -> ProjectResponse:
         project = service.get_project(project_id)
         return project_to_response(project)
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise http_exception(exc, request_locale(http_request)) from exc
     finally:
         db_session.close()
 
 
 @router.put("/{project_id}", response_model=ProjectResponse)
-def update_project(project_id: int, request: UpdateProjectRequest) -> ProjectResponse:
+def update_project(
+    project_id: int,
+    request: UpdateProjectRequest,
+    http_request: Request,
+) -> ProjectResponse:
     """更新项目标题；空标题返回 400，项目不存在返回 404。"""
 
     db_session, service = create_service()
@@ -82,15 +88,13 @@ def update_project(project_id: int, request: UpdateProjectRequest) -> ProjectRes
         project = service.update_project(project_id=project_id, title=request.title)
         return project_to_response(project)
     except ValueError as exc:
-        message = str(exc)
-        status_code = 404 if "not found" in message else 400
-        raise HTTPException(status_code=status_code, detail=message) from exc
+        raise http_exception(exc, request_locale(http_request)) from exc
     finally:
         db_session.close()
 
 
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_project(project_id: int) -> Response:
+def delete_project(project_id: int, http_request: Request) -> Response:
     """硬删除项目；前端负责二次确认，后端执行实际删除。"""
 
     db_session, service = create_service()
@@ -98,6 +102,6 @@ def delete_project(project_id: int) -> Response:
         service.delete_project(project_id)
         return Response(status_code=status.HTTP_204_NO_CONTENT)
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise http_exception(exc, request_locale(http_request)) from exc
     finally:
         db_session.close()

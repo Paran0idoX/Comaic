@@ -1,5 +1,6 @@
 from backend.agents.script_deep_agent import ScriptDeepAgent
 from backend.agents.script_planning_agent import ScriptPlanningAgent
+from backend.i18n.errors import app_error_from_exception
 from backend.models.comic import (
     ComicPage,
     ComicProject,
@@ -177,7 +178,7 @@ class ScriptService:
             user_requirement=user_requirement,
         )
         yield "task", {"task_id": task.id, "status": task.status.value}
-        yield "phase", {"message": "正在生成故事节奏划分"}
+        yield "phase", {"code": "script.planning.started"}
 
         try:
             normalized_sections: list[dict] | None = None
@@ -192,7 +193,8 @@ class ScriptService:
                     return
                 if attempt > 1:
                     yield "phase", {
-                        "message": f"分段计划校验失败，正在第 {attempt} 次重试",
+                        "code": "script.planning.retry",
+                        "attempt": attempt,
                     }
                 raw_sections = await planning_agent.generate_section_plan(
                     outline=outline_version.content,
@@ -229,7 +231,7 @@ class ScriptService:
             }
             for section in persisted_sections:
                 yield "section", self._section_to_payload(section)
-            yield "phase", {"message": "分段计划已锁定，正在生成页面脚本"}
+            yield "phase", {"code": "script.planning.locked"}
 
             script_agent = ScriptDeepAgent()
             for section in persisted_sections:
@@ -238,10 +240,10 @@ class ScriptService:
                     return
 
                 yield "phase", {
-                    "message": (
-                        f"正在生成第 {section.section_no} 段"
-                        f"（第 {section.page_start}-{section.page_end} 页）"
-                    )
+                    "code": "script.section.generating",
+                    "section_no": section.section_no,
+                    "page_start": section.page_start,
+                    "page_end": section.page_end,
                 }
                 feedback = ""
                 normalized_pages: list[dict] | None = None
@@ -255,10 +257,9 @@ class ScriptService:
                         return
                     if attempt > 1:
                         yield "phase", {
-                            "message": (
-                                f"第 {section.section_no} 段脚本校验失败，"
-                                f"正在第 {attempt} 次重试"
-                            )
+                            "code": "script.section.retry",
+                            "section_no": section.section_no,
+                            "attempt": attempt,
                         }
                     result = await script_agent.generate_section(
                         outline=outline_version.content,
@@ -272,10 +273,10 @@ class ScriptService:
                         feedback=feedback,
                     )
                     yield "phase", {
-                        "message": (
-                            f"第 {section.section_no} 段 Agent 已返回，"
-                            f"正在校验第 {section.page_start}-{section.page_end} 页"
-                        )
+                        "code": "script.section.agent_returned",
+                        "section_no": section.section_no,
+                        "page_start": section.page_start,
+                        "page_end": section.page_end,
                     }
                     try:
                         normalized_pages = self._normalize_section_pages(
@@ -283,16 +284,16 @@ class ScriptService:
                             section=section,
                         )
                         yield "phase", {
-                            "message": (
-                                f"第 {section.section_no} 段校验通过，"
-                                f"正在保存 {len(normalized_pages)} 页脚本"
-                            )
+                            "code": "script.section.validated",
+                            "section_no": section.section_no,
+                            "count": len(normalized_pages),
                         }
                         break
                     except ValueError as exc:
                         feedback = str(exc)
                         yield "phase", {
-                            "message": f"第 {section.section_no} 段脚本校验失败：{feedback}"
+                            "code": "script.section.validation_failed",
+                            "section_no": section.section_no,
                         }
                         if attempt >= 3:
                             raise ValueError(
@@ -313,9 +314,7 @@ class ScriptService:
                     section=section,
                     pages=normalized_pages,
                 )
-                yield "phase", {
-                    "message": f"第 {section.section_no} 段已保存，正在推送页面列表"
-                }
+                yield "phase", {"code": "script.section.saved", "section_no": section.section_no}
                 reviews = [
                     review if isinstance(review, dict) else {"comments": str(review)}
                     for review in result.get("reviews", [])
@@ -342,10 +341,11 @@ class ScriptService:
                 status=ScriptGenerationTaskStatus.FAILED,
                 error_message=str(exc),
             )
+            error = app_error_from_exception(exc)
             yield "error", {
                 "task_id": task.id,
                 "status": task.status.value,
-                "message": str(exc),
+                "code": error.code,
             }
 
     def _get_project(self, project_id: int) -> ComicProject:

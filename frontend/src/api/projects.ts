@@ -1,3 +1,5 @@
+import { apiHeaders, parseApiErrorResponse } from './errors'
+
 export type Project = {
   id: number
   title: string
@@ -21,15 +23,11 @@ export type UpdateProjectPayload = {
 const request = async <T>(url: string, options: RequestInit = {}): Promise<T> => {
   const response = await fetch(url, {
     ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
+    headers: apiHeaders(options.headers),
   })
 
   if (!response.ok) {
-    const errorText = await response.text()
-    throw new Error(errorText || response.statusText)
+    throw await parseApiErrorResponse(response)
   }
 
   if (response.status === 204) {

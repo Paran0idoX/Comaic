@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Response, status
+from fastapi import APIRouter, Request, Response, status
 from fastapi.responses import FileResponse
 from sse_starlette.sse import EventSourceResponse
 
@@ -14,10 +14,12 @@ from backend.api.schemas.image_generation import (
     ImageGenerationPageListResponse,
     ImageGenerationPageResponse,
 )
-from backend.api.scripts import SSE_HEADERS, sse_event, value_error_status_code
+from backend.api.scripts import SSE_HEADERS, sse_event
 from backend.models.comic import ComicImage, ComicPage, ComfyWorkflowPreset, GenerationTask
 from backend.models.database import SessionLocal
 from backend.repositories.comic_repository import ComicRepository
+from backend.i18n.errors import AppError, http_exception, sse_error_payload
+from backend.i18n.locale import request_locale
 from backend.services.image_generation_service import ImageGenerationService
 
 
@@ -102,7 +104,10 @@ def list_workflows() -> ComfyWorkflowPresetListResponse:
 
 
 @router.post("/workflows", response_model=ComfyWorkflowPresetResponse, status_code=status.HTTP_201_CREATED)
-def create_workflow(request: ComfyWorkflowPresetRequest) -> ComfyWorkflowPresetResponse:
+def create_workflow(
+    request: ComfyWorkflowPresetRequest,
+    http_request: Request,
+) -> ComfyWorkflowPresetResponse:
     """创建 ComfyUI workflow 配置。"""
 
     with SessionLocal() as db_session:
@@ -110,12 +115,16 @@ def create_workflow(request: ComfyWorkflowPresetRequest) -> ComfyWorkflowPresetR
         try:
             preset = service.create_workflow_preset(**request.model_dump())
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            raise http_exception(exc, request_locale(http_request)) from exc
         return workflow_to_response(preset)
 
 
 @router.put("/workflows/{workflow_id}", response_model=ComfyWorkflowPresetResponse)
-def update_workflow(workflow_id: int, request: ComfyWorkflowPresetRequest) -> ComfyWorkflowPresetResponse:
+def update_workflow(
+    workflow_id: int,
+    request: ComfyWorkflowPresetRequest,
+    http_request: Request,
+) -> ComfyWorkflowPresetResponse:
     """更新 ComfyUI workflow 配置。"""
 
     with SessionLocal() as db_session:
@@ -123,12 +132,12 @@ def update_workflow(workflow_id: int, request: ComfyWorkflowPresetRequest) -> Co
         try:
             preset = service.update_workflow_preset(preset_id=workflow_id, **request.model_dump())
         except ValueError as exc:
-            raise HTTPException(status_code=value_error_status_code(exc), detail=str(exc)) from exc
+            raise http_exception(exc, request_locale(http_request)) from exc
         return workflow_to_response(preset)
 
 
 @router.delete("/workflows/{workflow_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_workflow(workflow_id: int) -> Response:
+def delete_workflow(workflow_id: int, http_request: Request) -> Response:
     """删除 ComfyUI workflow 配置。"""
 
     with SessionLocal() as db_session:
@@ -136,12 +145,12 @@ def delete_workflow(workflow_id: int) -> Response:
         try:
             service.delete_workflow_preset(workflow_id)
         except ValueError as exc:
-            raise HTTPException(status_code=value_error_status_code(exc), detail=str(exc)) from exc
+            raise http_exception(exc, request_locale(http_request)) from exc
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/script-tasks/{task_id}/pages", response_model=ImageGenerationPageListResponse)
-def list_generation_pages(task_id: int) -> ImageGenerationPageListResponse:
+def list_generation_pages(task_id: int, http_request: Request) -> ImageGenerationPageListResponse:
     """读取脚本任务下的图片生成页面状态和已有图片。"""
 
     with SessionLocal() as db_session:
@@ -150,7 +159,7 @@ def list_generation_pages(task_id: int) -> ImageGenerationPageListResponse:
         try:
             pages = service.list_script_task_pages(task_id)
         except ValueError as exc:
-            raise HTTPException(status_code=value_error_status_code(exc), detail=str(exc)) from exc
+            raise http_exception(exc, request_locale(http_request)) from exc
         project_id = pages[0].project_id if pages else 0
         return ImageGenerationPageListResponse(
             task_id=task_id,
@@ -163,8 +172,11 @@ def list_generation_pages(task_id: int) -> ImageGenerationPageListResponse:
 def stream_generate_for_script_task(
     task_id: int,
     request: GenerateImagesRequest,
+    http_request: Request,
 ) -> EventSourceResponse:
     """批量生成脚本任务下所有页面图片，并用 SSE 返回进度。"""
+
+    locale = request_locale(http_request)
 
     async def event_generator():
         with SessionLocal() as db_session:
@@ -179,14 +191,20 @@ def stream_generate_for_script_task(
                 ):
                     yield sse_event(event, payload)
             except Exception as exc:
-                yield sse_event("error", {"message": str(exc)})
+                yield sse_event("error", sse_error_payload(exc, locale))
 
     return EventSourceResponse(event_generator(), headers=SSE_HEADERS, ping=5)
 
 
 @router.post("/pages/{page_id}/generate/stream")
-def stream_generate_for_page(page_id: int, request: GenerateImagesRequest) -> EventSourceResponse:
+def stream_generate_for_page(
+    page_id: int,
+    request: GenerateImagesRequest,
+    http_request: Request,
+) -> EventSourceResponse:
     """单页追加生成图片候选。"""
+
+    locale = request_locale(http_request)
 
     async def event_generator():
         with SessionLocal() as db_session:
@@ -201,13 +219,13 @@ def stream_generate_for_page(page_id: int, request: GenerateImagesRequest) -> Ev
                 ):
                     yield sse_event(event, payload)
             except Exception as exc:
-                yield sse_event("error", {"message": str(exc)})
+                yield sse_event("error", sse_error_payload(exc, locale))
 
     return EventSourceResponse(event_generator(), headers=SSE_HEADERS, ping=5)
 
 
 @router.post("/tasks/{task_id}/suspend", response_model=GenerationTaskResponse)
-def suspend_generation_task(task_id: int) -> GenerationTaskResponse:
+def suspend_generation_task(task_id: int, http_request: Request) -> GenerationTaskResponse:
     """暂停图片生成任务：停止提交后续页面，不 interrupt 当前 ComfyUI prompt。"""
 
     with SessionLocal() as db_session:
@@ -215,12 +233,12 @@ def suspend_generation_task(task_id: int) -> GenerationTaskResponse:
         try:
             task = service.suspend_generation_task(task_id)
         except ValueError as exc:
-            raise HTTPException(status_code=value_error_status_code(exc), detail=str(exc)) from exc
+            raise http_exception(exc, request_locale(http_request)) from exc
         return task_to_response(task)
 
 
 @router.post("/pages/{page_id}/images/{image_id}/select", response_model=ImageGenerationPageResponse)
-def select_image(page_id: int, image_id: int) -> ImageGenerationPageResponse:
+def select_image(page_id: int, image_id: int, http_request: Request) -> ImageGenerationPageResponse:
     """人工选择某页最终图片。"""
 
     with SessionLocal() as db_session:
@@ -229,19 +247,25 @@ def select_image(page_id: int, image_id: int) -> ImageGenerationPageResponse:
         try:
             page = service.select_image(page_id=page_id, image_id=image_id)
         except ValueError as exc:
-            raise HTTPException(status_code=value_error_status_code(exc), detail=str(exc)) from exc
+            raise http_exception(exc, request_locale(http_request)) from exc
         return page_to_response(page, repo)
 
 
 @router.get("/images/{image_id}/file")
-def get_image_file(image_id: int) -> FileResponse:
+def get_image_file(image_id: int, http_request: Request) -> FileResponse:
     """读取本地 outputs 中的生成图片文件。"""
 
     with SessionLocal() as db_session:
         image = db_session.get(ComicImage, image_id)
         if image is None or not image.local_path:
-            raise HTTPException(status_code=404, detail=f"ComicImage file not found: {image_id}")
+            raise http_exception(
+                AppError("image_generation.file_not_found", status_code=404),
+                request_locale(http_request),
+            )
         local_path = Path(image.local_path)
         if not local_path.exists():
-            raise HTTPException(status_code=404, detail=f"ComicImage file not found: {image_id}")
+            raise http_exception(
+                AppError("image_generation.file_not_found", status_code=404),
+                request_locale(http_request),
+            )
         return FileResponse(local_path)

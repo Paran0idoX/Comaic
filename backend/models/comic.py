@@ -3,7 +3,7 @@ from typing import Optional
 
 from enum import Enum
 
-from sqlalchemy import Boolean, DateTime, Enum as SqlEnum, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Enum as SqlEnum, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.models.database import Base
@@ -16,6 +16,7 @@ from backend.models.enums import (
     ScriptGenerationTaskStatus,
     SessionPurpose,
 )
+from backend.models.time import AwareUTCDateTime, utc_now
 
 
 def enum_column(enum_type: type[Enum], **kwargs):
@@ -35,11 +36,11 @@ def enum_column(enum_type: type[Enum], **kwargs):
 class TimestampMixin:
     """给需要时间戳的表复用 created_at / updated_at 字段。"""
 
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(AwareUTCDateTime(), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime,
-        default=datetime.utcnow,
-        onupdate=datetime.utcnow,
+        AwareUTCDateTime(),
+        default=utc_now,
+        onupdate=utc_now,
     )
 
 
@@ -145,7 +146,7 @@ class OutlineVersion(Base):
         OutlineVersionStatus,
         default=OutlineVersionStatus.ACTIVE,
     )
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(AwareUTCDateTime(), default=utc_now)
 
     project: Mapped["ComicProject"] = relationship(back_populates="outline_versions")
     session: Mapped["Session"] = relationship(back_populates="outline_versions")
@@ -215,7 +216,7 @@ class ComicImage(Base):
     negative_prompt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     is_selected: Mapped[bool] = mapped_column(Boolean, default=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(AwareUTCDateTime(), default=utc_now)
 
     page: Mapped["ComicPage"] = relationship(
         back_populates="images",

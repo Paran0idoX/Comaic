@@ -1,4 +1,5 @@
 import type { ScriptTask } from './scripts'
+import { ApiError, apiHeaders, normalizeBackendError, parseApiErrorResponse } from './errors'
 
 export const IMAGE_PROMPT_PRESET_KINDS = {
   system: 'script_to_image_system_prompt',
@@ -38,6 +39,7 @@ export type ImagePromptGenerationItem = {
   image_prompt: string | null
   status: string
   error: string | null
+  error_code?: string | null
 }
 
 export type GenerateImagePromptsResponse = {
@@ -55,21 +57,17 @@ type SseEvent = {
 
 export type ImagePromptStreamCallbacks = {
   onEvent: (event: string, payload: Record<string, unknown>) => void
-  onError: (message: string) => void
+  onError: (error: ApiError) => void
 }
 
 const requestJson = async <T>(url: string, options: RequestInit = {}): Promise<T> => {
   const response = await fetch(url, {
     ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
+    headers: apiHeaders(options.headers),
   })
 
   if (!response.ok) {
-    const errorText = await response.text()
-    throw new Error(errorText || response.statusText)
+    throw await parseApiErrorResponse(response)
   }
 
   if (response.status === 204) {
@@ -133,15 +131,12 @@ export const streamGenerateImagePromptsForTask = async (
 ): Promise<void> => {
   const response = await fetch(`/api/image-prompts/script-tasks/${taskId}/generate/stream`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
+    headers: apiHeaders(),
     body: JSON.stringify(payload),
   })
 
   if (!response.ok || response.body === null) {
-    const errorText = await response.text()
-    throw new Error(errorText || response.statusText)
+    throw await parseApiErrorResponse(response)
   }
 
   const reader = response.body.getReader()
@@ -151,7 +146,13 @@ export const streamGenerateImagePromptsForTask = async (
   const handleEvent = (event: SseEvent) => {
     const payload = event.data ? JSON.parse(event.data) : {}
     if (event.event === 'error') {
-      callbacks.onError(String(payload.message ?? 'Image prompt stream error'))
+      const backendError = normalizeBackendError(payload)
+      callbacks.onError(
+        new ApiError(backendError.message || 'Image prompt stream error', {
+          code: backendError.code,
+          payload,
+        }),
+      )
       return
     }
     callbacks.onEvent(event.event, payload as Record<string, unknown>)
