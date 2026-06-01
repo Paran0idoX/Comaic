@@ -3,6 +3,7 @@ from collections.abc import Callable, Sequence
 from typing import Any, TypeVar
 
 from langchain_core.messages import BaseMessage, HumanMessage
+from langchain_core.runnables import RunnableConfig
 from pydantic import BaseModel, ValidationError
 
 
@@ -22,6 +23,7 @@ async def ainvoke_structured_with_retries(
     response_model: type[ResponseT],
     operation: str,
     max_retries: int = 3,
+    config: RunnableConfig | None = None,
     validator: Callable[[ResponseT], None] | None = None,
 ) -> ResponseT:
     """调用使用 response_format 的 Agent，并在结构化结果不可用时自动重试。
@@ -46,7 +48,10 @@ async def ainvoke_structured_with_retries(
             max_retries,
         )
 
-        result_state = await agent.ainvoke({"messages": attempt_messages})
+        result_state = await agent.ainvoke(
+            {"messages": attempt_messages},
+            config=config,
+        )
         try:
             response = _parse_structured_response(
                 result_state=result_state,

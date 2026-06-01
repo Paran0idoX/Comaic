@@ -45,9 +45,9 @@ const activePath = computed(() => route.path)
         <el-icon><MagicStick /></el-icon>
         <span>{{ t('nav.prompts') }}</span>
       </el-menu-item>
-      <el-menu-item index="/gallery" disabled>
+      <el-menu-item index="/image-generation">
         <el-icon><Picture /></el-icon>
-        <span>{{ t('nav.gallery') }}</span>
+        <span>{{ t('nav.imageGeneration') }}</span>
       </el-menu-item>
     </el-menu>
   </aside>
