@@ -1,6 +1,6 @@
 import json
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Request
 from sse_starlette.sse import EventSourceResponse, ServerSentEvent
 
 from backend.api.schemas.script import (
@@ -18,6 +18,8 @@ from backend.api.schemas.script import (
 from backend.models.comic import ComicPage, ScriptGenerationTask, ScriptSection
 from backend.models.database import SessionLocal
 from backend.repositories.comic_repository import ComicRepository
+from backend.i18n.errors import http_exception, sse_error_payload
+from backend.i18n.locale import request_locale
 from backend.services.script_service import ScriptService
 
 
@@ -100,16 +102,10 @@ def section_to_response(section: ScriptSection) -> ScriptSectionResponse:
     )
 
 
-def value_error_status_code(exc: ValueError) -> int:
-    """把业务层 ValueError 映射到更明确的 HTTP 状态码。"""
-
-    message = str(exc).lower()
-    return 404 if "not found" in message else 400
-
-
 @router.post("/pages/generate", response_model=SinglePageScriptResponse)
 async def generate_single_page_script(
     request: GenerateSinglePageScriptRequest,
+    http_request: Request,
 ) -> SinglePageScriptResponse:
     """生成单页漫画脚本并保存。"""
 
@@ -124,7 +120,7 @@ async def generate_single_page_script(
                 user_requirement=request.user_requirement,
             )
         except ValueError as exc:
-            raise HTTPException(status_code=value_error_status_code(exc), detail=str(exc)) from exc
+            raise http_exception(exc, request_locale(http_request)) from exc
 
         return SinglePageScriptResponse(
             task_id=task.id,
@@ -142,8 +138,13 @@ async def generate_single_page_script(
 
 
 @router.post("/batch/stream")
-def stream_batch_script_generation(request: GenerateBatchScriptRequest) -> EventSourceResponse:
+def stream_batch_script_generation(
+    request: GenerateBatchScriptRequest,
+    http_request: Request,
+) -> EventSourceResponse:
     """用 SSE 返回批量分页脚本生成进度。"""
+
+    locale = request_locale(http_request)
 
     async def event_generator():
         with SessionLocal() as db_session:
@@ -157,13 +158,13 @@ def stream_batch_script_generation(request: GenerateBatchScriptRequest) -> Event
                 ):
                     yield sse_event(event, payload)
             except Exception as exc:
-                yield sse_event("error", {"message": str(exc)})
+                yield sse_event("error", sse_error_payload(exc, locale))
 
     return EventSourceResponse(event_generator(), headers=SSE_HEADERS, ping=5)
 
 
 @router.get("/tasks/{task_id}", response_model=ScriptTaskResponse)
-def get_script_task(task_id: int) -> ScriptTaskResponse:
+def get_script_task(task_id: int, http_request: Request) -> ScriptTaskResponse:
     """查询分页脚本生成任务状态。"""
 
     with SessionLocal() as db_session:
@@ -171,12 +172,12 @@ def get_script_task(task_id: int) -> ScriptTaskResponse:
         try:
             task = service.get_script_task(task_id)
         except ValueError as exc:
-            raise HTTPException(status_code=value_error_status_code(exc), detail=str(exc)) from exc
+            raise http_exception(exc, request_locale(http_request)) from exc
         return task_to_response(task)
 
 
 @router.post("/tasks/{task_id}/suspend", response_model=ScriptTaskResponse)
-def suspend_script_task(task_id: int) -> ScriptTaskResponse:
+def suspend_script_task(task_id: int, http_request: Request) -> ScriptTaskResponse:
     """暂停分页脚本批量生成任务；已保存的分段和页面脚本会保留。"""
 
     with SessionLocal() as db_session:
@@ -184,12 +185,12 @@ def suspend_script_task(task_id: int) -> ScriptTaskResponse:
         try:
             task = service.suspend_script_task(task_id=task_id)
         except ValueError as exc:
-            raise HTTPException(status_code=value_error_status_code(exc), detail=str(exc)) from exc
+            raise http_exception(exc, request_locale(http_request)) from exc
         return task_to_response(task)
 
 
 @router.get("/tasks/{task_id}/sections", response_model=ScriptSectionListResponse)
-def list_script_task_sections(task_id: int) -> ScriptSectionListResponse:
+def list_script_task_sections(task_id: int, http_request: Request) -> ScriptSectionListResponse:
     """读取脚本任务下的分段及其页面，便于前端按分段展示。"""
 
     with SessionLocal() as db_session:
@@ -197,12 +198,12 @@ def list_script_task_sections(task_id: int) -> ScriptSectionListResponse:
         try:
             sections = service.list_script_task_sections(task_id=task_id)
         except ValueError as exc:
-            raise HTTPException(status_code=value_error_status_code(exc), detail=str(exc)) from exc
+            raise http_exception(exc, request_locale(http_request)) from exc
         return ScriptSectionListResponse(items=[section_to_response(section) for section in sections])
 
 
 @router.delete("/tasks/{task_id}/sections", response_model=ScriptSectionListResponse)
-def delete_script_task_sections(task_id: int) -> ScriptSectionListResponse:
+def delete_script_task_sections(task_id: int, http_request: Request) -> ScriptSectionListResponse:
     """删除脚本任务下全部分段，并同步删除这些分段下的页面。"""
 
     with SessionLocal() as db_session:
@@ -210,12 +211,12 @@ def delete_script_task_sections(task_id: int) -> ScriptSectionListResponse:
         try:
             service.delete_script_task_sections(task_id=task_id)
         except ValueError as exc:
-            raise HTTPException(status_code=value_error_status_code(exc), detail=str(exc)) from exc
+            raise http_exception(exc, request_locale(http_request)) from exc
         return ScriptSectionListResponse(items=[])
 
 
 @project_pages_router.get("/{project_id}/pages", response_model=ScriptPageListResponse)
-def list_project_pages(project_id: int) -> ScriptPageListResponse:
+def list_project_pages(project_id: int, http_request: Request) -> ScriptPageListResponse:
     """按页码读取项目页面脚本。"""
 
     with SessionLocal() as db_session:
@@ -223,12 +224,12 @@ def list_project_pages(project_id: int) -> ScriptPageListResponse:
         try:
             pages = service.list_project_pages(project_id=project_id)
         except ValueError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+            raise http_exception(exc, request_locale(http_request)) from exc
         return ScriptPageListResponse(items=[page_to_response(page) for page in pages])
 
 
 @project_pages_router.delete("/{project_id}/pages", response_model=ScriptPageListResponse)
-def delete_project_pages(project_id: int) -> ScriptPageListResponse:
+def delete_project_pages(project_id: int, http_request: Request) -> ScriptPageListResponse:
     """硬删除项目下全部页面行；会同步删除页面候选图并保留出图任务历史。"""
 
     with SessionLocal() as db_session:
@@ -236,12 +237,16 @@ def delete_project_pages(project_id: int) -> ScriptPageListResponse:
         try:
             service.delete_project_pages(project_id=project_id)
         except ValueError as exc:
-            raise HTTPException(status_code=value_error_status_code(exc), detail=str(exc)) from exc
+            raise http_exception(exc, request_locale(http_request)) from exc
         return ScriptPageListResponse(items=[])
 
 
 @project_pages_router.post("/{project_id}/pages/scripts", response_model=ScriptPageResponse)
-def create_page_script(project_id: int, request: CreatePageScriptRequest) -> ScriptPageResponse:
+def create_page_script(
+    project_id: int,
+    request: CreatePageScriptRequest,
+    http_request: Request,
+) -> ScriptPageResponse:
     """人工新增页面脚本；同页已存在时按 upsert 更新。"""
 
     with SessionLocal() as db_session:
@@ -259,7 +264,7 @@ def create_page_script(project_id: int, request: CreatePageScriptRequest) -> Scr
                 dialogue=request.dialogue,
             )
         except ValueError as exc:
-            raise HTTPException(status_code=value_error_status_code(exc), detail=str(exc)) from exc
+            raise http_exception(exc, request_locale(http_request)) from exc
         return page_to_response(page)
 
 
@@ -268,6 +273,7 @@ def update_page_script(
     project_id: int,
     page_no: int,
     request: UpdatePageScriptRequest,
+    http_request: Request,
 ) -> ScriptPageResponse:
     """人工更新页面脚本。"""
 
@@ -286,12 +292,12 @@ def update_page_script(
                 dialogue=request.dialogue,
             )
         except ValueError as exc:
-            raise HTTPException(status_code=value_error_status_code(exc), detail=str(exc)) from exc
+            raise http_exception(exc, request_locale(http_request)) from exc
         return page_to_response(page)
 
 
 @project_pages_router.delete("/{project_id}/pages/{page_no}/script", response_model=ScriptPageResponse)
-def clear_page_script(project_id: int, page_no: int) -> ScriptPageResponse:
+def clear_page_script(project_id: int, page_no: int, http_request: Request) -> ScriptPageResponse:
     """人工清空页面脚本；保留页面记录。"""
 
     with SessionLocal() as db_session:
@@ -299,5 +305,5 @@ def clear_page_script(project_id: int, page_no: int) -> ScriptPageResponse:
         try:
             page = service.clear_page_script(project_id=project_id, page_no=page_no)
         except ValueError as exc:
-            raise HTTPException(status_code=value_error_status_code(exc), detail=str(exc)) from exc
+            raise http_exception(exc, request_locale(http_request)) from exc
         return page_to_response(page)

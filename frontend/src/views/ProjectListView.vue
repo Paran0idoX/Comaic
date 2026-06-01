@@ -12,6 +12,7 @@ import {
   type Project,
   updateProject,
 } from '@/api/projects'
+import { formatLocalDateTime } from '@/utils/datetime'
 
 const router = useRouter()
 const { locale, t } = useI18n()
@@ -119,8 +120,7 @@ const openOutline = (project: Project) => {
 }
 
 const formatDate = (value: string) => {
-  const formatterLocale = locale.value === 'zh' ? 'zh-CN' : 'en-US'
-  return new Date(value).toLocaleString(formatterLocale)
+  return formatLocalDateTime(value, locale.value)
 }
 
 onMounted(() => {

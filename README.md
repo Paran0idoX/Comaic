@@ -253,6 +253,16 @@ cd frontend
 npm run build
 ```
 
+后端文案 catalog 更新：
+
+```bash
+pybabel extract -F backend/babel.cfg -o backend/locales/messages.pot backend
+pybabel update -i backend/locales/messages.pot -d backend/locales
+pybabel compile -d backend/locales
+```
+
+前端界面和进度时间线文案由 `vue-i18n` 管理；后端业务错误会返回稳定 `code` 和按请求语言本地化后的 `message`。前端请求会自动携带当前界面语言。
+
 ## 本地数据
 
 - SQLite 默认保存到 `data/comaic.sqlite3`
@@ -265,6 +275,8 @@ npm run build
 rm data/comaic.sqlite3
 ./start.sh
 ```
+
+时间字段以带 `+00:00` 的 UTC ISO8601 字符串写入 SQLite，页面展示时会自动转成浏览器本地时间。若你从旧版本升级到当前版本，请删除旧的本地 SQLite 后重建。
 
 如果你已经积累了重要数据，请先备份数据库。
 

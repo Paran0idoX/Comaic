@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Response, status
+from fastapi import APIRouter, Request, Response, status
 from sse_starlette.sse import EventSourceResponse
 
 from backend.api.schemas.image_prompt import (
@@ -10,11 +10,13 @@ from backend.api.schemas.image_prompt import (
     ImagePromptPresetResponse,
 )
 from backend.api.schemas.script import ScriptTaskResponse
-from backend.api.scripts import SSE_HEADERS, sse_event, task_to_response, value_error_status_code
+from backend.api.scripts import SSE_HEADERS, sse_event, task_to_response
 from backend.models.comic import ImagePromptPreset
 from backend.models.database import SessionLocal
 from backend.models.enums import ImagePromptPresetKind
 from backend.repositories.comic_repository import ComicRepository
+from backend.i18n.errors import http_exception, sse_error_payload
+from backend.i18n.locale import request_locale
 from backend.services.image_prompt_service import (
     ImagePromptGenerateItem,
     ImagePromptGenerateResult,
@@ -48,7 +50,7 @@ def parse_preset_kind(value: str | None) -> ImagePromptPresetKind | None:
     try:
         return ImagePromptPresetKind(value)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=f"Invalid image prompt preset kind: {value}") from exc
+        raise ValueError(f"Invalid image prompt preset kind: {value}") from exc
 
 
 def generation_item_to_response(item: ImagePromptGenerateItem) -> ImagePromptGenerationItemResponse:
@@ -60,6 +62,7 @@ def generation_item_to_response(item: ImagePromptGenerateItem) -> ImagePromptGen
         image_prompt=item.image_prompt,
         status=item.status,
         error=item.error,
+        error_code=item.error_code,
     )
 
 
@@ -76,17 +79,20 @@ def generation_result_to_response(result: ImagePromptGenerateResult) -> Generate
 
 
 @router.get("/presets", response_model=ImagePromptPresetListResponse)
-def list_presets(kind: str | None = None) -> ImagePromptPresetListResponse:
+def list_presets(http_request: Request, kind: str | None = None) -> ImagePromptPresetListResponse:
     """读取图片 Prompt 配置列表，可按 kind 筛选。"""
 
     with SessionLocal() as db_session:
         service = ImagePromptService(ComicRepository(db_session))
-        presets = service.list_presets(parse_preset_kind(kind))
+        try:
+            presets = service.list_presets(parse_preset_kind(kind))
+        except ValueError as exc:
+            raise http_exception(exc, request_locale(http_request)) from exc
         return ImagePromptPresetListResponse(items=[preset_to_response(preset) for preset in presets])
 
 
 @router.post("/presets", response_model=ImagePromptPresetResponse, status_code=status.HTTP_201_CREATED)
-def create_preset(request: ImagePromptPresetRequest) -> ImagePromptPresetResponse:
+def create_preset(request: ImagePromptPresetRequest, http_request: Request) -> ImagePromptPresetResponse:
     """创建图片 Prompt 配置。"""
 
     with SessionLocal() as db_session:
@@ -100,12 +106,16 @@ def create_preset(request: ImagePromptPresetRequest) -> ImagePromptPresetRespons
                 is_default=request.is_default,
             )
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            raise http_exception(exc, request_locale(http_request)) from exc
         return preset_to_response(preset)
 
 
 @router.put("/presets/{preset_id}", response_model=ImagePromptPresetResponse)
-def update_preset(preset_id: int, request: ImagePromptPresetRequest) -> ImagePromptPresetResponse:
+def update_preset(
+    preset_id: int,
+    request: ImagePromptPresetRequest,
+    http_request: Request,
+) -> ImagePromptPresetResponse:
     """更新图片 Prompt 配置。"""
 
     with SessionLocal() as db_session:
@@ -120,12 +130,12 @@ def update_preset(preset_id: int, request: ImagePromptPresetRequest) -> ImagePro
                 is_default=request.is_default,
             )
         except ValueError as exc:
-            raise HTTPException(status_code=value_error_status_code(exc), detail=str(exc)) from exc
+            raise http_exception(exc, request_locale(http_request)) from exc
         return preset_to_response(preset)
 
 
 @router.delete("/presets/{preset_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_preset(preset_id: int) -> Response:
+def delete_preset(preset_id: int, http_request: Request) -> Response:
     """删除图片 Prompt 配置。"""
 
     with SessionLocal() as db_session:
@@ -133,12 +143,12 @@ def delete_preset(preset_id: int) -> Response:
         try:
             service.delete_preset(preset_id)
         except ValueError as exc:
-            raise HTTPException(status_code=value_error_status_code(exc), detail=str(exc)) from exc
+            raise http_exception(exc, request_locale(http_request)) from exc
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/projects/{project_id}/script-tasks", response_model=list[ScriptTaskResponse])
-def list_completed_script_tasks(project_id: int) -> list[ScriptTaskResponse]:
+def list_completed_script_tasks(project_id: int, http_request: Request) -> list[ScriptTaskResponse]:
     """读取项目下已完成脚本任务，供图片 Prompt 生成选择。"""
 
     with SessionLocal() as db_session:
@@ -146,12 +156,15 @@ def list_completed_script_tasks(project_id: int) -> list[ScriptTaskResponse]:
         try:
             tasks = service.list_completed_script_tasks(project_id)
         except ValueError as exc:
-            raise HTTPException(status_code=value_error_status_code(exc), detail=str(exc)) from exc
+            raise http_exception(exc, request_locale(http_request)) from exc
         return [task_to_response(task) for task in tasks]
 
 
 @router.get("/script-tasks/{task_id}/pages", response_model=GenerateImagePromptsResponse)
-def list_script_task_image_prompts(task_id: int) -> GenerateImagePromptsResponse:
+def list_script_task_image_prompts(
+    task_id: int,
+    http_request: Request,
+) -> GenerateImagePromptsResponse:
     """读取脚本任务下已生成的图片 Prompt，供前端切换任务时回显。"""
 
     with SessionLocal() as db_session:
@@ -159,7 +172,7 @@ def list_script_task_image_prompts(task_id: int) -> GenerateImagePromptsResponse
         try:
             result = service.list_script_task_image_prompts(task_id)
         except ValueError as exc:
-            raise HTTPException(status_code=value_error_status_code(exc), detail=str(exc)) from exc
+            raise http_exception(exc, request_locale(http_request)) from exc
         return generation_result_to_response(result)
 
 
@@ -167,6 +180,7 @@ def list_script_task_image_prompts(task_id: int) -> GenerateImagePromptsResponse
 async def generate_for_script_task(
     task_id: int,
     request: GenerateImagePromptsRequest,
+    http_request: Request,
 ) -> GenerateImagePromptsResponse:
     """为已完成脚本任务下所有页面生成图片 Prompt。"""
 
@@ -179,7 +193,7 @@ async def generate_for_script_task(
                 concurrency=request.concurrency,
             )
         except ValueError as exc:
-            raise HTTPException(status_code=value_error_status_code(exc), detail=str(exc)) from exc
+            raise http_exception(exc, request_locale(http_request)) from exc
         return generation_result_to_response(result)
 
 
@@ -187,8 +201,11 @@ async def generate_for_script_task(
 def stream_generate_for_script_task(
     task_id: int,
     request: GenerateImagePromptsRequest,
+    http_request: Request,
 ) -> EventSourceResponse:
     """用 SSE 实时返回图片 Prompt 生成进度；每页保存后立即推送。"""
+
+    locale = request_locale(http_request)
 
     async def event_generator():
         with SessionLocal() as db_session:
@@ -201,6 +218,6 @@ def stream_generate_for_script_task(
                 ):
                     yield sse_event(event, payload)
             except Exception as exc:
-                yield sse_event("error", {"message": str(exc)})
+                yield sse_event("error", sse_error_payload(exc, locale))
 
     return EventSourceResponse(event_generator(), headers=SSE_HEADERS, ping=5)
