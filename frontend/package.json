@@ -15,6 +15,7 @@
     "format": "prettier --write --experimental-cli src/"
   },
   "dependencies": {
+    "@element-plus/icons-vue": "^2.3.2",
     "element-plus": "^2.14.1",
     "markdown-it": "^14.2.0",
     "pinia": "^3.0.4",
