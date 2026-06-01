@@ -1,9 +1,35 @@
+# Environment files
 .env
+.env.*
+!.env.example
+!backend/.env.example
+
+# Python caches and local environments
 __pycache__/
 *.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
 
+# Logs
+logs/
+*.log
+
+# Local SQLite data and generated assets
 data/
 outputs/*
 !outputs/.gitkeep
+
+# Node / frontend build artifacts
+node_modules/
 frontend/node_modules/
 frontend/dist/
+frontend/*.tsbuildinfo
+
+# Editor and OS files
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
