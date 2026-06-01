@@ -29,11 +29,13 @@ class ScriptDeepAgent:
         writer_prompt_name: str = "script_writer_prompt.md",
         supervisor_prompt_name: str = "script_supervisor_prompt.md",
         max_structured_retries: int = 3,
+        recursion_limit: int = 80,
     ):
         """初始化 Deep Agent 和页面编写/监督两个子 Agent。"""
 
         self.llm = llm or self._default_llm()
         self.max_structured_retries = max_structured_retries
+        self.recursion_limit = recursion_limit
         logger.info("Initializing ScriptDeepAgent")
         self.main_prompt = PromptLoader.load(main_prompt_name)
         self.writer_prompt = PromptLoader.load(writer_prompt_name)
@@ -206,6 +208,14 @@ class ScriptDeepAgent:
             response_model=ScriptDeepAgentResponse,
             operation=operation,
             max_retries=self.max_structured_retries,
+            config={
+                "recursion_limit": self.recursion_limit,
+                "metadata": {
+                    "agent": "script_deep_agent",
+                    "operation": operation,
+                    "recursion_limit": self.recursion_limit,
+                },
+            },
             validator=self._validate_structured_response,
         )
         logger.debug(

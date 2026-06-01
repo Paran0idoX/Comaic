@@ -3,6 +3,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 import OutlineWorkspaceView from '@/views/OutlineWorkspaceView.vue'
 import ProjectListView from '@/views/ProjectListView.vue'
 import ImagePromptWorkspaceView from '@/views/ImagePromptWorkspaceView.vue'
+import ImageGenerationWorkspaceView from '@/views/ImageGenerationWorkspaceView.vue'
 import ScriptWorkspaceView from '@/views/ScriptWorkspaceView.vue'
 
 const router = createRouter({
@@ -42,6 +43,14 @@ const router = createRouter({
       component: ImagePromptWorkspaceView,
       meta: {
         titleKey: 'routeTitles.prompts',
+      },
+    },
+    {
+      path: '/image-generation',
+      name: 'imageGeneration',
+      component: ImageGenerationWorkspaceView,
+      meta: {
+        titleKey: 'routeTitles.imageGeneration',
       },
     },
   ],

@@ -5,6 +5,7 @@ from backend.models.comic import (
     ComicImage,
     ComicPage,
     ComicProject,
+    ComfyWorkflowPreset,
     GenerationTask,
     ImagePromptPreset,
     OutlineVersion,
@@ -14,6 +15,7 @@ from backend.models.comic import (
 )
 from backend.models.enums import (
     ComicPageStatus,
+    GenerationTaskStatus,
     ImagePromptPresetKind,
     OutlineVersionStatus,
     ScriptGenerationMode,
@@ -725,6 +727,113 @@ class ComicRepository:
         self.session.delete(preset)
         self.session.commit()
 
+    def list_comfy_workflow_presets(self) -> list[ComfyWorkflowPreset]:
+        """读取 ComfyUI workflow 配置列表，默认配置排在前面。"""
+
+        statement = select(ComfyWorkflowPreset).order_by(
+            ComfyWorkflowPreset.is_default.desc(),
+            ComfyWorkflowPreset.updated_at.desc(),
+            ComfyWorkflowPreset.id.desc(),
+        )
+        return list(self.session.scalars(statement))
+
+    def get_comfy_workflow_preset(self, preset_id: int) -> ComfyWorkflowPreset | None:
+        """根据主键读取 ComfyUI workflow 配置。"""
+
+        return self.session.get(ComfyWorkflowPreset, preset_id)
+
+    def create_comfy_workflow_preset(
+        self,
+        *,
+        name: str,
+        workflow_json: str,
+        positive_node_id: str,
+        positive_input_name: str,
+        description: str | None = None,
+        is_default: bool = False,
+        negative_node_id: str | None = None,
+        negative_input_name: str | None = None,
+        seed_node_id: str | None = None,
+        seed_input_name: str | None = None,
+    ) -> ComfyWorkflowPreset:
+        """创建 ComfyUI workflow 配置；同一时间只保留一个默认配置。"""
+
+        if is_default:
+            self._clear_default_comfy_workflow_presets()
+        preset = ComfyWorkflowPreset(
+            name=name,
+            description=description,
+            workflow_json=workflow_json,
+            is_default=is_default,
+            positive_node_id=positive_node_id,
+            positive_input_name=positive_input_name,
+            negative_node_id=negative_node_id,
+            negative_input_name=negative_input_name,
+            seed_node_id=seed_node_id,
+            seed_input_name=seed_input_name,
+        )
+        self.session.add(preset)
+        self.session.commit()
+        self.session.refresh(preset)
+        return preset
+
+    def update_comfy_workflow_preset(
+        self,
+        *,
+        preset_id: int,
+        name: str,
+        workflow_json: str,
+        positive_node_id: str,
+        positive_input_name: str,
+        description: str | None = None,
+        is_default: bool = False,
+        negative_node_id: str | None = None,
+        negative_input_name: str | None = None,
+        seed_node_id: str | None = None,
+        seed_input_name: str | None = None,
+    ) -> ComfyWorkflowPreset:
+        """更新 ComfyUI workflow 配置。"""
+
+        preset = self.session.get(ComfyWorkflowPreset, preset_id)
+        if preset is None:
+            raise ValueError(f"ComfyWorkflowPreset not found: {preset_id}")
+        if is_default:
+            self._clear_default_comfy_workflow_presets(except_preset_id=preset_id)
+        preset.name = name
+        preset.description = description
+        preset.workflow_json = workflow_json
+        preset.is_default = is_default
+        preset.positive_node_id = positive_node_id
+        preset.positive_input_name = positive_input_name
+        preset.negative_node_id = negative_node_id
+        preset.negative_input_name = negative_input_name
+        preset.seed_node_id = seed_node_id
+        preset.seed_input_name = seed_input_name
+        self.session.commit()
+        self.session.refresh(preset)
+        return preset
+
+    def delete_comfy_workflow_preset(self, preset_id: int) -> None:
+        """删除 ComfyUI workflow 配置；已生成图片不受影响。"""
+
+        preset = self.session.get(ComfyWorkflowPreset, preset_id)
+        if preset is None:
+            raise ValueError(f"ComfyWorkflowPreset not found: {preset_id}")
+        self.session.delete(preset)
+        self.session.commit()
+
+    def _clear_default_comfy_workflow_presets(
+        self,
+        except_preset_id: int | None = None,
+    ) -> None:
+        """确保 ComfyUI workflow 配置只有一个默认项。"""
+
+        statement = select(ComfyWorkflowPreset).where(ComfyWorkflowPreset.is_default.is_(True))
+        for preset in self.session.scalars(statement):
+            if except_preset_id is not None and preset.id == except_preset_id:
+                continue
+            preset.is_default = False
+
     def _clear_default_image_prompt_presets(
         self,
         kind: ImagePromptPresetKind,
@@ -768,6 +877,28 @@ class ComicRepository:
         self.session.refresh(image)
         return image
 
+    def list_page_images(self, page_id: int) -> list[ComicImage]:
+        """读取某页所有生成图片，供图片生成页面回显。"""
+
+        statement = (
+            select(ComicImage)
+            .where(ComicImage.page_id == page_id)
+            .order_by(ComicImage.created_at.desc(), ComicImage.id.desc())
+        )
+        return list(self.session.scalars(statement))
+
+    def mark_page_image_ready(self, page_id: int) -> ComicPage:
+        """页面已有生成图片时推进页面状态；已选中最终图时不降级状态。"""
+
+        page = self.session.get(ComicPage, page_id)
+        if page is None:
+            raise ValueError(f"ComicPage not found: {page_id}")
+        if page.status != ComicPageStatus.IMAGE_SELECTED:
+            page.status = ComicPageStatus.IMAGE_READY
+        self.session.commit()
+        self.session.refresh(page)
+        return page
+
     def select_image(self, page_id: int, image_id: int) -> ComicPage:
         """人工选择某一页的最终图片，并取消同页其他候选图的选中状态。"""
 
@@ -805,6 +936,53 @@ class ComicRepository:
             comfy_prompt_id=comfy_prompt_id,
         )
         self.session.add(task)
+        self.session.commit()
+        self.session.refresh(task)
+        return task
+
+    def get_generation_task(self, task_id: int) -> GenerationTask | None:
+        """根据主键读取 ComfyUI 生成任务。"""
+
+        return self.session.get(GenerationTask, task_id)
+
+    def get_generation_task_status(self, task_id: int) -> GenerationTaskStatus | None:
+        """刷新读取图片生成任务状态，供 SSE 长连接感知暂停。"""
+
+        self.session.expire_all()
+        task = self.session.get(GenerationTask, task_id)
+        return None if task is None else task.status
+
+    def suspend_generation_task(self, task_id: int) -> GenerationTask:
+        """暂停图片生成批量任务；非 running 任务保持原状态返回。"""
+
+        task = self.session.get(GenerationTask, task_id)
+        if task is None:
+            raise ValueError(f"GenerationTask not found: {task_id}")
+        if task.status == GenerationTaskStatus.RUNNING:
+            task.status = GenerationTaskStatus.SUSPENDED
+            self.session.commit()
+            self.session.refresh(task)
+        return task
+
+    def update_generation_task(
+        self,
+        *,
+        task_id: int,
+        status: GenerationTaskStatus | None = None,
+        comfy_prompt_id: str | None = None,
+        error_message: str | None = None,
+    ) -> GenerationTask:
+        """更新 ComfyUI 生成任务状态和外部 prompt_id。"""
+
+        task = self.session.get(GenerationTask, task_id)
+        if task is None:
+            raise ValueError(f"GenerationTask not found: {task_id}")
+        if status is not None:
+            task.status = status
+        if comfy_prompt_id is not None:
+            task.comfy_prompt_id = comfy_prompt_id
+        if error_message is not None:
+            task.error_message = error_message
         self.session.commit()
         self.session.refresh(task)
         return task
