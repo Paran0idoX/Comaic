@@ -91,6 +91,25 @@ class ImagePromptPreset(TimestampMixin, Base):
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
+class ComfyWorkflowPreset(TimestampMixin, Base):
+    """ComfyUI workflow 配置表：保存可复用的 API workflow 和 Prompt 注入节点。"""
+
+    __tablename__ = "comfy_workflow_preset"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(255))
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    workflow_json: Mapped[str] = mapped_column(Text)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    # ComfyUI API workflow 节点 id 通常是字符串数字；这里按字符串保存，避免强转造成兼容问题。
+    positive_node_id: Mapped[str] = mapped_column(String(255))
+    positive_input_name: Mapped[str] = mapped_column(String(255), default="text")
+    negative_node_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    negative_input_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    seed_node_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    seed_input_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
+
 class Session(TimestampMixin, Base):
     """通用会话表：用 purpose 区分大纲、脚本等不同业务场景。"""
 
@@ -136,7 +155,7 @@ class OutlineVersion(Base):
 
 
 class ComicPage(TimestampMixin, Base):
-    """漫画页面表：保存单页脚本、图片 Prompt 和最终选择的候选图。"""
+    """漫画页面表：保存单页脚本、图片 Prompt 和最终选择的生成图片。"""
 
     __tablename__ = "comic_page"
 
@@ -182,7 +201,7 @@ class ComicPage(TimestampMixin, Base):
 
 
 class ComicImage(Base):
-    """候选图片表：记录每页由 ComfyUI 生成的候选图片及其元信息。"""
+    """图片生成结果表：记录每页由 ComfyUI 生成的图片及其元信息。"""
 
     __tablename__ = "comic_image"
 

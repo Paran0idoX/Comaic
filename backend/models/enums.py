@@ -7,6 +7,7 @@ class ComicPageStatus(str, Enum):
     DRAFT = "draft"
     SCRIPT_READY = "script_ready"
     PROMPT_READY = "prompt_ready"
+    IMAGE_READY = "image_ready"
     IMAGE_SELECTED = "image_selected"
 
 
@@ -15,6 +16,7 @@ class GenerationTaskStatus(str, Enum):
 
     PENDING = "pending"
     RUNNING = "running"
+    SUSPENDED = "suspended"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
 

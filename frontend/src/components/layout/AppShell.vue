@@ -25,7 +25,12 @@ const pageTitle = computed(() => t(String(route.meta.titleKey ?? 'routeTitles.pr
       </el-header>
 
       <el-main class="app-shell__content">
-        <RouterView />
+        <!-- 分页脚本页有长 SSE 连接，缓存组件实例可以避免路由切换时中断生成进度消费。 -->
+        <RouterView v-slot="{ Component, route }">
+          <KeepAlive include="ScriptWorkspaceView">
+            <component :is="Component" :key="route.name" />
+          </KeepAlive>
+        </RouterView>
       </el-main>
     </el-container>
   </el-container>

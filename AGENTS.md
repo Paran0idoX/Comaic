@@ -6,7 +6,7 @@
 
 `comaic` 是一个基于 LangChain 的 AI 漫画生成 Agent Demo。MVP 目标是跑通完整链路：
 
-用户输入剧情大纲和总页数 -> 生成每页漫画脚本 -> 生成每页 ComfyUI 文生图 Prompt -> 调用本地 ComfyUI 出候选图 -> 保存项目、页面、图片和任务状态 -> 人工选择每页最终图片。
+用户输入剧情大纲和总页数 -> 生成每页漫画脚本 -> 生成每页 ComfyUI 文生图 Prompt -> 调用本地 ComfyUI 生成图片 -> 保存项目、页面、图片和任务状态 -> 人工选择每页最终图片。
 
 当前阶段不要做复杂分镜、自动选图、复杂多 Agent 编排或过重架构。优先让链路清晰、可运行、可人工确认。
 
@@ -52,8 +52,9 @@ MVP 核心表位于 `backend/models/comic.py`：
 - `session`：通用业务会话，使用 `purpose` 区分大纲等场景，并用 `thread_id` 关联 Agent 记忆。
 - `outline_version`：大纲版本快照，归属于具体会话，每个会话只保留最近 5 个版本。
 - `comic_page`：项目页码、结构化页面脚本、图片 prompt、状态、最终选择图片。页面脚本不保存单个 `script` 字段，使用 `summary`、`characters`、`clothing`、`scene`、`composition`、`character_action`、`dialogue` 等字段表达。
-- `comic_image`：页面候选图、远程/本地路径、seed、workflow、prompt、评分、是否选中。
+- `comic_image`：页面生成图片、远程/本地路径、seed、workflow、prompt、评分、是否选中。
 - `generation_task`：ComfyUI prompt id、任务状态、批量大小、错误信息。
+- `comfy_workflow_preset`：页面维护的 ComfyUI API workflow JSON 和 Prompt 注入节点配置。
 
 数据库初始化入口在 `backend/models/database.py` 的 `init_db()`。默认数据库地址是 `sqlite:///data/comaic.sqlite3`，从项目根目录运行后端时会写入根目录 `data/`。
 
@@ -147,12 +148,14 @@ COMFYUI_BASE_URL=http://127.0.0.1:8188
 - DeepAgents 默认会注入文件系统、执行、todo 和 task 等内置工具；脚本生成阶段通过 `backend/agents/deepagent_profiles.py` 只保留 `write_todos` 和 `task`。
 - 不要重新启用 `ls`、`read_file`、`write_file`、`edit_file`、`glob`、`grep`、`execute`，除非有明确业务需求和安全边界。
 - `task` 必须保留，因为主 Agent 需要用它调用分页脚本编写和监督审查子 Agent。
+- ScriptDeepAgent 调用 DeepAgents 时默认设置 `recursion_limit=80`，并写入 LangSmith metadata；如需调整，优先参考正常成功 trace 的 `langgraph_step`。
 - ScriptDeepAgent 的子 Agent 只包含分页脚本编写、监督审查；不包含故事节奏划分。
 - ScriptDeepAgent 不允许注册或修改分段计划，不暴露 `register_section_plan` 类工具。
 - 批量脚本生成由 Service 遍历已锁定分段，逐段调用 ScriptDeepAgent；Agent 每次只生成当前分段，不能自行选择或回退到其他分段。
 - 当前分段脚本必须先由 Service 校验页码完整性、连续性和字段完整性，校验通过后才按 section 粒度批量落库。
 - 单页生成可以跳过整体节奏划分，但仍要经过监督审查。
 - 批量生成通过 SSE 暴露长任务进度，脚本任务状态保存到 `script_generation_task`。
+- 前端分页脚本页依赖 Vue `KeepAlive` 保持长 SSE 连接和内存进度；不要随意移除 `ScriptWorkspaceView` 的缓存，否则路由切换会中断前端对生成进度的消费。
 - 分页脚本结果保存到 `comic_page` 的结构化字段：`summary`、`characters`、`clothing`、`scene`、`composition`、`character_action`、`dialogue`，页面状态使用 `ComicPageStatus.SCRIPT_READY`。
 - 脚本 Agent prompt 放在 `backend/prompts/script_planning_prompt.md`、`script_deep_main_prompt.md`、`script_writer_prompt.md` 和 `script_supervisor_prompt.md`。
 
@@ -165,6 +168,16 @@ COMFYUI_BASE_URL=http://127.0.0.1:8188
 - 图片 Prompt 生成范围以已完成的脚本生成任务为单位，Service 读取任务下页面脚本并并发调用 Agent。
 - 生成出的正向 Prompt 保存到 `comic_page.image_prompt`，页面状态使用 `ComicPageStatus.PROMPT_READY`。
 - 前端维护 Prompt 配置时可以使用 Markdown 预览，但必须关闭原始 HTML 渲染。
+
+## 图片生成 / ComfyUI 约定
+
+`backend/services/image_generation_service.py` 负责图片生成业务编排，`backend/tools/comfyui_client.py` 只封装 ComfyUI HTTP API。
+
+- 前端“图片生成”页面维护 ComfyUI workflow preset；后端只按 preset 中配置的节点 id 和 input 名称注入 `comic_page.image_prompt`，不要猜测节点。
+- 批量图片生成按“每页一次 ComfyUI `/prompt` 请求”提交，不一次性提交全部页面。
+- 生成结果追加保存到 `comic_image`，不要自动删除旧候选图，方便人工比较。
+- 图片生成暂停只停止提交后续页面，不调用 ComfyUI interrupt，不中断已经提交的当前 prompt。
+- ComfyUI 调用只允许出现在 Tool/Service 层，Agent 不直接调用 ComfyUI。
 
 ## 开发与验证
 

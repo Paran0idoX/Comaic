@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { Delete, Document, EditPen, Plus, Refresh, Tickets, VideoPause, View } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onMounted, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -19,6 +19,9 @@ import {
   updatePageScript,
   type ScriptPage,
 } from '@/api/scripts'
+
+// 组件名用于 AppShell 的 KeepAlive include 精准缓存脚本工作台。
+defineOptions({ name: 'ScriptWorkspaceView' })
 
 type TimelineLevel = 'primary' | 'success' | 'warning' | 'danger' | 'info'
 
@@ -695,6 +698,13 @@ watch(progressEvents, async () => {
 
 onMounted(async () => {
   await loadProjects()
+})
+
+onActivated(async () => {
+  // 从其它页面切回脚本页时，SSE 内存状态仍在；这里额外刷新页面列表，兜底补齐隐藏期间已落库的脚本。
+  if (selectedProjectId.value !== null) {
+    await loadPages()
+  }
 })
 </script>
 
