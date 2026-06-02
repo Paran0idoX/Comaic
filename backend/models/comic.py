@@ -239,6 +239,11 @@ class GenerationTask(TimestampMixin, Base):
     )
     batch_size: Mapped[int] = mapped_column(Integer, default=1)
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # 由当前应用进程的后台线程定期刷新，用来识别异常退出后遗留的 running 任务。
+    heartbeat_at: Mapped[Optional[datetime]] = mapped_column(
+        AwareUTCDateTime(),
+        nullable=True,
+    )
 
     project: Mapped["ComicProject"] = relationship(back_populates="tasks")
     page: Mapped[Optional["ComicPage"]] = relationship(back_populates="tasks")
@@ -265,6 +270,11 @@ class ScriptGenerationTask(TimestampMixin, Base):
     user_requirement: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     section_plan: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # 只由当前进程真实执行中的任务刷新，重启后未刷新即会被识别为僵尸任务。
+    heartbeat_at: Mapped[Optional[datetime]] = mapped_column(
+        AwareUTCDateTime(),
+        nullable=True,
+    )
 
     project: Mapped["ComicProject"] = relationship(back_populates="script_tasks")
     outline_version: Mapped[Optional["OutlineVersion"]] = relationship(

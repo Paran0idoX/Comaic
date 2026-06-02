@@ -4,6 +4,7 @@ from fastapi import APIRouter, Request
 from sse_starlette.sse import EventSourceResponse, ServerSentEvent
 
 from backend.api.schemas.script import (
+    ContinueBatchScriptRequest,
     CreatePageScriptRequest,
     GenerateBatchScriptRequest,
     GenerateSinglePageScriptRequest,
@@ -17,6 +18,7 @@ from backend.api.schemas.script import (
 )
 from backend.models.comic import ComicPage, ScriptGenerationTask, ScriptSection
 from backend.models.database import SessionLocal
+from backend.models.enums import ScriptGenerationMode, ScriptGenerationTaskStatus
 from backend.repositories.comic_repository import ComicRepository
 from backend.i18n.errors import http_exception, sse_error_payload
 from backend.i18n.locale import request_locale
@@ -163,6 +165,31 @@ def stream_batch_script_generation(
     return EventSourceResponse(event_generator(), headers=SSE_HEADERS, ping=5)
 
 
+@router.post("/tasks/{task_id}/continue/stream")
+def stream_continue_batch_script_generation(
+    task_id: int,
+    request: ContinueBatchScriptRequest,
+    http_request: Request,
+) -> EventSourceResponse:
+    """继续未完成的批量分页脚本任务，并用 SSE 返回进度。"""
+
+    locale = request_locale(http_request)
+
+    async def event_generator():
+        with SessionLocal() as db_session:
+            service = ScriptService(ComicRepository(db_session))
+            try:
+                async for event, payload in service.stream_continue_batch_script_generation(
+                    task_id=task_id,
+                    user_requirement=request.user_requirement,
+                ):
+                    yield sse_event(event, payload)
+            except Exception as exc:
+                yield sse_event("error", sse_error_payload(exc, locale))
+
+    return EventSourceResponse(event_generator(), headers=SSE_HEADERS, ping=5)
+
+
 @router.get("/tasks/{task_id}", response_model=ScriptTaskResponse)
 def get_script_task(task_id: int, http_request: Request) -> ScriptTaskResponse:
     """查询分页脚本生成任务状态。"""
@@ -174,6 +201,19 @@ def get_script_task(task_id: int, http_request: Request) -> ScriptTaskResponse:
         except ValueError as exc:
             raise http_exception(exc, request_locale(http_request)) from exc
         return task_to_response(task)
+
+
+@router.get("/tasks/{task_id}/pages", response_model=ScriptPageListResponse)
+def list_script_task_pages(task_id: int, http_request: Request) -> ScriptPageListResponse:
+    """读取指定脚本任务下的页面脚本，避免混入同项目其它任务。"""
+
+    with SessionLocal() as db_session:
+        service = ScriptService(ComicRepository(db_session))
+        try:
+            pages = service.list_script_task_pages(task_id=task_id)
+        except ValueError as exc:
+            raise http_exception(exc, request_locale(http_request)) from exc
+        return ScriptPageListResponse(items=[page_to_response(page) for page in pages])
 
 
 @router.post("/tasks/{task_id}/suspend", response_model=ScriptTaskResponse)
@@ -228,6 +268,40 @@ def list_project_pages(project_id: int, http_request: Request) -> ScriptPageList
         return ScriptPageListResponse(items=[page_to_response(page) for page in pages])
 
 
+@project_pages_router.get("/{project_id}/script-tasks", response_model=list[ScriptTaskResponse])
+def list_project_script_tasks(
+    project_id: int,
+    http_request: Request,
+    outline_version_id: int | None = None,
+    mode: str | None = None,
+    status: str | None = None,
+) -> list[ScriptTaskResponse]:
+    """按项目和可选大纲版本读取脚本任务，供分页脚本页选择历史任务。"""
+
+    parsed_mode = None
+    parsed_status = None
+    try:
+        if mode is not None:
+            parsed_mode = ScriptGenerationMode(mode)
+        if status is not None:
+            parsed_status = ScriptGenerationTaskStatus(status)
+    except ValueError as exc:
+        raise http_exception(ValueError("Invalid script task filter."), request_locale(http_request)) from exc
+
+    with SessionLocal() as db_session:
+        service = ScriptService(ComicRepository(db_session))
+        try:
+            tasks = service.list_script_tasks(
+                project_id=project_id,
+                outline_version_id=outline_version_id,
+                mode=parsed_mode,
+                status=parsed_status,
+            )
+        except ValueError as exc:
+            raise http_exception(exc, request_locale(http_request)) from exc
+        return [task_to_response(task) for task in tasks]
+
+
 @project_pages_router.delete("/{project_id}/pages", response_model=ScriptPageListResponse)
 def delete_project_pages(project_id: int, http_request: Request) -> ScriptPageListResponse:
     """硬删除项目下全部页面行；会同步删除页面候选图并保留出图任务历史。"""
@@ -255,6 +329,7 @@ def create_page_script(
             page = service.upsert_manual_page_script(
                 project_id=project_id,
                 page_no=request.page_no,
+                task_id=request.task_id,
                 summary=request.summary,
                 characters=request.characters,
                 clothing=request.clothing,
@@ -283,6 +358,7 @@ def update_page_script(
             page = service.upsert_manual_page_script(
                 project_id=project_id,
                 page_no=page_no,
+                task_id=request.task_id,
                 summary=request.summary,
                 characters=request.characters,
                 clothing=request.clothing,
@@ -297,13 +373,18 @@ def update_page_script(
 
 
 @project_pages_router.delete("/{project_id}/pages/{page_no}/script", response_model=ScriptPageResponse)
-def clear_page_script(project_id: int, page_no: int, http_request: Request) -> ScriptPageResponse:
+def clear_page_script(
+    project_id: int,
+    page_no: int,
+    http_request: Request,
+    task_id: int | None = None,
+) -> ScriptPageResponse:
     """人工清空页面脚本；保留页面记录。"""
 
     with SessionLocal() as db_session:
         service = ScriptService(ComicRepository(db_session))
         try:
-            page = service.clear_page_script(project_id=project_id, page_no=page_no)
+            page = service.clear_page_script(project_id=project_id, page_no=page_no, task_id=task_id)
         except ValueError as exc:
             raise http_exception(exc, request_locale(http_request)) from exc
         return page_to_response(page)

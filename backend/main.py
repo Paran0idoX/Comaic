@@ -14,6 +14,7 @@ from backend.api.scripts import project_pages_router, router as scripts_router
 from backend.i18n.errors import AppError, error_payload
 from backend.i18n.locale import request_locale
 from backend.models.database import init_db
+from backend.services.task_runtime import start_task_runtime_threads
 
 
 logging.basicConfig(
@@ -25,12 +26,16 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """应用启动时初始化数据库表，方便本地 MVP 开发。"""
+    """应用启动时初始化数据库，并启动长任务心跳与僵尸扫描线程。"""
 
     logger.info("Initializing database")
     init_db()
     logger.info("Database ready")
-    yield
+    task_runtime = start_task_runtime_threads()
+    try:
+        yield
+    finally:
+        task_runtime.stop()
 
 
 app = FastAPI(title="comaic backend", lifespan=lifespan)
