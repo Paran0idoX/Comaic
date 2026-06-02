@@ -56,8 +56,19 @@ export type GenerateBatchScriptPayload = {
   user_requirement?: string
 }
 
+export type ContinueBatchScriptPayload = {
+  user_requirement?: string
+}
+
+export type ListProjectScriptTasksOptions = {
+  outlineVersionId?: number
+  mode?: string
+  status?: string
+}
+
 export type CreatePageScriptPayload = {
   page_no: number
+  task_id?: number
   summary: string
   characters: string
   clothing: string
@@ -68,6 +79,7 @@ export type CreatePageScriptPayload = {
 }
 
 export type UpdatePageScriptPayload = {
+  task_id?: number
   summary: string
   characters: string
   clothing: string
@@ -134,6 +146,34 @@ export const listProjectPages = async (projectId: number): Promise<ScriptPage[]>
   return result.items
 }
 
+export const listProjectScriptTasks = async (
+  projectId: number,
+  options: ListProjectScriptTasksOptions = {},
+): Promise<ScriptTask[]> => {
+  const params = new URLSearchParams()
+  if (options.outlineVersionId !== undefined) {
+    params.set('outline_version_id', String(options.outlineVersionId))
+  }
+  if (options.mode !== undefined) {
+    params.set('mode', options.mode)
+  }
+  if (options.status !== undefined) {
+    params.set('status', options.status)
+  }
+  const suffix = params.toString() ? `?${params.toString()}` : ''
+  return requestJson<ScriptTask[]>(`/api/projects/${projectId}/script-tasks${suffix}`)
+}
+
+export const listScriptTaskPages = async (taskId: number): Promise<ScriptPage[]> => {
+  const result = await requestJson<ScriptPageListResponse>(`/api/scripts/tasks/${taskId}/pages`)
+  return result.items
+}
+
+export const listScriptTaskSections = async (taskId: number): Promise<ScriptSection[]> => {
+  const result = await requestJson<ScriptSectionListResponse>(`/api/scripts/tasks/${taskId}/sections`)
+  return result.items
+}
+
 export const generateSinglePageScript = (
   payload: GenerateSinglePageScriptPayload,
 ): Promise<SinglePageScriptResponse> =>
@@ -169,10 +209,16 @@ export const updatePageScript = (
     body: JSON.stringify(payload),
   })
 
-export const clearPageScript = (projectId: number, pageNo: number): Promise<ScriptPage> =>
-  requestJson<ScriptPage>(`/api/projects/${projectId}/pages/${pageNo}/script`, {
+export const clearPageScript = (
+  projectId: number,
+  pageNo: number,
+  taskId?: number,
+): Promise<ScriptPage> => {
+  const suffix = taskId === undefined ? '' : `?task_id=${taskId}`
+  return requestJson<ScriptPage>(`/api/projects/${projectId}/pages/${pageNo}/script${suffix}`, {
     method: 'DELETE',
   })
+}
 
 export const deleteAllProjectPages = (projectId: number): Promise<ScriptPage[]> =>
   requestJson<ScriptPageListResponse>(`/api/projects/${projectId}/pages`, {
@@ -188,7 +234,23 @@ export const streamBatchScriptGeneration = async (
   payload: GenerateBatchScriptPayload,
   callbacks: ScriptStreamCallbacks,
 ): Promise<void> => {
-  const response = await fetch('/api/scripts/batch/stream', {
+  await streamScriptEvents('/api/scripts/batch/stream', payload, callbacks)
+}
+
+export const streamContinueScriptGeneration = async (
+  taskId: number,
+  payload: ContinueBatchScriptPayload,
+  callbacks: ScriptStreamCallbacks,
+): Promise<void> => {
+  await streamScriptEvents(`/api/scripts/tasks/${taskId}/continue/stream`, payload, callbacks)
+}
+
+const streamScriptEvents = async (
+  url: string,
+  payload: Record<string, unknown>,
+  callbacks: ScriptStreamCallbacks,
+): Promise<void> => {
+  const response = await fetch(url, {
     method: 'POST',
     headers: apiHeaders(),
     body: JSON.stringify(payload),

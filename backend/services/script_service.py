@@ -10,6 +10,7 @@ from backend.models.comic import (
 )
 from backend.models.enums import ScriptGenerationMode, ScriptGenerationTaskStatus
 from backend.repositories.comic_repository import ComicRepository
+from backend.services.task_runtime import RuntimeTaskType, running_task_registry
 
 
 class ScriptService:
@@ -34,11 +35,42 @@ class ScriptService:
         self._get_project(project_id)
         return self.repository.list_project_pages(project_id)
 
+    def list_script_tasks(
+        self,
+        *,
+        project_id: int,
+        outline_version_id: int | None = None,
+        mode: ScriptGenerationMode | None = None,
+        status: ScriptGenerationTaskStatus | None = None,
+    ) -> list[ScriptGenerationTask]:
+        """读取项目下脚本任务；分页脚本页会按大纲版本筛选。"""
+
+        self._get_project(project_id)
+        if outline_version_id is not None:
+            outline_version = self.repository.get_outline_version(outline_version_id)
+            if outline_version is None:
+                raise ValueError(f"OutlineVersion not found: {outline_version_id}")
+            if outline_version.session.project_id != project_id:
+                raise ValueError("OutlineVersion does not belong to project.")
+        return self.repository.list_script_tasks(
+            project_id=project_id,
+            outline_version_id=outline_version_id,
+            mode=mode,
+            status=status,
+        )
+
+    def list_script_task_pages(self, *, task_id: int) -> list[ComicPage]:
+        """读取指定脚本任务下的页面脚本，避免项目级页面混入其它任务。"""
+
+        self.get_script_task(task_id)
+        return self.repository.list_script_task_pages(task_id)
+
     def upsert_manual_page_script(
         self,
         *,
         project_id: int,
         page_no: int,
+        task_id: int | None = None,
         summary: str,
         characters: str,
         clothing: str,
@@ -59,7 +91,7 @@ class ScriptService:
             character_action=character_action,
             dialogue=dialogue,
         )
-        section = self._resolve_manual_section(project_id=project_id, page_no=page_no)
+        section = self._resolve_manual_section(project_id=project_id, page_no=page_no, task_id=task_id)
         return self.repository.upsert_page_script(
             project_id=project_id,
             page_no=page_no,
@@ -67,10 +99,24 @@ class ScriptService:
             **page_payload,
         )
 
-    def clear_page_script(self, *, project_id: int, page_no: int) -> ComicPage:
+    def clear_page_script(
+        self,
+        *,
+        project_id: int,
+        page_no: int,
+        task_id: int | None = None,
+    ) -> ComicPage:
         """人工清空单页脚本；不删除页面行，避免破坏后续关联数据。"""
 
         self._get_project(project_id)
+        if task_id is not None:
+            task = self.get_script_task(task_id)
+            if task.project_id != project_id:
+                raise ValueError("ScriptGenerationTask does not belong to project.")
+            page = self.repository.get_script_task_page(task_id=task_id, page_no=page_no)
+            if page is None:
+                raise ValueError(f"ComicPage not found for task {task_id}: {page_no}")
+            return self.repository.clear_page_script_by_id(page.id)
         return self.repository.clear_page_script(project_id=project_id, page_no=page_no)
 
     def delete_project_pages(self, *, project_id: int) -> None:
@@ -122,6 +168,7 @@ class ScriptService:
             target_page_no=page_no,
             user_requirement=user_requirement,
         )
+        running_task_registry.register(RuntimeTaskType.SCRIPT_GENERATION_TASK, task.id)
 
         try:
             result = await ScriptDeepAgent().generate_single_page(
@@ -153,6 +200,8 @@ class ScriptService:
                 error_message=str(exc),
             )
             raise
+        finally:
+            running_task_registry.unregister(RuntimeTaskType.SCRIPT_GENERATION_TASK, task.id)
 
     async def stream_batch_script_generation(
         self,
@@ -177,55 +226,122 @@ class ScriptService:
             total_pages=total_pages,
             user_requirement=user_requirement,
         )
+        running_task_registry.register(RuntimeTaskType.SCRIPT_GENERATION_TASK, task.id)
+        try:
+            async for event, payload in self._stream_batch_task(
+                task=task,
+                outline_version=outline_version,
+                user_requirement=user_requirement or "",
+                is_continue=False,
+            ):
+                yield event, payload
+        finally:
+            running_task_registry.unregister(RuntimeTaskType.SCRIPT_GENERATION_TASK, task.id)
+
+    async def stream_continue_batch_script_generation(
+        self,
+        *,
+        task_id: int,
+        user_requirement: str | None = None,
+    ):
+        """继续未完成的批量脚本任务；复用原任务分段与已落库页面。"""
+
+        task = self.get_script_task(task_id)
+        if task.mode != ScriptGenerationMode.BATCH:
+            raise ValueError("ScriptGenerationTask must be batch mode before continuing.")
+        if task.status not in {
+            ScriptGenerationTaskStatus.SUSPENDED,
+            ScriptGenerationTaskStatus.FAILED,
+        }:
+            raise ValueError("ScriptGenerationTask must be suspended or failed before continuing.")
+        if task.outline_version_id is None:
+            raise ValueError("OutlineVersion not found: None")
+
+        outline_version = self.repository.get_outline_version(task.outline_version_id)
+        if outline_version is None:
+            raise ValueError(f"OutlineVersion not found: {task.outline_version_id}")
+
+        task = self.repository.update_script_task(
+            task_id=task.id,
+            status=ScriptGenerationTaskStatus.RUNNING,
+        )
+        running_task_registry.register(RuntimeTaskType.SCRIPT_GENERATION_TASK, task.id)
+        try:
+            async for event, payload in self._stream_batch_task(
+                task=task,
+                outline_version=outline_version,
+                user_requirement=user_requirement or task.user_requirement or "",
+                is_continue=True,
+            ):
+                yield event, payload
+        finally:
+            running_task_registry.unregister(RuntimeTaskType.SCRIPT_GENERATION_TASK, task.id)
+
+    async def _stream_batch_task(
+        self,
+        *,
+        task: ScriptGenerationTask,
+        outline_version: OutlineVersion,
+        user_requirement: str,
+        is_continue: bool,
+    ):
+        """执行批量脚本任务；新建和继续生成共用这一条 section 编排链路。"""
+
+        total_pages = task.total_pages
+        project_id = task.project_id
         yield "task", {"task_id": task.id, "status": task.status.value}
-        yield "phase", {"code": "script.planning.started"}
+        yield "phase", {
+            "code": "script.continue.started" if is_continue else "script.planning.started"
+        }
 
         try:
-            normalized_sections: list[dict] | None = None
-            planning_feedback = ""
-            planning_agent = ScriptPlanningAgent()
-            for attempt in range(1, 4):
+            persisted_sections = self.repository.list_script_sections(task.id)
+            if not persisted_sections:
+                normalized_sections: list[dict] | None = None
+                planning_feedback = ""
+                planning_agent = ScriptPlanningAgent()
+                for attempt in range(1, 4):
+                    if self._is_script_task_suspended(task.id):
+                        yield "suspended", {
+                            "task_id": task.id,
+                            "status": ScriptGenerationTaskStatus.SUSPENDED.value,
+                        }
+                        return
+                    if attempt > 1:
+                        yield "phase", {
+                            "code": "script.planning.retry",
+                            "attempt": attempt,
+                        }
+                    raw_sections = await planning_agent.generate_section_plan(
+                        outline=outline_version.content,
+                        total_pages=total_pages,
+                        user_requirement=user_requirement,
+                        feedback=planning_feedback,
+                    )
+                    try:
+                        normalized_sections = self._normalize_section_plan(
+                            sections=raw_sections,
+                            total_pages=total_pages,
+                        )
+                        break
+                    except ValueError as exc:
+                        planning_feedback = str(exc)
+                        if attempt >= 3:
+                            raise ValueError(f"分段计划连续 3 次校验失败：{planning_feedback}") from exc
+
+                if normalized_sections is None:
+                    raise ValueError("分段计划生成失败。")
                 if self._is_script_task_suspended(task.id):
                     yield "suspended", {
                         "task_id": task.id,
                         "status": ScriptGenerationTaskStatus.SUSPENDED.value,
                     }
                     return
-                if attempt > 1:
-                    yield "phase", {
-                        "code": "script.planning.retry",
-                        "attempt": attempt,
-                    }
-                raw_sections = await planning_agent.generate_section_plan(
-                    outline=outline_version.content,
-                    total_pages=total_pages,
-                    user_requirement=user_requirement or "",
-                    feedback=planning_feedback,
+
+                persisted_sections = self._persist_section_plan(
+                    task_id=task.id,
+                    normalized_sections=normalized_sections,
                 )
-                try:
-                    normalized_sections = self._normalize_section_plan(
-                        sections=raw_sections,
-                        total_pages=total_pages,
-                    )
-                    break
-                except ValueError as exc:
-                    planning_feedback = str(exc)
-                    if attempt >= 3:
-                        raise ValueError(f"分段计划连续 3 次校验失败：{planning_feedback}") from exc
-
-            if normalized_sections is None:
-                raise ValueError("分段计划生成失败。")
-            if self._is_script_task_suspended(task.id):
-                yield "suspended", {
-                    "task_id": task.id,
-                    "status": ScriptGenerationTaskStatus.SUSPENDED.value,
-                }
-                return
-
-            persisted_sections = self._persist_section_plan(
-                task_id=task.id,
-                normalized_sections=normalized_sections,
-            )
             yield "section_plan", {
                 "sections": [self._section_to_payload(section) for section in persisted_sections]
             }
@@ -238,6 +354,14 @@ class ScriptService:
                 if self._is_script_task_suspended(task.id):
                     yield "suspended", {"task_id": task.id, "status": ScriptGenerationTaskStatus.SUSPENDED.value}
                     return
+                if self.repository.is_script_section_completed(section.id):
+                    yield "phase", {
+                        "code": "script.section.skipped",
+                        "section_no": section.section_no,
+                        "page_start": section.page_start,
+                        "page_end": section.page_end,
+                    }
+                    continue
 
                 yield "phase", {
                     "code": "script.section.generating",
@@ -269,7 +393,7 @@ class ScriptService:
                             task_id=task.id,
                             current_section_no=section.section_no,
                         ),
-                        user_requirement=user_requirement or "",
+                        user_requirement=user_requirement,
                         feedback=feedback,
                     )
                     yield "phase", {
@@ -378,14 +502,27 @@ class ScriptService:
             raise ValueError(f"Active outline not found for project: {project_id}")
         return outline_version
 
-    def _resolve_manual_section(self, *, project_id: int, page_no: int) -> ScriptSection:
-        """人工新增脚本时找到可挂载分段；没有历史任务时创建手动任务和分段。"""
+    def _resolve_manual_section(
+        self,
+        *,
+        project_id: int,
+        page_no: int,
+        task_id: int | None = None,
+    ) -> ScriptSection:
+        """人工新增脚本时找到可挂载分段；优先挂到前端当前选中的脚本任务。"""
 
-        existing_page = self.repository.get_project_page(project_id=project_id, page_no=page_no)
-        if existing_page is not None and existing_page.section is not None:
-            return existing_page.section
+        if task_id is not None:
+            task = self.get_script_task(task_id)
+            if task.project_id != project_id:
+                raise ValueError("ScriptGenerationTask does not belong to project.")
+            if page_no > task.total_pages:
+                raise ValueError("page_no must be between 1 and task.total_pages")
+        else:
+            existing_page = self.repository.get_project_page(project_id=project_id, page_no=page_no)
+            if existing_page is not None and existing_page.section is not None:
+                return existing_page.section
+            task = self.repository.get_latest_script_task_for_project(project_id)
 
-        task = self.repository.get_latest_script_task_for_project(project_id)
         if task is None:
             task = self.repository.create_script_task(
                 project_id=project_id,

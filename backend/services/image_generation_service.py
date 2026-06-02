@@ -9,6 +9,7 @@ from typing import Any, AsyncIterator
 from backend.models.comic import ComicImage, ComicPage, ComfyWorkflowPreset, GenerationTask
 from backend.models.enums import ComicPageStatus, GenerationTaskStatus
 from backend.repositories.comic_repository import ComicRepository
+from backend.services.task_runtime import RuntimeTaskType, running_task_registry
 from backend.tools.comfyui_client import ComfyUIClient
 from backend.i18n.errors import app_error_from_exception
 
@@ -156,17 +157,18 @@ class ImageGenerationService:
             task_id=batch_task.id,
             status=GenerationTaskStatus.RUNNING,
         )
-        yield "start", {
-            "task_id": batch_task.id,
-            "script_task_id": script_task.id,
-            "total": len(pages),
-            "status": batch_task.status.value,
-        }
-
-        completed = 0
-        succeeded = 0
-        failed = 0
+        running_task_registry.register(RuntimeTaskType.GENERATION_TASK, batch_task.id)
         try:
+            yield "start", {
+                "task_id": batch_task.id,
+                "script_task_id": script_task.id,
+                "total": len(pages),
+                "status": batch_task.status.value,
+            }
+
+            completed = 0
+            succeeded = 0
+            failed = 0
             for page in pages:
                 if self._is_suspended(batch_task.id):
                     yield "suspended", {"task_id": batch_task.id, "status": GenerationTaskStatus.SUSPENDED.value}
@@ -181,15 +183,15 @@ class ImageGenerationService:
                     task_id=page_task.id,
                     status=GenerationTaskStatus.RUNNING,
                 )
-                yield "page_task", {
-                    "task_id": batch_task.id,
-                    "page_task_id": page_task.id,
-                    "page_id": page.id,
-                    "page_no": page.page_no,
-                    "status": page_task.status.value,
-                }
-
+                running_task_registry.register(RuntimeTaskType.GENERATION_TASK, page_task.id)
                 try:
+                    yield "page_task", {
+                        "task_id": batch_task.id,
+                        "page_task_id": page_task.id,
+                        "page_id": page.id,
+                        "page_no": page.page_no,
+                        "status": page_task.status.value,
+                    }
                     image_count = 0
                     async for event, payload in self._stream_page_images(
                         page=page,
@@ -235,6 +237,8 @@ class ImageGenerationService:
                         "page_no": page.page_no,
                         "code": error.code,
                     }
+                finally:
+                    running_task_registry.unregister(RuntimeTaskType.GENERATION_TASK, page_task.id)
 
                 yield "progress", {
                     "task_id": batch_task.id,
@@ -266,6 +270,8 @@ class ImageGenerationService:
                 error_message=str(exc),
             )
             raise
+        finally:
+            running_task_registry.unregister(RuntimeTaskType.GENERATION_TASK, batch_task.id)
 
     async def stream_generate_for_page(
         self,
@@ -291,28 +297,39 @@ class ImageGenerationService:
             task_id=task.id,
             status=GenerationTaskStatus.RUNNING,
         )
-        yield "start", {"task_id": task.id, "total": 1, "status": task.status.value}
-        image_count = 0
-        async for event, payload in self._stream_page_images(
-            page=page,
-            page_task_id=task.id,
-            preset=preset,
-            candidates_per_page=candidates_per_page,
-            poll_interval_seconds=poll_interval_seconds,
-            negative_prompt=negative_prompt,
-            batch_task_id=task.id,
-        ):
-            if event == "image":
-                image_count += 1
-            yield event, payload
-        if image_count == 0:
-            raise ValueError(f"ComfyUI generated no images for page: {page.page_no}")
-        task = self.repository.update_generation_task(
-            task_id=task.id,
-            status=GenerationTaskStatus.SUCCEEDED,
-        )
-        self.repository.mark_page_image_ready(page.id)
-        yield "done", {"task_id": task.id, "status": task.status.value, "total": 1, "succeeded": 1, "failed": 0}
+        running_task_registry.register(RuntimeTaskType.GENERATION_TASK, task.id)
+        try:
+            yield "start", {"task_id": task.id, "total": 1, "status": task.status.value}
+            image_count = 0
+            async for event, payload in self._stream_page_images(
+                page=page,
+                page_task_id=task.id,
+                preset=preset,
+                candidates_per_page=candidates_per_page,
+                poll_interval_seconds=poll_interval_seconds,
+                negative_prompt=negative_prompt,
+                batch_task_id=task.id,
+            ):
+                if event == "image":
+                    image_count += 1
+                yield event, payload
+            if image_count == 0:
+                raise ValueError(f"ComfyUI generated no images for page: {page.page_no}")
+            task = self.repository.update_generation_task(
+                task_id=task.id,
+                status=GenerationTaskStatus.SUCCEEDED,
+            )
+            self.repository.mark_page_image_ready(page.id)
+            yield "done", {"task_id": task.id, "status": task.status.value, "total": 1, "succeeded": 1, "failed": 0}
+        except Exception as exc:
+            self.repository.update_generation_task(
+                task_id=task.id,
+                status=GenerationTaskStatus.FAILED,
+                error_message=str(exc),
+            )
+            raise
+        finally:
+            running_task_registry.unregister(RuntimeTaskType.GENERATION_TASK, task.id)
 
     def select_image(self, *, page_id: int, image_id: int) -> ComicPage:
         """人工选择某页最终图片。"""
