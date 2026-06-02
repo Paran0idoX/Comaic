@@ -1,73 +1,76 @@
 # comaic
 
-comaic 是一个本地优先的 AI 漫画生成工作台。它把“故事大纲 -> 分页脚本 -> 文生图 Prompt -> ComfyUI 图片生成 -> 人工选图”串成一条可操作的 MVP 链路，适合用来实验 AI 辅助漫画创作流程。
+English | [简体中文](./README.zh-CN.md)
 
-当前版本重点不是自动完成所有创作判断，而是让每个关键产物都能被用户确认和调整：大纲可以多轮对话生成，分页脚本可以人工编辑，图片 Prompt 可以重新生成，ComfyUI 候选图可以逐页选择最终版本。
+comaic is a local-first AI comic generation workspace. It turns the workflow “story outline -> page scripts -> text-to-image prompts -> ComfyUI image generation -> manual image selection” into an operable MVP pipeline for experimenting with AI-assisted comic creation.
 
-## 功能概览
+The current version is not designed to automate every creative decision. Instead, each key artifact remains reviewable and editable: outlines are shaped through multi-turn conversations, page scripts can be edited manually, image prompts can be regenerated, and ComfyUI candidate images can be selected page by page.
 
-- 项目管理：创建、编辑、删除漫画项目。
-- 大纲工作台：与 Outline Agent 多轮对话，实时流式显示回复，并保存大纲版本。
-- 分页脚本：基于大纲版本生成分页漫画脚本，支持批量生成、暂停、删除分段和人工编辑。
-- 图片 Prompt：维护“脚本转文生图 Prompt”的 System Prompt，并为已完成脚本任务批量生成图片 Prompt。
-- 图片生成：维护 ComfyUI Workflow preset，基于页面图片 Prompt 调用本地 ComfyUI 生成候选图。
-- 人工选择：为每页候选图选择最终图片。
-- 多语言前端：当前支持中文和英文。
+## Features
 
-## 技术栈
+- Project management: create, edit, and delete comic projects.
+- Outline workspace: run multi-turn conversations with the Outline Agent, stream replies in real time, and save outline versions.
+- Page scripts: generate comic page scripts from an outline version, with batch generation, pause, section deletion, and manual editing.
+- Image prompts: manage reusable “script to image prompt” system prompts and generate image prompts for completed script tasks.
+- Image generation: manage ComfyUI workflow presets and generate candidate images from page image prompts.
+- Manual selection: choose the final image for each page.
+- Multilingual frontend: Chinese and English are currently supported.
 
-- Backend：Python、FastAPI、LangChain、DeepAgents、SQLAlchemy、SQLite、SSE
-- LLM：DeepSeek OpenAI-compatible API
-- Frontend：Vue 3、Vite、Element Plus、vue-i18n
-- Image Generation：本地 ComfyUI HTTP API
+## Tech Stack
 
-## 项目结构
+- Backend: Python, FastAPI, LangChain, DeepAgents, SQLAlchemy, SQLite, SSE
+- LLM: DeepSeek OpenAI-compatible API
+- Frontend: Vue 3, Vite, Element Plus, vue-i18n
+- Image generation: local ComfyUI HTTP API
+
+## Project Structure
 
 ```text
 comaic/
 ├── backend/      # FastAPI + LangChain + SQLAlchemy
 ├── frontend/     # Vue 3 + Vite + Element Plus
-├── data/         # SQLite，本地开发数据
-├── outputs/      # ComfyUI 生成图片保存目录
-├── workflows/    # 可选：本地 workflow_api.json 备份
-├── start.sh      # 同时启动前后端的本地脚本
+├── data/         # Local SQLite development data
+├── outputs/      # Saved ComfyUI generated images
+├── workflows/    # Optional local workflow_api.json backups
+├── start.sh      # Local script that starts backend and frontend together
 ├── README.md
+├── README.zh-CN.md
 ├── AGENTS.md
 └── .gitignore
 ```
 
-## 环境要求
+## Requirements
 
 - Python 3.12
-- Node.js 20.19+ 或 22.12+
+- Node.js 20.19+ or 22.12+
 - npm
-- Conda，推荐环境名：`lang_graph`
-- 本地 ComfyUI，默认地址：`http://127.0.0.1:8188`
-- DeepSeek API Key
+- Conda, with the recommended environment name `lang_graph`
+- Local ComfyUI, default URL: `http://127.0.0.1:8188`
+- DeepSeek API key
 
-## 快速开始
+## Quick Start
 
-### 1. 克隆项目
+### 1. Clone the repository
 
 ```bash
 git clone <your-repo-url> comaic
 cd comaic
 ```
 
-### 2. 创建并激活 Python 环境
+### 2. Create and activate the Python environment
 
 ```bash
 conda create -n lang_graph python=3.12
 conda activate lang_graph
 ```
 
-### 3. 安装后端依赖
+### 3. Install backend dependencies
 
 ```bash
 pip install -r backend/requirements.txt
 ```
 
-### 4. 安装前端依赖
+### 4. Install frontend dependencies
 
 ```bash
 cd frontend
@@ -75,15 +78,15 @@ npm install
 cd ..
 ```
 
-### 5. 配置环境变量
+### 5. Configure environment variables
 
-从示例文件创建本地 `.env`：
+Create a local `.env` from the example file:
 
 ```bash
 cp backend/.env.example .env
 ```
 
-编辑 `.env`：
+Edit `.env`:
 
 ```env
 DEEPSEEK_MODEL=deepseek-v4-flash
@@ -93,31 +96,31 @@ DATABASE_URL=sqlite:///data/comaic.sqlite3
 COMFYUI_BASE_URL=http://127.0.0.1:8188
 ```
 
-真实 `.env` 不要提交到 Git。
+Do not commit your real `.env` file.
 
-### 6. 启动 ComfyUI
+### 6. Start ComfyUI
 
-请先按 ComfyUI 官方方式启动本地服务，并确保浏览器可访问：
+Start your local ComfyUI server using the official ComfyUI workflow and make sure it is reachable in a browser:
 
 ```text
 http://127.0.0.1:8188
 ```
 
-### 7. 启动 comaic
+### 7. Start comaic
 
-推荐使用根目录脚本同时启动前后端：
+The recommended local command starts both backend and frontend:
 
 ```bash
 ./start.sh
 ```
 
-默认地址：
+Default URLs:
 
-- 前端：http://127.0.0.1:5173
-- 后端：http://127.0.0.1:8000
-- 后端健康检查：http://127.0.0.1:8000/health
+- Frontend: http://127.0.0.1:5173
+- Backend: http://127.0.0.1:8000
+- Backend health check: http://127.0.0.1:8000/health
 
-也可以分开启动：
+You can also start them separately:
 
 ```bash
 uvicorn backend.main:app --reload
@@ -128,132 +131,132 @@ cd frontend
 npm run dev
 ```
 
-## 使用流程
+## User Flow
 
-### 1. 创建项目
+### 1. Create a project
 
-进入“项目”页面，点击“新建项目”，输入项目标题。
+Open the “Projects” page, click “New Project”, and enter a project title.
 
-项目只是创作容器；大纲、脚本、图片 Prompt 和图片生成任务都会关联到具体项目。
+A project is the creative container. Outlines, scripts, image prompts, and image generation tasks are all associated with a project.
 
-### 2. 生成大纲
+### 2. Generate an outline
 
-进入“大纲工作台”：
+Open the “Outline Workspace”:
 
-1. 选择项目。
-2. 创建或进入大纲会话。
-3. 与 Agent 多轮对话，补充题材、主角、背景、冲突、结尾方向等信息。
-4. 每轮对话结束后，如果 Agent 判断大纲需要更新，右侧会保存新的大纲版本。
+1. Select a project.
+2. Create or reuse an outline session.
+3. Chat with the Agent to refine genre, protagonist, setting, conflict, ending direction, and other story information.
+4. After each turn, if the Agent decides the outline should be updated, a new outline version is saved on the right.
 
-大纲版本是后续分页脚本生成的输入。
+Outline versions are used as input for page script generation.
 
-### 3. 生成分页脚本
+### 3. Generate page scripts
 
-进入“分页脚本”页面：
+Open the “Page Scripts” page:
 
-1. 选择项目。
-2. 选择该项目下的大纲版本。
-3. 输入目标总页数和补充要求。
-4. 点击批量生成。
+1. Select a project.
+2. Select an outline version under that project.
+3. Enter the target page count and any extra requirements.
+4. Start batch generation.
 
-系统会先生成故事节奏分段，再按分段生成页面脚本。页面脚本当前采用结构化字段：
+The system first creates story pacing sections, then generates page scripts section by section. Page scripts currently use structured fields:
 
-- 摘要
-- 人物
-- 服装
-- 场景
-- 构图
-- 人物动作
-- 对话
+- Summary
+- Characters
+- Clothing
+- Scene
+- Composition
+- Character action
+- Dialogue
 
-生成完成后，你可以查看、编辑、清空或删除页面脚本。批量生成过程中可以暂停，暂停后已生成内容会保留。
+After generation, you can view, edit, clear, or delete page scripts. Batch generation can be paused, and generated content is kept after pausing.
 
-### 4. 生成图片 Prompt
+### 4. Generate image prompts
 
-进入“图片 Prompt”页面：
+Open the “Image Prompts” page:
 
-1. 维护“脚本 -> 文生图 Prompt”的 System Prompt preset。
-2. 选择项目。
-3. 选择已完成的脚本生成任务。
-4. 选择 System Prompt preset。
-5. 点击生成。
+1. Manage the “script -> text-to-image prompt” system prompt presets.
+2. Select a project.
+3. Select a completed script generation task.
+4. Select a system prompt preset.
+5. Start generation.
 
-系统会将每页结构化脚本转成适合文生图模型使用的正向 Prompt，并保存到页面数据中。再次生成同一任务的图片 Prompt 时，会先清空该任务已有 Prompt，再实时写入新的结果。
+The system converts each structured page script into a positive prompt suitable for text-to-image generation and saves it to the page data. Regenerating image prompts for the same script task first clears that task’s existing image prompts, then streams the new results into the page.
 
-### 5. 配置 ComfyUI Workflow
+### 5. Configure a ComfyUI workflow
 
-进入“图片生成”页面，先维护 Workflow preset。
+Open the “Image Generation” page and create a workflow preset first.
 
-Workflow preset 需要使用 ComfyUI 的 API workflow JSON，而不是普通界面 workflow。你可以：
+The workflow preset must use ComfyUI API workflow JSON, not the regular visual workflow export. You can:
 
-- 直接粘贴 workflow API JSON。
-- 拖拽或选择 `.json` 文件。
-- 使用“自动解析正向节点”自动识别正向 Prompt 节点 ID 和输入名。
+- Paste workflow API JSON directly.
+- Drag and drop or choose a `.json` file.
+- Use “Parse Positive Node” to automatically detect the positive prompt node ID and input name.
 
-至少需要配置：
+At minimum, configure:
 
 - Workflow JSON
-- 正向 Prompt 节点 ID
-- 正向 Prompt 输入名，常见为 `text`
+- Positive prompt node ID
+- Positive prompt input name, commonly `text`
 
-Seed 节点可选；如果不配置，系统不会强行注入 seed，而是使用 workflow 自身配置。
+Seed node configuration is optional. If no seed node is configured, comaic does not force-inject a seed and uses the workflow’s own configuration.
 
-### 6. 生成图片
+### 6. Generate images
 
-在“图片生成”页面：
+Open the “Image Generation” page:
 
-1. 选择项目。
-2. 选择已完成脚本任务。
-3. 选择 Workflow preset。
-4. 设置每页候选图数量和轮询间隔。
-5. 点击生成。
+1. Select a project.
+2. Select a completed script task.
+3. Select a workflow preset.
+4. Set candidate count per page and polling interval.
+5. Start generation.
 
-当前批量图片生成策略是：每一页单独提交一次 ComfyUI `/prompt` 请求。后端会轮询 `/history/{prompt_id}`，通过 `/view` 下载生成图片，并保存到 `outputs/`。
+Batch image generation currently submits one ComfyUI `/prompt` request per page. The backend polls `/history/{prompt_id}`, downloads generated images through `/view`, and stores them under `outputs/`.
 
-再次生成不会删除旧图，而是追加新的候选图，方便人工比较。生成过程中可以点击暂停；暂停只会停止提交后续页面，不会中断已经提交给 ComfyUI 的当前任务。
+Regeneration does not delete old images. It appends new candidate images so that you can compare and choose manually. Pausing image generation only stops submitting subsequent pages; it does not interrupt the currently submitted ComfyUI task.
 
-### 7. 选择最终图片
+### 7. Select final images
 
-每页生成候选图后，可以在“图片生成”页面查看缩略图，并为该页选择一张最终图片。
+After candidate images are generated, inspect thumbnails in the “Image Generation” page and select one final image for each page.
 
-## ComfyUI Workflow 说明
+## ComfyUI Workflow Notes
 
-comaic 不内置固定 ComfyUI 工作流。你需要在页面中维护自己的 Workflow preset。
+comaic does not ship with a fixed ComfyUI workflow. You maintain your own workflow presets in the UI.
 
-推荐做法：
+Recommended workflow:
 
-1. 在 ComfyUI 中搭好文生图 workflow。
-2. 导出 API workflow JSON。
-3. 在 comaic 的“图片生成”页面新增 Workflow preset。
-4. 拖入 JSON 文件或粘贴 JSON。
-5. 确认正向 Prompt 节点 ID 和输入名。
-6. 保存 preset 后用于图片生成。
+1. Build a text-to-image workflow in ComfyUI.
+2. Export the API workflow JSON.
+3. Add a workflow preset in comaic’s “Image Generation” page.
+4. Drag in the JSON file or paste the JSON content.
+5. Confirm the positive prompt node ID and input name.
+6. Save the preset and use it for image generation.
 
-如果 workflow 里有多个 `CLIPTextEncode` 节点，前端会尝试避开明显的 negative prompt 节点，但仍建议你手动检查一次。
+If the workflow contains multiple `CLIPTextEncode` nodes, the frontend tries to avoid nodes that look like negative prompts, but you should still check the selected node manually.
 
-## 常用命令
+## Common Commands
 
-后端导入和建表检查：
+Backend import and table creation check:
 
 ```bash
 python -c "from backend.models.database import init_db; init_db(); print('db ready')"
 ```
 
-前端类型检查：
+Frontend type check:
 
 ```bash
 cd frontend
 npm run type-check
 ```
 
-前端构建：
+Frontend build:
 
 ```bash
 cd frontend
 npm run build
 ```
 
-后端文案 catalog 更新：
+Backend message catalog maintenance:
 
 ```bash
 pybabel extract -F backend/babel.cfg -o backend/locales/messages.pot backend
@@ -261,65 +264,66 @@ pybabel update -i backend/locales/messages.pot -d backend/locales
 pybabel compile -d backend/locales
 ```
 
-前端界面和进度时间线文案由 `vue-i18n` 管理；后端业务错误会返回稳定 `code` 和按请求语言本地化后的 `message`。前端请求会自动携带当前界面语言。
+Frontend UI text and progress timeline text are managed by `vue-i18n`. Backend business errors return a stable `code` plus a localized `message`. Frontend requests automatically include the current UI language.
 
-## 本地数据
+## Local Data
 
-- SQLite 默认保存到 `data/comaic.sqlite3`
-- 生成图片默认保存到 `outputs/`
-- `.env`、`data/`、`outputs/`、`frontend/node_modules/`、`frontend/dist/` 不应提交到 Git
+- SQLite defaults to `data/comaic.sqlite3`
+- Generated images default to `outputs/`
+- `.env`, `data/`, `outputs/`, `frontend/node_modules/`, and `frontend/dist/` should not be committed to Git
 
-当前项目仍是 MVP，本地 SQLite 没有引入正式迁移工具。如果开发期间 ORM 表结构变化导致旧库不兼容，可以删除本地数据库后重启：
+comaic is still an MVP and does not use a formal migration tool for the local SQLite database. If ORM schema changes make your old local database incompatible, delete it and restart:
 
 ```bash
 rm data/comaic.sqlite3
 ./start.sh
 ```
 
-时间字段以带 `+00:00` 的 UTC ISO8601 字符串写入 SQLite，页面展示时会自动转成浏览器本地时间。若你从旧版本升级到当前版本，请删除旧的本地 SQLite 后重建。
+Time fields are stored as UTC ISO8601 strings with `+00:00` and displayed in the browser’s local timezone. If you upgrade from an older version, delete and rebuild the old local SQLite database.
 
-如果你已经积累了重要数据，请先备份数据库。
+Back up the database first if it contains important data.
 
-## 常见问题
+## FAQ
 
-### 前端 5173 和后端 8000 是什么关系？
+### What is the relationship between frontend port 5173 and backend port 8000?
 
-前端 Vite 默认运行在 `5173`，后端 FastAPI 默认运行在 `8000`。前端通过 Vite proxy 将 `/api` 请求转发到后端。
+Vite runs the frontend on `5173` by default, and FastAPI runs the backend on `8000` by default. The frontend uses the Vite proxy to forward `/api` requests to the backend.
 
-### 为什么需要先启动 ComfyUI？
+### Why do I need to start ComfyUI first?
 
-图片生成阶段会调用本地 ComfyUI HTTP API。如果 ComfyUI 没有启动，图片生成请求会失败。
+The image generation stage calls the local ComfyUI HTTP API. If ComfyUI is not running, image generation requests will fail.
 
-### Workflow JSON 拖入后没有识别到正向 Prompt 节点怎么办？
+### What if the workflow JSON upload does not detect the positive prompt node?
 
-请确认拖入的是 ComfyUI API workflow JSON，并手动填写正向 Prompt 节点 ID 和输入名。常见输入名是 `text`。
+Make sure the file is a ComfyUI API workflow JSON file, then fill in the positive prompt node ID and input name manually. The common input name is `text`.
 
-### 图片生成会覆盖旧候选图吗？
+### Does image generation overwrite old candidate images?
 
-不会。图片生成采用追加候选图的方式，旧图会保留，便于比较和选择。
+No. Image generation appends new candidates and keeps old images for comparison and manual selection.
 
-### 暂停图片生成会中断 ComfyUI 当前任务吗？
+### Does pausing image generation interrupt the current ComfyUI task?
 
-不会。暂停只阻止后续页面继续提交给 ComfyUI，当前已经提交的页面会继续跑完并保存结果。
+No. Pause only stops later pages from being submitted to ComfyUI. The current submitted page continues to completion and its result is saved.
 
-### DeepSeek 报 API Key 错误怎么办？
+### DeepSeek reports an API key error. What should I check?
 
-检查根目录 `.env` 中是否配置了：
+Check that the root `.env` file contains:
 
 ```env
 DEEPSEEK_API_KEY=your_deepseek_api_key
 ```
 
-不要把真实 key 写入代码或提交到 Git。
+Do not write a real key into source code or commit it to Git.
 
-## 开发状态
+## Development Status
 
-comaic 目前是 MVP 版本，核心链路已经跑通，但仍适合继续扩展：
+comaic is currently an MVP. The core pipeline works, and there is plenty of room to extend it:
 
-- 更稳定的任务恢复与进度重连
-- 更完整的数据库迁移
-- 更丰富的 ComfyUI workflow 参数注入
-- 图片生成恢复继续
-- 更细的权限、项目导出和部署方案
+- More reliable task recovery and progress reconnection
+- Formal database migrations
+- Richer ComfyUI workflow parameter injection
+- Resume support for image generation
+- Permissions, project export, and deployment improvements
 
-欢迎基于这个项目继续实验和改造 AI 漫画创作流程。
+You are welcome to use this project as a base for further experiments in AI-assisted comic creation.
+
