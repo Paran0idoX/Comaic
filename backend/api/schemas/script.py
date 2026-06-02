@@ -22,10 +22,17 @@ class GenerateBatchScriptRequest(BaseModel):
     user_requirement: str | None = None
 
 
+class ContinueBatchScriptRequest(BaseModel):
+    """继续批量脚本生成请求体。"""
+
+    user_requirement: str | None = None
+
+
 class CreatePageScriptRequest(BaseModel):
     """人工新增页面脚本请求体。"""
 
     page_no: int = Field(gt=0)
+    task_id: int | None = Field(default=None, gt=0)
     summary: str
     characters: str
     clothing: str
@@ -38,6 +45,7 @@ class CreatePageScriptRequest(BaseModel):
 class UpdatePageScriptRequest(BaseModel):
     """人工更新页面脚本请求体。"""
 
+    task_id: int | None = Field(default=None, gt=0)
     summary: str
     characters: str
     clothing: str

@@ -80,9 +80,17 @@ MVP 核心表位于 `backend/models/comic.py`：
 - 使用 `response_format` 的 Agent 必须优先复用 `backend/agents/structured_output.py` 中的 `ainvoke_structured_with_retries()`。
   - 只读取 `structured_response`，不要从自然语言、Markdown 代码块或文件输出中兜底解析 JSON。
   - Agent 自己通过 `validator` 传入业务级结构校验，例如页面列表非空、Prompt 非空。
-  - 结构化输出重试只解决模型输出形态问题；页码范围、字段完整性、落库状态流转仍放在 Service/Repository 层。
+- 结构化输出重试只解决模型输出形态问题；页码范围、字段完整性、落库状态流转仍放在 Service/Repository 层。
 
 保持每层轻量。MVP 中可以先用少量类和函数，不要为了“像框架”而增加复杂抽象。
+
+## 长任务心跳约定
+
+- `script_generation_task` 和 `generation_task` 使用 `heartbeat_at` 记录当前运行心跳。
+- `backend/services/task_runtime.py` 维护进程内运行中任务注册表，并在 FastAPI lifespan 启动两个后台线程：心跳线程和僵尸任务扫描线程。
+- Service 在任务进入 `running` 后必须注册到 `running_task_registry`，在任务完成、失败、暂停或 generator 退出时必须注销。
+- 心跳线程只刷新注册表中的任务，不能直接刷新数据库中所有 `running` 任务，否则应用重启后的僵尸任务会被误续命。
+- 僵尸扫描只把心跳超时的 `running` 任务改为 `suspended`，不自动恢复；恢复仍走现有继续生成入口。
 
 ## 注释约定
 
@@ -181,6 +189,7 @@ pybabel compile -d backend/locales
 
 - 图片 Prompt 配置使用通用 `ImagePromptPreset` 表维护，用 `ImagePromptPresetKind` 区分脚本转图 SystemPrompt 和 Negative Prompt。
 - 脚本转图 SystemPrompt 会传给 LLM；Negative Prompt 不传给 LLM，只作为后续 ComfyUI 出图配置返回或使用。
+- ImagePromptAgent 不使用 `response_format`；直接读取模型最后一条 AI 文本输出作为正向 Prompt，并由 Service 校验空值和落库。
 - 图片 Prompt 生成范围以已完成的脚本生成任务为单位，Service 读取任务下页面脚本并并发调用 Agent。
 - 生成出的正向 Prompt 保存到 `comic_page.image_prompt`，页面状态使用 `ComicPageStatus.PROMPT_READY`。
 - 前端维护 Prompt 配置时可以使用 Markdown 预览，但必须关闭原始 HTML 渲染。
