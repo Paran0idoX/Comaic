@@ -1,4 +1,4 @@
-# comaic
+# Comaic
 
 [English](./README.md) | 简体中文
 
