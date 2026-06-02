@@ -13,12 +13,16 @@ import {
   createPageScript,
   deleteAllProjectPages,
   deleteScriptTaskSections,
-  generateSinglePageScript,
-  listProjectPages,
+  listProjectScriptTasks,
+  listScriptTaskPages,
+  listScriptTaskSections,
   suspendScriptTask,
   streamBatchScriptGeneration,
+  streamContinueScriptGeneration,
   updatePageScript,
   type ScriptPage,
+  type ScriptSection,
+  type ScriptTask,
 } from '@/api/scripts'
 import { formatLocalDateTime, formatLocalNowTime } from '@/utils/datetime'
 
@@ -41,12 +45,15 @@ const { locale, t } = useI18n()
 
 const projects = ref<Project[]>([])
 const outlineVersions = ref<OutlineVersion[]>([])
+const scriptTasks = ref<ScriptTask[]>([])
+const sections = ref<ScriptSection[]>([])
 const pages = ref<ScriptPage[]>([])
 const selectedProjectId = ref<number | null>(null)
 const selectedOutlineVersionId = ref<number | null>(null)
+const selectedTaskId = ref<number | null>(null)
+const selectedSectionNo = ref<number | null>(null)
 const currentTaskId = ref<number | null>(null)
 const totalPages = ref(12)
-const singlePageNo = ref(1)
 const userRequirement = ref('')
 const progressEvents = ref<ProgressEvent[]>([])
 const selectedPage = ref<ScriptPage | null>(null)
@@ -67,10 +74,12 @@ const savingScript = ref(false)
 
 const loadingProjects = ref(false)
 const loadingOutlineVersions = ref(false)
+const loadingTasks = ref(false)
+const loadingSections = ref(false)
 const loadingPages = ref(false)
-const generatingSingle = ref(false)
 const generatingBatch = ref(false)
 const suspendingBatch = ref(false)
+const continuingBatch = ref(false)
 const needsOutline = ref(false)
 const eventSequence = ref(1)
 
@@ -82,20 +91,52 @@ const sortedPages = computed(() =>
   [...pages.value].sort((left, right) => left.page_no - right.page_no),
 )
 
+const currentTask = computed(() =>
+  scriptTasks.value.find((task) => task.id === selectedTaskId.value) ?? null,
+)
+
+const displayedPages = computed(() => {
+  if (selectedSectionNo.value === null) {
+    return sortedPages.value
+  }
+  return sortedPages.value.filter((page) => page.section_no === selectedSectionNo.value)
+})
+
+const taskTotalPages = computed(() => currentTask.value?.total_pages ?? totalPages.value)
+const completedPageCount = computed(() => pages.value.filter((page) => Boolean(page.summary)).length)
+const completionPercentage = computed(() => {
+  if (currentTask.value === null || taskTotalPages.value <= 0) {
+    return 0
+  }
+  return Math.min(100, Math.round((completedPageCount.value / taskTotalPages.value) * 100))
+})
+
 const canGenerate = computed(
   () =>
     selectedProjectId.value !== null &&
     selectedOutlineVersionId.value !== null &&
     !needsOutline.value &&
-    !generatingSingle.value &&
-    !generatingBatch.value,
+    !generatingBatch.value &&
+    !continuingBatch.value,
 )
 
 const generationDisabled = computed(() => !canGenerate.value)
 const canEditScripts = computed(
-  () => selectedProjectId.value !== null && !generatingSingle.value && !generatingBatch.value,
+  () =>
+    selectedProjectId.value !== null &&
+    selectedTaskId.value !== null &&
+    !generatingBatch.value &&
+    !continuingBatch.value,
 )
 const canDeleteAllScripts = computed(() => canEditScripts.value && pages.value.length > 0)
+const canContinueBatch = computed(
+  () =>
+    currentTask.value !== null &&
+    currentTask.value.mode === 'batch' &&
+    ['suspended', 'failed'].includes(currentTask.value.status) &&
+    !generatingBatch.value &&
+    !continuingBatch.value,
+)
 
 const formatDateTime = (value: string) => {
   return formatLocalDateTime(value, locale.value, {
@@ -182,6 +223,49 @@ const outlineStatusLabel = (status: string) => {
 
 const outlineVersionLabel = (version: OutlineVersion) =>
   `v${version.version_no} · ${outlineStatusLabel(version.status)} · ${formatDateTime(version.created_at)}`
+
+const taskStatusLabel = (status: string) => {
+  const key = `scripts.taskStatus.${status}`
+  const translated = t(key)
+  return translated === key ? status : translated
+}
+
+const taskModeLabel = (mode: string) => {
+  const key = `scripts.taskMode.${mode}`
+  const translated = t(key)
+  return translated === key ? mode : translated
+}
+
+const scriptTaskLabel = (task: ScriptTask) =>
+  `#${task.id} · ${taskModeLabel(task.mode)} · ${taskStatusLabel(task.status)} · ${task.total_pages} ${t('scripts.config.pagesUnit')} · ${formatDateTime(task.updated_at)}`
+
+const sectionPageRange = (section: ScriptSection) =>
+  `${t('scripts.pages.pageNoPrefix')}${section.page_start}-${section.page_end}${t('scripts.pages.pageNoSuffix')}`
+
+const sectionCompleted = (section: ScriptSection) => {
+  const completed = new Set(
+    pages.value
+      .filter((page) => page.section_id === section.id && Boolean(page.summary))
+      .map((page) => page.page_no),
+  )
+  for (let pageNo = section.page_start; pageNo <= section.page_end; pageNo += 1) {
+    if (!completed.has(pageNo)) {
+      return false
+    }
+  }
+  return true
+}
+
+const firstMissingPageNo = () => {
+  const total = currentTask.value?.total_pages ?? totalPages.value
+  const completed = new Set(pages.value.filter((page) => page.summary).map((page) => page.page_no))
+  for (let pageNo = 1; pageNo <= total; pageNo += 1) {
+    if (!completed.has(pageNo)) {
+      return pageNo
+    }
+  }
+  return Math.min(total + 1, 300)
+}
 
 // SSE 事件数据来源不完全一致，这里统一提取最有用的信息写入时间线。
 const describePayload = (event: string, payload: Record<string, unknown>) => {
@@ -320,18 +404,66 @@ const loadProjects = async () => {
 }
 
 const loadPages = async () => {
-  if (selectedProjectId.value === null) {
+  if (selectedTaskId.value === null) {
     pages.value = []
     return
   }
 
   loadingPages.value = true
   try {
-    pages.value = await listProjectPages(selectedProjectId.value)
+    pages.value = await listScriptTaskPages(selectedTaskId.value)
   } catch {
     ElMessage.error(t('scripts.errors.loadPages'))
   } finally {
     loadingPages.value = false
+  }
+}
+
+const loadSections = async () => {
+  if (selectedTaskId.value === null) {
+    sections.value = []
+    return
+  }
+
+  loadingSections.value = true
+  try {
+    sections.value = await listScriptTaskSections(selectedTaskId.value)
+  } catch {
+    ElMessage.error(t('scripts.errors.loadSections'))
+  } finally {
+    loadingSections.value = false
+  }
+}
+
+const loadScriptTasks = async (preferredTaskId?: number | null) => {
+  if (selectedProjectId.value === null || selectedOutlineVersionId.value === null) {
+    scriptTasks.value = []
+    selectedTaskId.value = null
+    return
+  }
+
+  loadingTasks.value = true
+  try {
+    scriptTasks.value = await listProjectScriptTasks(selectedProjectId.value, {
+      outlineVersionId: selectedOutlineVersionId.value,
+    })
+    const routeTaskId = Number(route.query.script_task_id)
+    const candidates = [
+      preferredTaskId,
+      Number.isFinite(routeTaskId) ? routeTaskId : null,
+      selectedTaskId.value,
+      scriptTasks.value[0]?.id ?? null,
+    ]
+    selectedTaskId.value =
+      candidates.find(
+        (taskId) => taskId !== null && scriptTasks.value.some((task) => task.id === taskId),
+      ) ?? null
+  } catch {
+    ElMessage.error(t('scripts.errors.loadTasks'))
+    scriptTasks.value = []
+    selectedTaskId.value = null
+  } finally {
+    loadingTasks.value = false
   }
 }
 
@@ -347,6 +479,7 @@ const syncProjectQuery = () => {
       ...(selectedOutlineVersionId.value !== null
         ? { outline_version_id: String(selectedOutlineVersionId.value) }
         : {}),
+      ...(selectedTaskId.value !== null ? { script_task_id: String(selectedTaskId.value) } : {}),
     },
   })
 }
@@ -398,7 +531,7 @@ const handleGenerationError = (error: unknown, fallback: string) => {
   ElMessage.error(fallback)
 }
 
-const validateGenerationInput = () => {
+const validateBatchGenerationInput = () => {
   if (selectedProjectId.value === null) {
     ElMessage.warning(t('scripts.errors.selectProject'))
     return false
@@ -406,59 +539,18 @@ const validateGenerationInput = () => {
 
   if (selectedOutlineVersionId.value === null) {
     ElMessage.warning(t('scripts.errors.selectOutlineVersion'))
-    return false
-  }
-
-  if (singlePageNo.value < 1 || singlePageNo.value > totalPages.value) {
-    ElMessage.warning(t('scripts.errors.invalidPageRange'))
     return false
   }
 
   return true
 }
 
-const generateSingle = async () => {
+const generateBatch = async () => {
   if (
-    !validateGenerationInput() ||
+    !validateBatchGenerationInput() ||
     selectedProjectId.value === null ||
     selectedOutlineVersionId.value === null
   ) {
-    return
-  }
-
-  generatingSingle.value = true
-  needsOutline.value = false
-  try {
-    const result = await generateSinglePageScript({
-      project_id: selectedProjectId.value,
-      page_no: singlePageNo.value,
-      total_pages: totalPages.value,
-      outline_version_id: selectedOutlineVersionId.value,
-      user_requirement: userRequirement.value.trim() || undefined,
-    })
-
-    addProgressEvent('single_done', {
-      page_no: result.page_no,
-      task_id: result.task_id,
-      status: result.status,
-    })
-    currentTaskId.value = result.task_id
-    ElMessage.success(t('scripts.messages.singleSuccess'))
-    await loadPages()
-  } catch (error) {
-    handleGenerationError(error, t('scripts.errors.singleFailed'))
-  } finally {
-    generatingSingle.value = false
-  }
-}
-
-const generateBatch = async () => {
-  if (selectedProjectId.value === null) {
-    ElMessage.warning(t('scripts.errors.selectProject'))
-    return
-  }
-  if (selectedOutlineVersionId.value === null) {
-    ElMessage.warning(t('scripts.errors.selectOutlineVersion'))
     return
   }
 
@@ -480,6 +572,10 @@ const generateBatch = async () => {
           if (event === 'task') {
             const taskId = Number(payload.task_id)
             currentTaskId.value = Number.isFinite(taskId) ? taskId : null
+            if (currentTaskId.value !== null) {
+              selectedTaskId.value = currentTaskId.value
+              void loadScriptTasks(currentTaskId.value)
+            }
           }
           if (event === 'page') {
             const page = payload.page as ScriptPage | undefined
@@ -491,11 +587,12 @@ const generateBatch = async () => {
             for (const page of payload.pages as ScriptPage[]) {
               upsertPageInList(page)
             }
+            void loadSections()
           }
           if (event === 'done') {
+            void loadScriptTasks(currentTaskId.value)
             void loadPages()
-          }
-          if (event === 'done') {
+            void loadSections()
             ElMessage.success(t('scripts.messages.batchSuccess'))
           }
           if (event === 'suspended') {
@@ -514,18 +611,72 @@ const generateBatch = async () => {
   } finally {
     generatingBatch.value = false
     suspendingBatch.value = false
+    void loadScriptTasks(currentTaskId.value ?? selectedTaskId.value)
+  }
+}
+
+const continueBatch = async () => {
+  if (selectedTaskId.value === null || !canContinueBatch.value) {
+    ElMessage.warning(t('scripts.errors.selectTask'))
+    return
+  }
+
+  continuingBatch.value = true
+  currentTaskId.value = selectedTaskId.value
+  addProgressEvent('phase', { code: 'script.continue.started', task_id: selectedTaskId.value })
+
+  try {
+    await streamContinueScriptGeneration(
+      selectedTaskId.value,
+      {
+        user_requirement: userRequirement.value.trim() || undefined,
+      },
+      {
+        onEvent: (event, payload) => {
+          addProgressEvent(event, payload)
+          if (event === 'section_pages' && Array.isArray(payload.pages)) {
+            for (const page of payload.pages as ScriptPage[]) {
+              upsertPageInList(page)
+            }
+            void loadSections()
+          }
+          if (event === 'done') {
+            void loadScriptTasks(selectedTaskId.value)
+            void loadPages()
+            void loadSections()
+            ElMessage.success(t('scripts.messages.continueSuccess'))
+          }
+          if (event === 'suspended') {
+            continuingBatch.value = false
+            suspendingBatch.value = false
+            void loadScriptTasks(selectedTaskId.value)
+            ElMessage.warning(t('scripts.messages.batchSuspended'))
+          }
+        },
+        onError: (error) => {
+          handleGenerationError(error, t('scripts.errors.continueFailed'))
+        },
+      },
+    )
+  } catch (error) {
+    handleGenerationError(error, t('scripts.errors.continueFailed'))
+  } finally {
+    continuingBatch.value = false
+    suspendingBatch.value = false
+    void loadScriptTasks(selectedTaskId.value)
   }
 }
 
 const suspendBatch = async () => {
-  if (currentTaskId.value === null) {
+  const taskId = currentTaskId.value ?? selectedTaskId.value
+  if (taskId === null) {
     ElMessage.warning(t('scripts.errors.noCurrentBatchTask'))
     return
   }
 
   suspendingBatch.value = true
   try {
-    await suspendScriptTask(currentTaskId.value)
+    await suspendScriptTask(taskId)
     ElMessage.info(t('scripts.messages.suspendRequested'))
   } catch {
     suspendingBatch.value = false
@@ -534,6 +685,8 @@ const suspendBatch = async () => {
 }
 
 const refreshCurrentProject = async () => {
+  await loadScriptTasks(selectedTaskId.value)
+  await loadSections()
   await loadPages()
   addProgressEvent('refreshed', { message: t('scripts.events.refreshed') })
 }
@@ -544,8 +697,12 @@ const openDetail = (page: ScriptPage) => {
 }
 
 const openCreateScript = () => {
+  if (selectedTaskId.value === null) {
+    ElMessage.warning(t('scripts.errors.selectTask'))
+    return
+  }
   scriptDialogMode.value = 'create'
-  scriptFormPageNo.value = singlePageNo.value
+  scriptFormPageNo.value = firstMissingPageNo()
   resetScriptForm()
   scriptDialogVisible.value = true
 }
@@ -562,6 +719,10 @@ const saveManualScript = async () => {
     ElMessage.warning(t('scripts.errors.selectProject'))
     return
   }
+  if (selectedTaskId.value === null) {
+    ElMessage.warning(t('scripts.errors.selectTask'))
+    return
+  }
   if (!requiredScriptFieldsFilled()) {
     ElMessage.warning(t('scripts.errors.emptyScript'))
     return
@@ -573,12 +734,15 @@ const saveManualScript = async () => {
       scriptDialogMode.value === 'create'
         ? await createPageScript(selectedProjectId.value, {
             page_no: scriptFormPageNo.value,
+            task_id: selectedTaskId.value,
             ...buildScriptPayload(),
           })
         : await updatePageScript(selectedProjectId.value, scriptFormPageNo.value, {
+            task_id: selectedTaskId.value,
             ...buildScriptPayload(),
           })
     upsertPageInList(page)
+    await loadSections()
     scriptDialogVisible.value = false
     ElMessage.success(t('scripts.messages.scriptSaved'))
   } catch {
@@ -603,8 +767,9 @@ const clearManualScript = async (page: ScriptPage) => {
         cancelButtonText: t('projects.cancel'),
       },
     )
-    const nextPage = await clearPageScript(selectedProjectId.value, page.page_no)
+    const nextPage = await clearPageScript(selectedProjectId.value, page.page_no, selectedTaskId.value ?? undefined)
     upsertPageInList(nextPage)
+    await loadSections()
     ElMessage.success(t('scripts.messages.scriptCleared'))
   } catch (error) {
     if (error !== 'cancel' && error !== 'close') {
@@ -629,7 +794,9 @@ const deleteAllScripts = async () => {
         cancelButtonText: t('projects.cancel'),
       },
     )
-    pages.value = await deleteAllProjectPages(selectedProjectId.value)
+    await deleteAllProjectPages(selectedProjectId.value)
+    pages.value = []
+    await loadSections()
     selectedPage.value = null
     detailVisible.value = false
     ElMessage.success(t('scripts.messages.allScriptsDeleted'))
@@ -641,29 +808,31 @@ const deleteAllScripts = async () => {
 }
 
 const deleteCurrentTaskSections = async () => {
-  if (currentTaskId.value === null) {
+  if (selectedTaskId.value === null) {
     ElMessage.warning(t('scripts.errors.noCurrentTask'))
     return
   }
 
-  const taskId = currentTaskId.value
+  const taskId = selectedTaskId.value
   try {
     await ElMessageBox.confirm(
       t('scripts.messages.deleteTaskSectionsConfirm', { taskId }),
-      t('scripts.actions.deleteTaskSections'),
+      t('scripts.actions.deleteAllSections'),
       {
         type: 'warning',
-        confirmButtonText: t('scripts.actions.deleteTaskSections'),
+        confirmButtonText: t('scripts.actions.deleteAllSections'),
         cancelButtonText: t('projects.cancel'),
       },
     )
     await deleteScriptTaskSections(taskId)
-    pages.value = pages.value.filter((page) => page.task_id !== taskId)
+    pages.value = []
+    sections.value = []
     selectedPage.value = selectedPage.value?.task_id === taskId ? null : selectedPage.value
     if (selectedPage.value === null) {
       detailVisible.value = false
     }
-    currentTaskId.value = null
+    await loadScriptTasks(taskId)
+    await loadSections()
     ElMessage.success(t('scripts.messages.taskSectionsDeleted'))
   } catch (error) {
     if (error !== 'cancel' && error !== 'close') {
@@ -689,20 +858,40 @@ watch(selectedProjectId, async (projectId) => {
   needsOutline.value = false
   if (projectId === null) {
     pages.value = []
+    sections.value = []
+    scriptTasks.value = []
     outlineVersions.value = []
     selectedOutlineVersionId.value = null
+    selectedTaskId.value = null
     currentTaskId.value = null
     return
   }
 
   selectedOutlineVersionId.value = null
+  selectedTaskId.value = null
   currentTaskId.value = null
   await loadOutlineVersions(projectId)
-  await loadPages()
+  await loadScriptTasks()
   syncProjectQuery()
 })
 
-watch(selectedOutlineVersionId, () => {
+watch(selectedOutlineVersionId, async () => {
+  selectedTaskId.value = null
+  selectedSectionNo.value = null
+  pages.value = []
+  sections.value = []
+  await loadScriptTasks()
+  syncProjectQuery()
+})
+
+watch(selectedTaskId, async (taskId) => {
+  currentTaskId.value = taskId
+  selectedSectionNo.value = null
+  if (currentTask.value !== null) {
+    totalPages.value = currentTask.value.total_pages
+  }
+  await loadSections()
+  await loadPages()
   syncProjectQuery()
 })
 
@@ -716,7 +905,8 @@ onMounted(async () => {
 
 onActivated(async () => {
   // 从其它页面切回脚本页时，SSE 内存状态仍在；这里额外刷新页面列表，兜底补齐隐藏期间已落库的脚本。
-  if (selectedProjectId.value !== null) {
+  if (selectedTaskId.value !== null) {
+    await loadSections()
     await loadPages()
   }
 })
@@ -744,120 +934,283 @@ onActivated(async () => {
       :closable="false"
     >
       <template #default>
-        <el-button size="small" type="warning" plain @click="goOutline">
+        <el-button type="warning" plain @click="goOutline">
           {{ t('scripts.needsOutline.action') }}
         </el-button>
       </template>
     </el-alert>
 
-    <div class="script-workspace">
-      <section class="panel script-config">
-        <div class="panel__heading">
-          <el-icon><EditPen /></el-icon>
-          <div>
-            <h2>{{ t('scripts.config.title') }}</h2>
-            <p>{{ t('scripts.config.description') }}</p>
-          </div>
+    <section v-if="currentTask !== null" class="panel script-task-progress">
+      <div class="script-task-progress__meta">
+        <div>
+          <strong>{{ t('scripts.taskProgress.title') }}</strong>
+          <span>
+            {{
+              t('scripts.taskProgress.completed', {
+                completed: String(completedPageCount),
+                total: String(taskTotalPages),
+              })
+            }}
+          </span>
         </div>
+        <el-tag effect="light">{{ taskStatusLabel(currentTask.status) }}</el-tag>
+      </div>
+      <el-progress :percentage="completionPercentage" :stroke-width="10" />
+    </section>
 
-        <el-form label-position="top" class="script-config__form">
-          <el-form-item :label="t('scripts.config.project')">
-            <el-select
-              v-model="selectedProjectId"
-              :loading="loadingProjects"
-              :placeholder="t('scripts.config.projectPlaceholder')"
-              filterable
-              class="script-config__control"
-            >
-              <el-option
-                v-for="project in projects"
-                :key="project.id"
-                :label="project.title"
-                :value="project.id"
-              />
-            </el-select>
-          </el-form-item>
+    <div class="script-workspace">
+      <div class="script-sidebar">
+        <section class="panel script-config">
+          <div class="panel__heading">
+            <el-icon><EditPen /></el-icon>
+            <div>
+              <h2>{{ t('scripts.config.title') }}</h2>
+              <p>{{ t('scripts.config.description') }}</p>
+            </div>
+          </div>
 
-          <el-form-item :label="t('scripts.config.outlineVersion')">
-            <el-select
-              v-model="selectedOutlineVersionId"
-              :loading="loadingOutlineVersions"
-              :placeholder="t('scripts.config.outlineVersionPlaceholder')"
-              :disabled="selectedProjectId === null || outlineVersions.length === 0"
-              filterable
-              class="script-config__control"
-            >
-              <el-option
-                v-for="version in outlineVersions"
-                :key="version.version_id"
-                :label="outlineVersionLabel(version)"
-                :value="version.version_id"
-              />
-            </el-select>
-            <p
-              v-if="selectedProjectId !== null && outlineVersions.length === 0 && !loadingOutlineVersions"
-              class="script-config__hint"
-            >
-              {{ t('scripts.config.emptyOutlineVersions') }}
-            </p>
-          </el-form-item>
+          <el-form label-position="top" class="script-config__form">
+            <el-form-item :label="t('scripts.config.project')">
+              <el-select
+                v-model="selectedProjectId"
+                :loading="loadingProjects"
+                :placeholder="t('scripts.config.projectPlaceholder')"
+                filterable
+                class="script-config__control"
+              >
+                <el-option
+                  v-for="project in projects"
+                  :key="project.id"
+                  :label="project.title"
+                  :value="project.id"
+                />
+              </el-select>
+            </el-form-item>
 
-          <div class="script-config__numbers">
+            <el-form-item :label="t('scripts.config.outlineVersion')">
+              <el-select
+                v-model="selectedOutlineVersionId"
+                :loading="loadingOutlineVersions"
+                :placeholder="t('scripts.config.outlineVersionPlaceholder')"
+                :disabled="selectedProjectId === null || outlineVersions.length === 0"
+                filterable
+                class="script-config__control"
+              >
+                <el-option
+                  v-for="version in outlineVersions"
+                  :key="version.version_id"
+                  :label="outlineVersionLabel(version)"
+                  :value="version.version_id"
+                />
+              </el-select>
+              <p
+                v-if="selectedProjectId !== null && outlineVersions.length === 0 && !loadingOutlineVersions"
+                class="script-config__hint"
+              >
+                {{ t('scripts.config.emptyOutlineVersions') }}
+              </p>
+            </el-form-item>
+
+            <el-form-item :label="t('scripts.config.scriptTask')">
+              <el-select
+                v-model="selectedTaskId"
+                :loading="loadingTasks"
+                :placeholder="t('scripts.config.scriptTaskPlaceholder')"
+                :disabled="selectedOutlineVersionId === null || scriptTasks.length === 0"
+                filterable
+                class="script-config__control"
+              >
+                <el-option
+                  v-for="task in scriptTasks"
+                  :key="task.id"
+                  :label="scriptTaskLabel(task)"
+                  :value="task.id"
+                />
+              </el-select>
+              <p
+                v-if="selectedOutlineVersionId !== null && scriptTasks.length === 0 && !loadingTasks"
+                class="script-config__hint"
+              >
+                {{ t('scripts.config.emptyTasks') }}
+              </p>
+            </el-form-item>
+
             <el-form-item :label="t('scripts.config.totalPages')">
               <el-input-number v-model="totalPages" :min="1" :max="300" />
             </el-form-item>
-            <el-form-item :label="t('scripts.config.singlePageNo')">
-              <el-input-number v-model="singlePageNo" :min="1" :max="totalPages" />
+
+            <el-form-item :label="t('scripts.config.requirement')">
+              <el-input
+                v-model="userRequirement"
+                type="textarea"
+                :rows="4"
+                :placeholder="t('scripts.config.requirementPlaceholder')"
+              />
             </el-form-item>
+          </el-form>
+
+          <div class="script-config__actions">
+            <el-button
+              type="success"
+              :icon="Tickets"
+              :loading="generatingBatch"
+              :disabled="generationDisabled"
+              @click="generateBatch"
+            >
+              {{ t('scripts.actions.generateBatch') }}
+            </el-button>
+            <el-button
+              v-if="canContinueBatch"
+              type="primary"
+              :icon="Refresh"
+              :loading="continuingBatch"
+              @click="continueBatch"
+            >
+              {{ t('scripts.actions.continueBatch') }}
+            </el-button>
+            <el-button
+              v-if="generatingBatch || continuingBatch"
+              type="warning"
+              :icon="VideoPause"
+              :loading="suspendingBatch"
+              :disabled="(currentTaskId === null && selectedTaskId === null) || suspendingBatch"
+              @click="suspendBatch"
+            >
+              {{ t('scripts.actions.suspendBatch') }}
+            </el-button>
           </div>
 
-          <el-form-item :label="t('scripts.config.requirement')">
-            <el-input
-              v-model="userRequirement"
-              type="textarea"
-              :rows="5"
-              :placeholder="t('scripts.config.requirementPlaceholder')"
+          <el-empty
+            v-if="projects.length === 0 && !loadingProjects"
+            :description="t('scripts.config.emptyProjects')"
+            :image-size="90"
+          />
+        </section>
+      </div>
+
+      <div class="script-main">
+        <section class="panel script-sections">
+          <div class="panel__heading script-sections__heading">
+            <div class="panel__heading-main">
+              <el-icon><Tickets /></el-icon>
+              <div>
+                <h2>{{ t('scripts.sections.title') }}</h2>
+                <p>{{ t('scripts.sections.description') }}</p>
+              </div>
+            </div>
+            <el-button
+              type="danger"
+              plain
+              :icon="Delete"
+              :disabled="generatingBatch || continuingBatch"
+              @click="deleteCurrentTaskSections"
+            >
+              {{ t('scripts.actions.deleteAllSections') }}
+            </el-button>
+          </div>
+          <div v-loading="loadingSections" class="script-sections__scroll">
+            <el-empty
+              v-if="sections.length === 0"
+              class="script-sections__empty"
+              :description="t('scripts.sections.empty')"
+              :image-size="72"
             />
-          </el-form-item>
-        </el-form>
+            <div v-else class="script-sections__track">
+              <button
+                v-for="section in sections"
+                :key="section.id"
+                class="script-section-item"
+                :class="{ 'script-section-item--active': selectedSectionNo === section.section_no }"
+                type="button"
+                @click="
+                  selectedSectionNo =
+                    selectedSectionNo === section.section_no ? null : section.section_no
+                "
+              >
+                <span class="script-section-item__title">
+                  {{ t('scripts.sections.sectionNo', { sectionNo: section.section_no }) }}
+                  · {{ sectionPageRange(section) }}
+                </span>
+                <span>{{ section.title }}</span>
+                <small>{{ section.description }}</small>
+                <el-tag :type="sectionCompleted(section) ? 'success' : 'info'" effect="light">
+                  {{
+                    sectionCompleted(section)
+                      ? t('scripts.sections.completed')
+                      : t('scripts.sections.pending')
+                  }}
+                </el-tag>
+              </button>
+            </div>
+          </div>
+        </section>
 
-        <div class="script-config__actions">
-          <el-button
-            type="primary"
-            :icon="Document"
-            :loading="generatingSingle"
-            :disabled="generationDisabled || generatingBatch"
-            @click="generateSingle"
-          >
-            {{ t('scripts.actions.generateSingle') }}
-          </el-button>
-          <el-button
-            type="success"
-            :icon="Tickets"
-            :loading="generatingBatch"
-            :disabled="!canGenerate"
-            @click="generateBatch"
-          >
-            {{ t('scripts.actions.generateBatch') }}
-          </el-button>
-          <el-button
-            v-if="generatingBatch"
-            type="warning"
-            :icon="VideoPause"
-            :loading="suspendingBatch"
-            :disabled="currentTaskId === null || suspendingBatch"
-            @click="suspendBatch"
-          >
-            {{ t('scripts.actions.suspendBatch') }}
-          </el-button>
-        </div>
+        <section class="panel script-results">
+          <div class="panel__heading script-results__heading">
+            <div class="panel__heading-main">
+              <el-icon><Document /></el-icon>
+              <div>
+                <h2>{{ t('scripts.pages.title') }}</h2>
+                <p>
+                  {{ selectedProject?.title || t('scripts.pages.noProject') }}
+                </p>
+              </div>
+            </div>
+            <el-button text :icon="Refresh" :loading="loadingPages" @click="loadPages">
+              {{ t('scripts.refresh') }}
+            </el-button>
+            <el-button type="primary" :icon="Plus" :disabled="!canEditScripts" @click="openCreateScript">
+              {{ t('scripts.actions.addScript') }}
+            </el-button>
+            <el-button type="danger" plain :icon="Delete" :disabled="!canDeleteAllScripts" @click="deleteAllScripts">
+              {{ t('scripts.actions.deleteAllScripts') }}
+            </el-button>
+          </div>
 
-        <el-empty
-          v-if="projects.length === 0 && !loadingProjects"
-          :description="t('scripts.config.emptyProjects')"
-          :image-size="90"
-        />
-      </section>
+          <el-table
+            v-loading="loadingPages"
+            :data="displayedPages"
+            class="script-results__table"
+            height="520"
+            empty-text=""
+          >
+            <el-table-column prop="page_no" :label="t('scripts.pages.columns.pageNo')" width="88" />
+            <el-table-column :label="t('scripts.pages.columns.status')" width="130">
+              <template #default="{ row }">
+                <el-tag :type="statusTagType(row.status)" effect="light">
+                  {{ statusLabel(row.status) }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column :label="t('scripts.pages.columns.updatedAt')" width="136">
+              <template #default="{ row }">
+                {{ formatDateTime(row.updated_at) }}
+              </template>
+            </el-table-column>
+            <el-table-column :label="t('scripts.pages.columns.summary')" min-width="260">
+              <template #default="{ row }">
+                <span class="script-results__summary">{{ scriptSummary(row.summary) }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column :label="t('scripts.pages.columns.actions')" width="210" fixed="right">
+              <template #default="{ row }">
+                <el-button text type="primary" :icon="View" @click="openDetail(row)">
+                  {{ t('scripts.actions.viewDetail') }}
+                </el-button>
+                <el-button text type="primary" :icon="EditPen" :disabled="!canEditScripts" @click="openEditScript(row)">
+                  {{ t('projects.edit') }}
+                </el-button>
+                <el-button text type="danger" :icon="Delete" :disabled="!canEditScripts" @click="clearManualScript(row)">
+                  {{ t('scripts.actions.clearScript') }}
+                </el-button>
+              </template>
+            </el-table-column>
+            <template #empty>
+              <el-empty :description="t('scripts.pages.empty')" :image-size="108" />
+            </template>
+          </el-table>
+        </section>
+      </div>
 
       <section class="panel script-progress">
         <div class="panel__heading">
@@ -886,80 +1239,6 @@ onActivated(async () => {
             </el-timeline-item>
           </el-timeline>
         </el-scrollbar>
-      </section>
-
-      <section class="panel script-results">
-        <div class="panel__heading script-results__heading">
-          <div class="panel__heading-main">
-            <el-icon><Document /></el-icon>
-            <div>
-              <h2>{{ t('scripts.pages.title') }}</h2>
-              <p>
-                {{ selectedProject?.title || t('scripts.pages.noProject') }}
-              </p>
-            </div>
-          </div>
-          <el-button text :icon="Refresh" :loading="loadingPages" @click="loadPages">
-            {{ t('scripts.refresh') }}
-          </el-button>
-          <el-button type="primary" :icon="Plus" :disabled="!canEditScripts" @click="openCreateScript">
-            {{ t('scripts.actions.addScript') }}
-          </el-button>
-          <el-button
-            type="danger"
-            plain
-            :icon="Delete"
-            @click="deleteCurrentTaskSections"
-          >
-            {{ t('scripts.actions.deleteTaskSections') }}
-          </el-button>
-          <el-button type="danger" plain :icon="Delete" :disabled="!canDeleteAllScripts" @click="deleteAllScripts">
-            {{ t('scripts.actions.deleteAllScripts') }}
-          </el-button>
-        </div>
-
-        <el-table
-          v-loading="loadingPages"
-          :data="sortedPages"
-          class="script-results__table"
-          height="520"
-          empty-text=""
-        >
-          <el-table-column prop="page_no" :label="t('scripts.pages.columns.pageNo')" width="88" />
-          <el-table-column :label="t('scripts.pages.columns.status')" width="130">
-            <template #default="{ row }">
-              <el-tag :type="statusTagType(row.status)" effect="light">
-                {{ statusLabel(row.status) }}
-              </el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column :label="t('scripts.pages.columns.updatedAt')" width="136">
-            <template #default="{ row }">
-              {{ formatDateTime(row.updated_at) }}
-            </template>
-          </el-table-column>
-          <el-table-column :label="t('scripts.pages.columns.summary')" min-width="260">
-            <template #default="{ row }">
-              <span class="script-results__summary">{{ scriptSummary(row.summary) }}</span>
-            </template>
-          </el-table-column>
-          <el-table-column :label="t('scripts.pages.columns.actions')" width="210" fixed="right">
-            <template #default="{ row }">
-              <el-button text type="primary" :icon="View" @click="openDetail(row)">
-                {{ t('scripts.actions.viewDetail') }}
-              </el-button>
-              <el-button text type="primary" :icon="EditPen" :disabled="!canEditScripts" @click="openEditScript(row)">
-                {{ t('projects.edit') }}
-              </el-button>
-              <el-button text type="danger" :icon="Delete" :disabled="!canEditScripts" @click="clearManualScript(row)">
-                {{ t('scripts.actions.clearScript') }}
-              </el-button>
-            </template>
-          </el-table-column>
-          <template #empty>
-            <el-empty :description="t('scripts.pages.empty')" :image-size="108" />
-          </template>
-        </el-table>
       </section>
     </div>
 
@@ -1014,11 +1293,11 @@ onActivated(async () => {
       width="720px"
     >
       <el-form label-position="top">
-        <el-form-item :label="t('scripts.config.singlePageNo')">
+        <el-form-item :label="t('scripts.pages.columns.pageNo')">
           <el-input-number
             v-model="scriptFormPageNo"
             :min="1"
-            :max="totalPages"
+            :max="taskTotalPages"
             :disabled="scriptDialogMode === 'edit'"
           />
         </el-form-item>
@@ -1077,9 +1356,22 @@ onActivated(async () => {
 
 .script-workspace {
   display: grid;
-  grid-template-columns: minmax(280px, 0.82fr) minmax(300px, 0.9fr) minmax(430px, 1.35fr);
+  grid-template-columns: minmax(280px, 0.72fr) minmax(520px, 1.55fr) minmax(260px, 0.58fr);
   gap: 18px;
   align-items: start;
+}
+
+.script-sidebar {
+  display: grid;
+  gap: 18px;
+  order: 1;
+}
+
+.script-main {
+  display: grid;
+  min-width: 0;
+  gap: 18px;
+  order: 2;
 }
 
 .panel {
@@ -1148,9 +1440,102 @@ onActivated(async () => {
   margin-left: 0;
 }
 
+.script-task-progress {
+  padding: 16px 18px;
+}
+
+.script-task-progress__meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.script-task-progress__meta div {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.script-task-progress__meta span {
+  color: var(--color-muted);
+  font-size: 13px;
+}
+
+.script-sections__heading {
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.script-sections {
+  overflow: hidden;
+}
+
+.script-sections__scroll {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.script-sections__empty {
+  padding: 14px 16px;
+}
+
+.script-sections__track {
+  display: flex;
+  width: max-content;
+  max-width: none;
+  gap: 12px;
+  padding: 14px 16px 18px;
+}
+
+.script-section-item {
+  display: flex;
+  flex: 0 0 280px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  width: 280px;
+  min-height: 148px;
+  margin: 0 0 10px;
+  padding: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: #ffffff;
+  color: #1f2937;
+  text-align: left;
+  cursor: pointer;
+}
+
+.script-section-item:hover,
+.script-section-item--active {
+  border-color: #60a5fa;
+  background: #eff6ff;
+}
+
+.script-section-item__title {
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.script-section-item small {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--color-muted);
+  line-height: 1.5;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
 .script-progress__scroll {
-  height: 560px;
-  padding: 18px 22px 8px;
+  height: 420px;
+  padding: 14px 18px 8px;
+}
+
+.script-progress {
+  order: 3;
 }
 
 .script-progress :deep(.el-timeline) {
@@ -1221,7 +1606,7 @@ onActivated(async () => {
     grid-template-columns: minmax(300px, 0.8fr) minmax(420px, 1.2fr);
   }
 
-  .script-results {
+  .script-progress {
     grid-column: 1 / -1;
   }
 }
@@ -1233,6 +1618,11 @@ onActivated(async () => {
 
   .script-config__numbers {
     grid-template-columns: 1fr;
+  }
+
+  .script-section-item {
+    flex-basis: 260px;
+    width: 260px;
   }
 
   .script-progress__scroll {

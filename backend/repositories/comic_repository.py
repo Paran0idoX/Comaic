@@ -1,4 +1,6 @@
-from sqlalchemy import select
+from datetime import datetime
+
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session as SqlAlchemySession
 
 from backend.models.comic import (
@@ -22,6 +24,7 @@ from backend.models.enums import (
     ScriptGenerationTaskStatus,
     SessionPurpose,
 )
+from backend.models.time import utc_now
 
 
 class ComicRepository:
@@ -237,6 +240,7 @@ class ComicRepository:
             total_pages=total_pages,
             target_page_no=target_page_no,
             user_requirement=user_requirement,
+            heartbeat_at=utc_now() if status == ScriptGenerationTaskStatus.RUNNING else None,
         )
         self.session.add(task)
         self.session.commit()
@@ -346,6 +350,15 @@ class ComicRepository:
         )
         return self.session.scalar(statement)
 
+    def get_script_section_page(self, *, section_id: int, page_no: int) -> ComicPage | None:
+        """读取某个分段下指定页码页面，用于任务维度 upsert 避免跨任务覆盖。"""
+
+        statement = select(ComicPage).where(
+            ComicPage.section_id == section_id,
+            ComicPage.page_no == page_no,
+        )
+        return self.session.scalar(statement)
+
     def list_script_section_page_nos(self, section_id: int) -> set[int]:
         """读取某个分段下已有脚本的页码集合，用于判断分段完成度。"""
 
@@ -432,6 +445,8 @@ class ComicRepository:
         self,
         *,
         project_id: int | None = None,
+        outline_version_id: int | None = None,
+        mode: ScriptGenerationMode | None = None,
         status: ScriptGenerationTaskStatus | None = None,
     ) -> list[ScriptGenerationTask]:
         """读取脚本生成任务列表，供后续 Prompt 生成选择已完成任务。"""
@@ -439,6 +454,10 @@ class ComicRepository:
         statement = select(ScriptGenerationTask)
         if project_id is not None:
             statement = statement.where(ScriptGenerationTask.project_id == project_id)
+        if outline_version_id is not None:
+            statement = statement.where(ScriptGenerationTask.outline_version_id == outline_version_id)
+        if mode is not None:
+            statement = statement.where(ScriptGenerationTask.mode == mode)
         if status is not None:
             statement = statement.where(ScriptGenerationTask.status == status)
         statement = statement.order_by(
@@ -463,6 +482,7 @@ class ComicRepository:
             raise ValueError(f"ScriptGenerationTask not found: {task_id}")
         if task.status == ScriptGenerationTaskStatus.RUNNING:
             task.status = ScriptGenerationTaskStatus.SUSPENDED
+            task.error_message = "任务已暂停。"
             self.session.commit()
             self.session.refresh(task)
         return task
@@ -474,6 +494,7 @@ class ComicRepository:
         status: ScriptGenerationTaskStatus | None = None,
         section_plan: str | None = None,
         error_message: str | None = None,
+        heartbeat_at: datetime | None = None,
     ) -> ScriptGenerationTask:
         """更新分页脚本任务状态和过程信息。"""
 
@@ -482,13 +503,88 @@ class ComicRepository:
             raise ValueError(f"ScriptGenerationTask not found: {task_id}")
         if status is not None:
             task.status = status
+            if status == ScriptGenerationTaskStatus.RUNNING:
+                task.heartbeat_at = heartbeat_at or utc_now()
         if section_plan is not None:
             task.section_plan = section_plan
         if error_message is not None:
             task.error_message = error_message
+        if heartbeat_at is not None:
+            task.heartbeat_at = heartbeat_at
         self.session.commit()
         self.session.refresh(task)
         return task
+
+    def update_running_task_heartbeats(
+        self,
+        *,
+        script_task_ids: set[int],
+        generation_task_ids: set[int],
+        heartbeat_at: datetime,
+    ) -> tuple[int, int]:
+        """刷新当前进程注册的 running 任务心跳，避免给旧僵尸任务续命。"""
+
+        script_count = 0
+        if script_task_ids:
+            statement = select(ScriptGenerationTask).where(
+                ScriptGenerationTask.id.in_(script_task_ids),
+                ScriptGenerationTask.status == ScriptGenerationTaskStatus.RUNNING,
+            )
+            for task in self.session.scalars(statement):
+                task.heartbeat_at = heartbeat_at
+                script_count += 1
+
+        generation_count = 0
+        if generation_task_ids:
+            statement = select(GenerationTask).where(
+                GenerationTask.id.in_(generation_task_ids),
+                GenerationTask.status == GenerationTaskStatus.RUNNING,
+            )
+            for task in self.session.scalars(statement):
+                task.heartbeat_at = heartbeat_at
+                generation_count += 1
+
+        if script_count or generation_count:
+            self.session.commit()
+        return script_count, generation_count
+
+    def suspend_stale_running_tasks(
+        self,
+        *,
+        stale_before: datetime,
+        error_message: str,
+    ) -> tuple[int, int]:
+        """把心跳超时的 running 任务改为 suspended，供用户后续继续生成。"""
+
+        script_statement = select(ScriptGenerationTask).where(
+            ScriptGenerationTask.status == ScriptGenerationTaskStatus.RUNNING,
+            or_(
+                ScriptGenerationTask.heartbeat_at.is_(None),
+                ScriptGenerationTask.heartbeat_at < stale_before,
+            ),
+        )
+        script_count = 0
+        for task in self.session.scalars(script_statement):
+            task.status = ScriptGenerationTaskStatus.SUSPENDED
+            task.error_message = error_message
+            script_count += 1
+
+        generation_statement = select(GenerationTask).where(
+            GenerationTask.status == GenerationTaskStatus.RUNNING,
+            or_(
+                GenerationTask.heartbeat_at.is_(None),
+                GenerationTask.heartbeat_at < stale_before,
+            ),
+        )
+        generation_count = 0
+        for task in self.session.scalars(generation_statement):
+            task.status = GenerationTaskStatus.SUSPENDED
+            task.error_message = error_message
+            generation_count += 1
+
+        if script_count or generation_count:
+            self.session.commit()
+        return script_count, generation_count
 
     def list_project_pages(self, project_id: int) -> list[ComicPage]:
         """按页码顺序读取某个项目的全部页面。"""
@@ -543,7 +639,11 @@ class ComicRepository:
         if project is None:
             raise ValueError(f"ComicProject not found: {project_id}")
 
-        page = self.get_project_page(project_id=project_id, page_no=page_no)
+        page = (
+            self.get_script_section_page(section_id=section_id, page_no=page_no)
+            if section_id is not None
+            else self.get_project_page(project_id=project_id, page_no=page_no)
+        )
         if page is None:
             page = ComicPage(project_id=project_id, page_no=page_no, section_id=section_id)
             self.session.add(page)
@@ -568,6 +668,14 @@ class ComicRepository:
         page = self.get_project_page(project_id=project_id, page_no=page_no)
         if page is None:
             raise ValueError(f"ComicPage not found for project {project_id}: {page_no}")
+        return self.clear_page_script_by_id(page.id)
+
+    def clear_page_script_by_id(self, page_id: int) -> ComicPage:
+        """按页面主键清空脚本，避免同项目同页码多任务时误改其它任务。"""
+
+        page = self.session.get(ComicPage, page_id)
+        if page is None:
+            raise ValueError(f"ComicPage not found: {page_id}")
 
         page.summary = None
         page.characters = None
@@ -926,6 +1034,7 @@ class ComicRepository:
         page_id: int | None,
         batch_size: int = 1,
         comfy_prompt_id: str | None = None,
+        status: GenerationTaskStatus = GenerationTaskStatus.PENDING,
     ) -> GenerationTask:
         """记录一次出图任务，后续可根据 comfy_prompt_id 查询任务结果。"""
 
@@ -934,6 +1043,8 @@ class ComicRepository:
             page_id=page_id,
             batch_size=batch_size,
             comfy_prompt_id=comfy_prompt_id,
+            status=status,
+            heartbeat_at=utc_now() if status == GenerationTaskStatus.RUNNING else None,
         )
         self.session.add(task)
         self.session.commit()
@@ -960,6 +1071,7 @@ class ComicRepository:
             raise ValueError(f"GenerationTask not found: {task_id}")
         if task.status == GenerationTaskStatus.RUNNING:
             task.status = GenerationTaskStatus.SUSPENDED
+            task.error_message = "任务已暂停。"
             self.session.commit()
             self.session.refresh(task)
         return task
@@ -971,6 +1083,7 @@ class ComicRepository:
         status: GenerationTaskStatus | None = None,
         comfy_prompt_id: str | None = None,
         error_message: str | None = None,
+        heartbeat_at: datetime | None = None,
     ) -> GenerationTask:
         """更新 ComfyUI 生成任务状态和外部 prompt_id。"""
 
@@ -979,10 +1092,14 @@ class ComicRepository:
             raise ValueError(f"GenerationTask not found: {task_id}")
         if status is not None:
             task.status = status
+            if status == GenerationTaskStatus.RUNNING:
+                task.heartbeat_at = heartbeat_at or utc_now()
         if comfy_prompt_id is not None:
             task.comfy_prompt_id = comfy_prompt_id
         if error_message is not None:
             task.error_message = error_message
+        if heartbeat_at is not None:
+            task.heartbeat_at = heartbeat_at
         self.session.commit()
         self.session.refresh(task)
         return task
