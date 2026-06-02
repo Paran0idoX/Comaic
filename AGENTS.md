@@ -80,9 +80,17 @@ MVP 核心表位于 `backend/models/comic.py`：
 - 使用 `response_format` 的 Agent 必须优先复用 `backend/agents/structured_output.py` 中的 `ainvoke_structured_with_retries()`。
   - 只读取 `structured_response`，不要从自然语言、Markdown 代码块或文件输出中兜底解析 JSON。
   - Agent 自己通过 `validator` 传入业务级结构校验，例如页面列表非空、Prompt 非空。
-  - 结构化输出重试只解决模型输出形态问题；页码范围、字段完整性、落库状态流转仍放在 Service/Repository 层。
+- 结构化输出重试只解决模型输出形态问题；页码范围、字段完整性、落库状态流转仍放在 Service/Repository 层。
 
 保持每层轻量。MVP 中可以先用少量类和函数，不要为了“像框架”而增加复杂抽象。
+
+## 长任务心跳约定
+
+- `script_generation_task` 和 `generation_task` 使用 `heartbeat_at` 记录当前运行心跳。
+- `backend/services/task_runtime.py` 维护进程内运行中任务注册表，并在 FastAPI lifespan 启动两个后台线程：心跳线程和僵尸任务扫描线程。
+- Service 在任务进入 `running` 后必须注册到 `running_task_registry`，在任务完成、失败、暂停或 generator 退出时必须注销。
+- 心跳线程只刷新注册表中的任务，不能直接刷新数据库中所有 `running` 任务，否则应用重启后的僵尸任务会被误续命。
+- 僵尸扫描只把心跳超时的 `running` 任务改为 `suspended`，不自动恢复；恢复仍走现有继续生成入口。
 
 ## 注释约定
 
