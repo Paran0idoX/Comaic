@@ -60,18 +60,19 @@ class ScriptSceneItem(BaseModel):
 
 
 class ScriptCharacterItem(BaseModel):
-    """当前脚本任务内的中心化角色设定。"""
+    """当前分段内的角色细化设定。"""
 
-    character_key: str = Field(description="稳定角色 key，同一角色跨页必须复用。")
+    character_key: str = Field(description="稳定角色 key，必须优先复用大纲角色基准中的 key。")
     name: str = Field(description="角色名称。")
-    role: str = Field(description="角色身份或叙事功能。")
-    appearance: str = Field(description="固定外貌特征。")
-    hairstyle: str = Field(description="固定发型。")
-    clothing_style: str = Field(description="固定服装风格。")
-    accessories: str = Field(description="固定配件和标志物。")
-    color_palette: str = Field(description="角色主色调。")
-    visual_anchors: str = Field(description="跨页必须保留的角色视觉锚点。")
-    negative_constraints: str = Field(description="同角色禁止出现或禁止改变的元素。")
+    section_role: str = Field(description="该角色在当前分段中的叙事功能或状态。")
+    current_hairstyle: str = Field(description="当前分段内的发型；未变化时沿用大纲默认值。")
+    current_clothing: str = Field(description="当前分段内的服装；未变化时沿用大纲默认值。")
+    current_accessories: str = Field(description="当前分段内的配件；未变化时沿用大纲默认值。")
+    current_state: str = Field(description="当前分段内的身体状态、伤痕、疲惫程度等。")
+    emotion: str = Field(description="当前分段的主要情绪状态。")
+    temporary_changes: str = Field(description="只在当前分段出现的临时变化；没有则写“无”。")
+    visual_anchors: str = Field(description="当前分段必须保留的角色视觉锚点，不能违背大纲基准。")
+    negative_constraints: str = Field(description="当前分段禁止改变或禁止出现的元素。")
 
 
 class ScriptReviewItem(BaseModel):
@@ -102,7 +103,7 @@ class ScriptDeepAgentResponse(BaseModel):
     )
     characters: list[ScriptCharacterItem] = Field(
         default_factory=list,
-        description="本轮涉及的中心化角色设定。",
+        description="本轮当前分段涉及的角色细化设定。",
     )
     reviews: list[ScriptReviewItem] = Field(
         default_factory=list,

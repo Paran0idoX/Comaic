@@ -492,16 +492,26 @@ class ImagePromptService:
         if characters:
             lines.append("CHARACTER CONSISTENCY LOCK")
         for character in characters:
+            baseline = character.outline_character
             lines.extend(
                 [
                     f"character_key: {character.character_key}",
                     f"name: {character.name}",
-                    f"role: {character.role}",
-                    f"appearance: {character.appearance}",
-                    f"hairstyle: {character.hairstyle}",
-                    f"clothing_style: {character.clothing_style}",
-                    f"accessories: {character.accessories}",
-                    f"character_color_palette: {character.color_palette}",
+                    f"baseline_role: {baseline.role if baseline is not None else ''}",
+                    f"baseline_background: {baseline.background if baseline is not None else ''}",
+                    f"baseline_appearance: {baseline.appearance if baseline is not None else ''}",
+                    f"baseline_visual_anchors: {baseline.visual_anchors if baseline is not None else ''}",
+                    f"default_hairstyle: {baseline.default_hairstyle if baseline is not None else ''}",
+                    f"default_clothing: {baseline.default_clothing if baseline is not None else ''}",
+                    f"default_accessories: {baseline.default_accessories if baseline is not None else ''}",
+                    f"default_color_palette: {baseline.default_color_palette if baseline is not None else ''}",
+                    f"section_role: {character.section_role}",
+                    f"current_hairstyle: {character.current_hairstyle}",
+                    f"current_clothing: {character.current_clothing}",
+                    f"current_accessories: {character.current_accessories}",
+                    f"current_state: {character.current_state}",
+                    f"emotion: {character.emotion}",
+                    f"temporary_changes: {character.temporary_changes}",
                     f"character_visual_anchors: {character.visual_anchors}",
                     f"character_negative_constraints: {character.negative_constraints}",
                 ]
@@ -515,19 +525,29 @@ class ImagePromptService:
         scene = page.script_scene
         character_lines = []
         for character in sorted(page.visual_characters, key=lambda item: item.character_key):
+            baseline = character.outline_character
             character_lines.append(
                 "\n".join(
                     [
                         f"- 角色 key：{character.character_key}",
                         f"  名称：{character.name}",
-                        f"  身份：{character.role}",
-                        f"  固定外貌：{character.appearance}",
-                        f"  固定发型：{character.hairstyle}",
-                        f"  固定服装：{character.clothing_style}",
-                        f"  固定配件：{character.accessories}",
-                        f"  角色色彩：{character.color_palette}",
-                        f"  角色视觉锚点：{character.visual_anchors}",
-                        f"  角色禁止变化：{character.negative_constraints}",
+                        f"  大纲身份：{baseline.role if baseline is not None else ''}",
+                        f"  大纲背景：{baseline.background if baseline is not None else ''}",
+                        f"  固定样貌：{baseline.appearance if baseline is not None else ''}",
+                        f"  固定识别锚点：{baseline.visual_anchors if baseline is not None else ''}",
+                        f"  默认发型：{baseline.default_hairstyle if baseline is not None else ''}",
+                        f"  默认服装：{baseline.default_clothing if baseline is not None else ''}",
+                        f"  默认配件：{baseline.default_accessories if baseline is not None else ''}",
+                        f"  默认色彩：{baseline.default_color_palette if baseline is not None else ''}",
+                        f"  当前分段身份/状态：{character.section_role}",
+                        f"  当前发型：{character.current_hairstyle}",
+                        f"  当前服装：{character.current_clothing}",
+                        f"  当前配件：{character.current_accessories}",
+                        f"  当前身体状态：{character.current_state}",
+                        f"  当前情绪：{character.emotion}",
+                        f"  临时变化：{character.temporary_changes}",
+                        f"  当前分段视觉锚点：{character.visual_anchors}",
+                        f"  当前分段禁止变化：{character.negative_constraints}",
                     ]
                 )
             )

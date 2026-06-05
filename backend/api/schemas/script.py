@@ -166,20 +166,25 @@ class ScriptSceneListResponse(BaseModel):
 
 
 class ScriptCharacterResponse(BaseModel):
-    """脚本任务内的中心化角色设定响应体。"""
+    """脚本分段内的角色细化设定响应体。"""
 
     id: int
-    task_id: int
+    task_id: int | None
+    section_id: int
+    section_no: int | None = None
+    outline_character_id: int | None = None
     character_key: str
     name: str
-    role: str
-    appearance: str
-    hairstyle: str
-    clothing_style: str
-    accessories: str
-    color_palette: str
+    section_role: str
+    current_hairstyle: str
+    current_clothing: str
+    current_accessories: str
+    current_state: str
+    emotion: str
+    temporary_changes: str
     visual_anchors: str
     negative_constraints: str
+    outline_character: dict | None = None
     created_at: datetime
     updated_at: datetime
 

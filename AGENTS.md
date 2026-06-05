@@ -187,9 +187,13 @@ pybabel compile -d backend/locales
 - 批量生成通过 SSE 暴露长任务进度，脚本任务状态保存到 `script_generation_task`。
 - 前端分页脚本页依赖 Vue `KeepAlive` 保持长 SSE 连接和内存进度；不要随意移除 `ScriptWorkspaceView` 的缓存，否则路由切换会中断前端对生成进度的消费。
 - 分页脚本结果保存到 `comic_page` 的结构化字段：`summary`、`characters`、`clothing`、`scene`、`composition`、`character_action`、`dialogue`，页面状态使用 `ComicPageStatus.SCRIPT_READY`。
-- 分页脚本生成需要同步产出任务级视觉设定：
+- 角色一致性分两层：
+  - 大纲阶段生成并确认 `outline_character` 角色基准设定，保存名称、身份、背景、固定样貌、视觉锚点和禁止改写项。
+  - 大纲角色里的默认发型、默认服装、默认配件、默认色彩只作为脚本阶段的默认值，不是永久锁死项。
+  - 脚本阶段按 `script_section` 生成分段角色细化设定，保存当前分段的发型、服装、配件、状态、情绪和临时变化。
+- 分页脚本生成需要同步产出分段级视觉设定：
   - `script_scene` 保存中心化场景设定，`scene_key` 在同一脚本任务内唯一。
-  - `script_character` 保存中心化角色设定，`character_key` 在同一脚本任务内唯一。
+  - `script_character` 归属于 `script_section`，`character_key` 在同一分段内唯一，并通过 `outline_character_id` 回溯到大纲角色基准。
   - `comic_page.scene_id` 和 `comic_page_character` 负责把页面绑定到具体场景和角色。
   - 页面自己的 `scene`、`characters`、`clothing` 只描述本页局部变化，不承担全局一致性职责。
 - 脚本 Agent prompt 放在 `backend/prompts/script_planning_prompt.md`、`script_deep_main_prompt.md`、`script_writer_prompt.md` 和 `script_supervisor_prompt.md`。
@@ -202,7 +206,7 @@ pybabel compile -d backend/locales
 - 脚本转图 SystemPrompt 会传给 LLM；Negative Prompt 不传给 LLM，只作为后续 ComfyUI 出图配置返回或使用。
 - ImagePromptAgent 不使用 `response_format`；直接读取模型最后一条 AI 文本输出作为正向 Prompt，并由 Service 校验空值和落库。
 - 图片 Prompt 生成范围以已完成的脚本生成任务为单位，Service 读取任务下页面脚本并并发调用 Agent。
-- 图片 Prompt 生成时必须组合任务级 `script_scene`、`script_character` 和单页结构化脚本，保持同场景和同角色跨页视觉锚点一致。
+- 图片 Prompt 生成时必须组合大纲级 `outline_character`、分段级 `script_character`、任务级 `script_scene` 和单页结构化脚本，保持同角色固定样貌一致，同时允许分段造型变化。
 - 生成出的正向 Prompt 保存到 `comic_page.image_prompt`，页面状态使用 `ComicPageStatus.PROMPT_READY`。
 - 前端维护 Prompt 配置时可以使用 Markdown 预览，但必须关闭原始 HTML 渲染。
 

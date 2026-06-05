@@ -11,6 +11,7 @@ from backend.models.comic import (
     GenerationTask,
     ImagePromptPreset,
     LLMConfig,
+    OutlineCharacter,
     OutlineVersion,
     ScriptCharacter,
     ScriptScene,
@@ -335,6 +336,77 @@ class ComicRepository:
 
         return self.session.get(OutlineVersion, outline_version_id)
 
+    def confirm_outline_version(self, outline_version_id: int) -> OutlineVersion:
+        """确认大纲版本；脚本生成只允许使用已确认的大纲版本。"""
+
+        outline_version = self.get_outline_version(outline_version_id)
+        if outline_version is None:
+            raise ValueError(f"OutlineVersion not found: {outline_version_id}")
+        outline_version.confirmed_at = utc_now()
+        self.session.commit()
+        self.session.refresh(outline_version)
+        return outline_version
+
+    def list_outline_characters(self, outline_version_id: int) -> list[OutlineCharacter]:
+        """读取大纲版本下的角色基准设定。"""
+
+        statement = (
+            select(OutlineCharacter)
+            .where(OutlineCharacter.outline_version_id == outline_version_id)
+            .order_by(OutlineCharacter.character_key, OutlineCharacter.id)
+        )
+        return list(self.session.scalars(statement))
+
+    def get_outline_character_by_key(
+        self,
+        *,
+        outline_version_id: int,
+        character_key: str,
+    ) -> OutlineCharacter | None:
+        """按稳定 key 读取大纲版本内的角色基准设定。"""
+
+        statement = select(OutlineCharacter).where(
+            OutlineCharacter.outline_version_id == outline_version_id,
+            OutlineCharacter.character_key == character_key,
+        )
+        return self.session.scalar(statement)
+
+    def replace_outline_characters(
+        self,
+        *,
+        outline_version_id: int,
+        characters: list[dict],
+    ) -> list[OutlineCharacter]:
+        """替换某个大纲版本的角色基准设定草案。"""
+
+        for character in self.list_outline_characters(outline_version_id):
+            self.session.delete(character)
+        self.session.flush()
+
+        saved: list[OutlineCharacter] = []
+        for payload in characters:
+            character = OutlineCharacter(
+                outline_version_id=outline_version_id,
+                character_key=str(payload["character_key"]).strip(),
+                name=str(payload.get("name", "")).strip(),
+                role=str(payload.get("role", "")).strip(),
+                background=str(payload.get("background", "")).strip(),
+                appearance=str(payload.get("appearance", "")).strip(),
+                visual_anchors=str(payload.get("visual_anchors", "")).strip(),
+                negative_constraints=str(payload.get("negative_constraints", "")).strip(),
+                default_hairstyle=str(payload.get("default_hairstyle", "")).strip(),
+                default_clothing=str(payload.get("default_clothing", "")).strip(),
+                default_accessories=str(payload.get("default_accessories", "")).strip(),
+                default_color_palette=str(payload.get("default_color_palette", "")).strip(),
+            )
+            self.session.add(character)
+            saved.append(character)
+
+        self.session.commit()
+        for character in saved:
+            self.session.refresh(character)
+        return saved
+
     def get_active_outline_version_for_project(self, project_id: int) -> OutlineVersion | None:
         """读取项目最近大纲会话中的 active 大纲版本。"""
 
@@ -448,11 +520,22 @@ class ComicRepository:
         return list(self.session.scalars(statement))
 
     def list_script_characters(self, task_id: int) -> list[ScriptCharacter]:
-        """读取某次脚本任务下的中心化角色设定。"""
+        """读取某次脚本任务下所有分段角色设定。"""
 
         statement = (
             select(ScriptCharacter)
-            .where(ScriptCharacter.task_id == task_id)
+            .join(ScriptSection, ScriptCharacter.section_id == ScriptSection.id)
+            .where(ScriptSection.task_id == task_id)
+            .order_by(ScriptSection.section_no, ScriptCharacter.character_key, ScriptCharacter.id)
+        )
+        return list(self.session.scalars(statement))
+
+    def list_script_section_characters(self, section_id: int) -> list[ScriptCharacter]:
+        """读取某个分段内的角色细化设定。"""
+
+        statement = (
+            select(ScriptCharacter)
+            .where(ScriptCharacter.section_id == section_id)
             .order_by(ScriptCharacter.character_key, ScriptCharacter.id)
         )
         return list(self.session.scalars(statement))
@@ -469,13 +552,13 @@ class ComicRepository:
     def get_script_character_by_key(
         self,
         *,
-        task_id: int,
+        section_id: int,
         character_key: str,
     ) -> ScriptCharacter | None:
-        """按稳定 key 读取任务内角色设定。"""
+        """按稳定 key 读取分段内角色设定。"""
 
         statement = select(ScriptCharacter).where(
-            ScriptCharacter.task_id == task_id,
+            ScriptCharacter.section_id == section_id,
             ScriptCharacter.character_key == character_key,
         )
         return self.session.scalar(statement)
@@ -508,27 +591,42 @@ class ComicRepository:
         return scene
 
     def upsert_script_character(self, *, task_id: int, **payload) -> ScriptCharacter:
-        """创建或补充任务内角色设定；已有外貌锚点保持稳定。"""
+        """兼容旧调用：按 payload 中的 section_id 保存分段角色设定。"""
+
+        section_id = int(payload["section_id"])
+        return self.upsert_script_section_character(section_id=section_id, **payload)
+
+    def upsert_script_section_character(
+        self,
+        *,
+        section_id: int,
+        **payload,
+    ) -> ScriptCharacter:
+        """创建或补充分段内角色设定；大纲基准锚点不在这里被覆盖。"""
 
         character_key = str(payload["character_key"]).strip()
         character = self.get_script_character_by_key(
-            task_id=task_id,
+            section_id=section_id,
             character_key=character_key,
         )
         if character is None:
-            character = ScriptCharacter(task_id=task_id, character_key=character_key)
+            character = ScriptCharacter(section_id=section_id, character_key=character_key)
             self.session.add(character)
+        outline_character_id = payload.get("outline_character_id")
+        if outline_character_id is not None:
+            character.outline_character_id = int(outline_character_id)
         self._fill_empty_fields(
             character,
             payload,
             [
                 "name",
-                "role",
-                "appearance",
-                "hairstyle",
-                "clothing_style",
-                "accessories",
-                "color_palette",
+                "section_role",
+                "current_hairstyle",
+                "current_clothing",
+                "current_accessories",
+                "current_state",
+                "emotion",
+                "temporary_changes",
                 "visual_anchors",
                 "negative_constraints",
             ],

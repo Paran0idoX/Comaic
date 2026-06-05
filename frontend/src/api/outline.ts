@@ -6,6 +6,26 @@ export type OutlineVersion = {
   outline: string
   status: string
   created_at: string
+  confirmed_at: string | null
+  characters: OutlineCharacter[]
+}
+
+export type OutlineCharacter = {
+  id: number
+  outline_version_id: number
+  character_key: string
+  name: string
+  role: string
+  background: string
+  appearance: string
+  visual_anchors: string
+  negative_constraints: string
+  default_hairstyle: string
+  default_clothing: string
+  default_accessories: string
+  default_color_palette: string
+  created_at: string
+  updated_at: string
 }
 
 export type OutlineSession = {
@@ -53,6 +73,11 @@ export const resolveOutlineSession = (projectId: number): Promise<OutlineSession
   requestJson<OutlineSession>('/api/outline/sessions/resolve', {
     method: 'POST',
     body: JSON.stringify({ project_id: projectId }),
+  })
+
+export const confirmOutlineVersion = (versionId: number): Promise<OutlineVersion> =>
+  requestJson<OutlineVersion>(`/api/outline/versions/${versionId}/confirm`, {
+    method: 'POST',
   })
 
 // 后端使用 POST SSE，浏览器原生 EventSource 不支持 POST，所以这里手动解析 ReadableStream。

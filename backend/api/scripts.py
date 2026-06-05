@@ -119,21 +119,44 @@ def scene_to_response(scene: ScriptScene) -> ScriptSceneResponse:
 
 
 def character_to_response(character: ScriptCharacter) -> ScriptCharacterResponse:
-    """把中心化角色设定 ORM 对象转换为 API 响应。"""
+    """把分段角色设定 ORM 对象转换为 API 响应。"""
+
+    outline_character = character.outline_character
 
     return ScriptCharacterResponse(
         id=character.id,
-        task_id=character.task_id,
+        task_id=character.section.task_id if character.section is not None else None,
+        section_id=character.section_id,
+        section_no=character.section.section_no if character.section is not None else None,
+        outline_character_id=character.outline_character_id,
         character_key=character.character_key,
         name=character.name,
-        role=character.role,
-        appearance=character.appearance,
-        hairstyle=character.hairstyle,
-        clothing_style=character.clothing_style,
-        accessories=character.accessories,
-        color_palette=character.color_palette,
+        section_role=character.section_role,
+        current_hairstyle=character.current_hairstyle,
+        current_clothing=character.current_clothing,
+        current_accessories=character.current_accessories,
+        current_state=character.current_state,
+        emotion=character.emotion,
+        temporary_changes=character.temporary_changes,
         visual_anchors=character.visual_anchors,
         negative_constraints=character.negative_constraints,
+        outline_character=(
+            {
+                "character_key": outline_character.character_key,
+                "name": outline_character.name,
+                "role": outline_character.role,
+                "background": outline_character.background,
+                "appearance": outline_character.appearance,
+                "visual_anchors": outline_character.visual_anchors,
+                "negative_constraints": outline_character.negative_constraints,
+                "default_hairstyle": outline_character.default_hairstyle,
+                "default_clothing": outline_character.default_clothing,
+                "default_accessories": outline_character.default_accessories,
+                "default_color_palette": outline_character.default_color_palette,
+            }
+            if outline_character is not None
+            else None
+        ),
         created_at=character.created_at,
         updated_at=character.updated_at,
     )

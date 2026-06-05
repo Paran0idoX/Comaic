@@ -17,9 +17,10 @@
 - 每页必须输出 scene_key、character_keys、summary、characters、clothing、scene、composition、character_action、dialogue。
 - 最终输出必须包含 scenes 和 characters：
   - scenes 是当前分段涉及的中心化场景设定，scene_key 必须稳定复用。
-  - characters 是当前分段涉及的中心化角色设定，character_key 必须稳定复用。
+  - characters 是当前分段涉及的角色细化设定，character_key 必须优先复用大纲角色基准设定。
 - 同一 scene_key 下的环境细节、色调、光线和视觉锚点必须保持一致。
-- 同一 character_key 下的外貌、发型、服装、配件和视觉锚点必须保持一致。
+- 大纲角色基准设定中的固定样貌、背景、角色识别锚点和禁止项不能被改写。
+- 发型、服装、配件、色彩是大纲阶段给出的默认值；当前分段可以按剧情给出 current_* 覆盖，但不能破坏角色识别。
 - composition 描述整页统一构图、主体、视角、景别和空间关系。
 - character_action 精准描述本页人物核心动作、姿态、交互和动态。
 - dialogue 只写这一整页需要出现的少量文字；没有文字时写“无”。
@@ -55,14 +56,15 @@
     {
       "character_key": "heroine",
       "name": "女主角",
-      "role": "主角",
-      "appearance": "年轻女性，瘦削，眼神敏感",
-      "hairstyle": "黑色齐肩短发",
-      "clothing_style": "深色连帽外套和浅色内搭",
-      "accessories": "银色旧耳机",
-      "color_palette": "深灰、黑色、少量银色",
-      "visual_anchors": "黑色齐肩短发、银色旧耳机必须保持",
-      "negative_constraints": "不要改成长发，不要移除耳机"
+      "section_role": "主角，本段处于试探和警觉状态",
+      "current_hairstyle": "沿用默认黑色齐肩短发，略显凌乱",
+      "current_clothing": "深色连帽外套和浅色内搭",
+      "current_accessories": "银色旧耳机",
+      "current_state": "疲惫但保持警觉",
+      "emotion": "紧张、敏感",
+      "temporary_changes": "无",
+      "visual_anchors": "保留大纲基准中的眼神敏感和银色旧耳机",
+      "negative_constraints": "不要违背大纲角色固定样貌"
     }
   ],
   "pages": [
