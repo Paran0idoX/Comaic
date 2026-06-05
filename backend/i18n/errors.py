@@ -50,6 +50,13 @@ ERROR_MESSAGES: dict[str, dict[str, str]] = {
         "image_generation.workflow_node_inputs_missing": "Workflow 节点没有 inputs。",
         "image_generation.workflow_input_name_empty": "Workflow 输入名不能为空。",
         "image_generation.workflow_input_not_found": "Workflow 节点输入不存在。",
+        "llm.config_not_found": "模型配置不存在。",
+        "llm.config_missing": "请先配置模型 API Key。",
+        "llm.provider_unsupported": "当前模型服务商暂不支持。",
+        "llm.model_names_empty": "模型名称列表不能为空。",
+        "llm.default_model_invalid": "默认模型必须包含在模型名称列表中。",
+        "llm.last_config_delete_forbidden": "至少需要保留一组模型 API 配置。",
+        "llm.test_failed": "模型连接测试失败，请检查 API、模型名和 Key。",
     },
     "en": {
         "common.internal_error": "The service is temporarily unavailable. Please try again later.",
@@ -89,6 +96,13 @@ ERROR_MESSAGES: dict[str, dict[str, str]] = {
         "image_generation.workflow_node_inputs_missing": "Workflow node has no inputs.",
         "image_generation.workflow_input_name_empty": "Workflow input name cannot be empty.",
         "image_generation.workflow_input_not_found": "Workflow node input not found.",
+        "llm.config_not_found": "LLM configuration not found.",
+        "llm.config_missing": "Please configure the model API key first.",
+        "llm.provider_unsupported": "This model provider is not supported yet.",
+        "llm.model_names_empty": "The model name list cannot be empty.",
+        "llm.default_model_invalid": "The default model must be included in the model name list.",
+        "llm.last_config_delete_forbidden": "At least one model API configuration must remain.",
+        "llm.test_failed": "Model connection test failed. Please check the API, model, and key.",
     },
 }
 
@@ -236,6 +250,18 @@ def code_from_message(message: str) -> tuple[str, int]:
         return "image_generation.workflow_input_name_empty", 400
     if "workflow node input not found" in lowered:
         return "image_generation.workflow_input_not_found", 400
+    if "llmconfig not found" in lowered:
+        return "llm.config_not_found", 404
+    if "llmconfig api key is missing" in lowered:
+        return "llm.config_missing", 400
+    if "unsupported llm provider" in lowered:
+        return "llm.provider_unsupported", 400
+    if "llm model names cannot be empty" in lowered:
+        return "llm.model_names_empty", 400
+    if "llm default model must be included" in lowered:
+        return "llm.default_model_invalid", 400
+    if "cannot delete the last llmconfig" in lowered:
+        return "llm.last_config_delete_forbidden", 400
     if "cannot be empty" in lowered:
         field_name = message.split(" cannot be empty", 1)[0]
         return "common.required_text", 400

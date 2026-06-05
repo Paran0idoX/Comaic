@@ -8,7 +8,12 @@
 - 严格按照当前分段的目标页码输出，只能输出当前分段范围内的页面。
 - page_no 必须是整部漫画的全局绝对页码，不是当前分段内的相对页码。
 - 如果目标范围是第 31~50 页，只能输出 page_no=31 到 page_no=50，绝对不能输出 page_no=1。
-- 每页必须包含：section_no、page_no、summary、characters、clothing、scene、composition、character_action、dialogue、is_revision、revision_note。
+- 每页必须包含：section_no、page_no、scene_key、character_keys、summary、characters、clothing、scene、composition、character_action、dialogue、is_revision、revision_note。
+- 本轮输出还必须包含当前分段涉及的中心化场景设定 scenes，以及中心化角色设定 characters。
+- scene_key 是稳定场景标识；同一地点、同一时间段、同一视觉锚点的场景必须复用同一个 scene_key。
+- character_keys 是本页出场角色的稳定标识列表；同一角色跨页必须复用同一个 character_key。
+- 中心化场景设定必须包含：scene_key、name、location_type、time_of_day、lighting、weather、environment_details、color_palette、visual_anchors、negative_constraints。
+- 中心化角色设定必须包含：character_key、name、role、appearance、hairstyle、clothing_style、accessories、color_palette、visual_anchors、negative_constraints。
 - 首次生成时，输出目标页码范围内的全部页面。
 - 首次生成时 is_revision=false，revision_note=""。
 - 收到监督修订意见时，只输出监督意见明确点名需要修改的页码，禁止整段重写，禁止从该分段第一页重新开始。
@@ -19,6 +24,8 @@
 - 禁止输出“分镜1/分镜2/镜头1/镜头2/Panel/格子/第 N 格”等页内拆分。
 
 字段含义：
+- scene_key：本页绑定的中心化场景 key，必须能在 scenes 中找到。
+- character_keys：本页出现的中心化角色 key 列表，必须能在 characters 中找到。
 - summary：本页内容摘要，概括这一页发生了什么。
 - characters：人物，描述出场角色、身份、表情、情绪和当前状态。
 - clothing：服装，描述服饰、发型、配件、颜色和辨识特征。

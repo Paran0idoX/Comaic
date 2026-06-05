@@ -28,7 +28,7 @@ comaic/
 
 - `backend/main.py`：FastAPI 入口，当前提供启动建表和 `/health`。
 - `backend/agents/`：Agent 层，只负责 LLM 生成、判断或调用工具，不直接写复杂数据库逻辑。
-- `backend/llm_clients/`：LLM 客户端与环境变量读取，例如 DeepSeek 客户端。
+- `backend/llm_clients/`：LLM 客户端工厂，运行时优先读取 SQLite 中的 OpenAI 兼容模型配置。
 - `backend/prompts/`：system prompt 和 user prompt 模板，Prompt 不要硬编码在 Python 代码里。
 - `backend/tools/`：外部系统封装，例如 `ComfyUIClient`。
 - `backend/models/`：SQLAlchemy ORM 实体、枚举与数据库初始化。
@@ -55,6 +55,7 @@ MVP 核心表位于 `backend/models/comic.py`：
 - `comic_image`：页面生成图片、远程/本地路径、seed、workflow、prompt、评分、是否选中。
 - `generation_task`：ComfyUI prompt id、任务状态、批量大小、错误信息。
 - `comfy_workflow_preset`：页面维护的 ComfyUI API workflow JSON 和 Prompt 注入节点配置。
+- `llm_config`：OpenAI 兼容模型配置；单表保存多组 API 配置，每组用 `model_names` JSON 字段维护多个模型名，并用 `default_model` 指定该组默认模型。API Key 只保存在本地 SQLite，不通过 API 回显。
 
 数据库初始化入口在 `backend/models/database.py` 的 `init_db()`。默认数据库地址是 `sqlite:///data/comaic.sqlite3`，从项目根目录运行后端时会写入根目录 `data/`。
 
@@ -74,9 +75,12 @@ MVP 核心表位于 `backend/models/comic.py`：
 - Service：编排业务流程，例如创建项目、调用 Agent、写入 Repository、更新状态。
 - Repository：只处理数据库增删改查，不调用 LLM，也不调用 ComfyUI。
 - Tool：封装外部系统调用，例如 ComfyUI HTTP API，不写业务状态流转。
-- Model client：集中读取模型相关环境变量，避免业务代码散落 API key 读取逻辑。
-  - DeepSeek 客户端拆成两个实例：大纲阶段使用开启 thinking 的 `deepseek_thinking_chat_model`，脚本/工具调用阶段使用关闭 thinking 的 `deepseek_tool_chat_model`。
-  - DeepAgents、`response_format` 或工具调用较多的 Agent 优先使用关闭 thinking 的实例，避免 `tool_choice` 与 thinking 模式冲突。
+- Model client：集中读取模型配置，避免业务代码散落 API key 读取逻辑。
+  - 新代码通过 `backend/llm_clients/factory.py` 创建模型实例，不直接读取 `.env` 或缓存模块级全局模型。
+  - 模型配置优先来自 active `llm_config` 的 `default_model`；没有配置时才用 `.env` 初始化默认 API 组和模型名列表。
+  - 设置页修改模型配置后，只影响后续新建的 Agent/LLM 调用，不强制切换正在运行的长任务。
+  - DeepSeek API Base URL 下，大纲阶段使用 thinking enabled，脚本/工具调用阶段使用 thinking disabled；其它 OpenAI 兼容服务不附加 DeepSeek thinking 参数。
+  - DeepAgents、`response_format` 或工具调用较多的 Agent 优先使用工具安全实例，避免 `tool_choice` 与 thinking 模式冲突。
 - 使用 `response_format` 的 Agent 必须优先复用 `backend/agents/structured_output.py` 中的 `ainvoke_structured_with_retries()`。
   - 只读取 `structured_response`，不要从自然语言、Markdown 代码块或文件输出中兜底解析 JSON。
   - Agent 自己通过 `validator` 传入业务级结构校验，例如页面列表非空、Prompt 非空。
@@ -106,6 +110,7 @@ MVP 核心表位于 `backend/models/comic.py`：
 ```env
 DEEPSEEK_MODEL=deepseek-v4-flash
 DEEPSEEK_API_KEY=
+DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
 
 DATABASE_URL=sqlite:///data/comaic.sqlite3
 COMFYUI_BASE_URL=http://127.0.0.1:8188
@@ -116,7 +121,8 @@ COMFYUI_BASE_URL=http://127.0.0.1:8188
 - 不要把真实 API key 写入代码、README、测试快照或日志。
 - 不要在回复中复述 `.env` 里的 key。
 - 示例配置只能使用占位符。
-- 缺少必要环境变量时，错误信息要直接说明缺少什么配置。
+- `.env` 中的模型配置只作为首次初始化设置页配置的默认值；运行时优先使用 SQLite 中 active `llm_config` 的 `default_model`。
+- 缺少模型 API Key 不应阻塞后端启动，但实际模型调用或测试连接要返回明确错误。
 
 ## Prompt 约定
 
@@ -181,6 +187,11 @@ pybabel compile -d backend/locales
 - 批量生成通过 SSE 暴露长任务进度，脚本任务状态保存到 `script_generation_task`。
 - 前端分页脚本页依赖 Vue `KeepAlive` 保持长 SSE 连接和内存进度；不要随意移除 `ScriptWorkspaceView` 的缓存，否则路由切换会中断前端对生成进度的消费。
 - 分页脚本结果保存到 `comic_page` 的结构化字段：`summary`、`characters`、`clothing`、`scene`、`composition`、`character_action`、`dialogue`，页面状态使用 `ComicPageStatus.SCRIPT_READY`。
+- 分页脚本生成需要同步产出任务级视觉设定：
+  - `script_scene` 保存中心化场景设定，`scene_key` 在同一脚本任务内唯一。
+  - `script_character` 保存中心化角色设定，`character_key` 在同一脚本任务内唯一。
+  - `comic_page.scene_id` 和 `comic_page_character` 负责把页面绑定到具体场景和角色。
+  - 页面自己的 `scene`、`characters`、`clothing` 只描述本页局部变化，不承担全局一致性职责。
 - 脚本 Agent prompt 放在 `backend/prompts/script_planning_prompt.md`、`script_deep_main_prompt.md`、`script_writer_prompt.md` 和 `script_supervisor_prompt.md`。
 
 ## ImagePromptAgent 约定
@@ -191,6 +202,7 @@ pybabel compile -d backend/locales
 - 脚本转图 SystemPrompt 会传给 LLM；Negative Prompt 不传给 LLM，只作为后续 ComfyUI 出图配置返回或使用。
 - ImagePromptAgent 不使用 `response_format`；直接读取模型最后一条 AI 文本输出作为正向 Prompt，并由 Service 校验空值和落库。
 - 图片 Prompt 生成范围以已完成的脚本生成任务为单位，Service 读取任务下页面脚本并并发调用 Agent。
+- 图片 Prompt 生成时必须组合任务级 `script_scene`、`script_character` 和单页结构化脚本，保持同场景和同角色跨页视觉锚点一致。
 - 生成出的正向 Prompt 保存到 `comic_page.image_prompt`，页面状态使用 `ComicPageStatus.PROMPT_READY`。
 - 前端维护 Prompt 配置时可以使用 Markdown 预览，但必须关闭原始 HTML 渲染。
 

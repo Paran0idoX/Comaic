@@ -316,6 +316,10 @@ const generatePrompts = async () => {
               page_no: numberFromPayload(payload, 'page_no'),
               image_prompt: stringFromPayload(payload, 'image_prompt'),
               status: stringFromPayload(payload, 'status') ?? '',
+              scene_key: stringFromPayload(payload, 'scene_key'),
+              character_keys: Array.isArray(payload.character_keys)
+                ? (payload.character_keys as string[])
+                : [],
               error: stringFromPayload(payload, 'error'),
               error_code: stringFromPayload(payload, 'error_code'),
             })
@@ -478,6 +482,16 @@ onMounted(() => {
               </el-tag>
             </template>
           </el-table-column>
+          <el-table-column :label="t('prompts.result.scene')" width="140">
+            <template #default="{ row }">
+              {{ row.scene_key || '-' }}
+            </template>
+          </el-table-column>
+          <el-table-column :label="t('prompts.result.characters')" width="180">
+            <template #default="{ row }">
+              {{ row.character_keys?.join(', ') || '-' }}
+            </template>
+          </el-table-column>
           <el-table-column :label="t('prompts.result.prompt')" min-width="260">
             <template #default="{ row }">
               {{ shortText(row.image_prompt) }}
@@ -578,6 +592,13 @@ onMounted(() => {
     </el-dialog>
 
     <el-dialog v-model="detailVisible" :title="t('prompts.detail.title')" width="760px">
+      <div v-if="detailItem" class="prompt-detail-meta">
+        <span>{{ t('prompts.result.scene') }}: {{ detailItem.scene_key || '-' }}</span>
+        <span>
+          {{ t('prompts.result.characters') }}:
+          {{ detailItem.character_keys?.join(', ') || '-' }}
+        </span>
+      </div>
       <pre class="prompt-detail">{{ itemErrorText(detailItem) || detailItem?.image_prompt }}</pre>
     </el-dialog>
   </section>
@@ -728,6 +749,15 @@ onMounted(() => {
 .prompt-detail {
   margin: 0;
   line-height: 1.7;
+}
+
+.prompt-detail-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+  margin-bottom: 12px;
+  color: var(--text-soft);
+  font-size: 13px;
 }
 
 @media (max-width: 1180px) {

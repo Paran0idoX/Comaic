@@ -4,6 +4,7 @@ import OutlineWorkspaceView from '@/views/OutlineWorkspaceView.vue'
 import ProjectListView from '@/views/ProjectListView.vue'
 import ImagePromptWorkspaceView from '@/views/ImagePromptWorkspaceView.vue'
 import ImageGenerationWorkspaceView from '@/views/ImageGenerationWorkspaceView.vue'
+import SettingsView from '@/views/SettingsView.vue'
 import ScriptWorkspaceView from '@/views/ScriptWorkspaceView.vue'
 
 const router = createRouter({
@@ -51,6 +52,14 @@ const router = createRouter({
       component: ImageGenerationWorkspaceView,
       meta: {
         titleKey: 'routeTitles.imageGeneration',
+      },
+    },
+    {
+      path: '/settings',
+      name: 'settings',
+      component: SettingsView,
+      meta: {
+        titleKey: 'routeTitles.settings',
       },
     },
   ],
