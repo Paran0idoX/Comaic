@@ -68,8 +68,8 @@ class ImagePromptAgent:
 
     @staticmethod
     def _default_llm() -> Any:
-        """图片 Prompt 生成使用关闭 thinking 的模型实例。"""
+        """读取当前设置页保存的模型配置，创建图片 Prompt ChatModel。"""
 
-        from backend.llm_clients.deepseek import deepseek_thinking_chat_model
+        from backend.llm_clients.factory import get_tool_chat_model
 
-        return deepseek_thinking_chat_model
+        return get_tool_chat_model()

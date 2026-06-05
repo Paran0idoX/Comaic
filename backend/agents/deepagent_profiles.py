@@ -32,10 +32,11 @@ def ensure_comaic_deepagent_profile() -> None:
     if _PROFILE_REGISTERED:
         return
 
-    register_harness_profile(
-        "deepseek",
-        HarnessProfile(excluded_tools=COMAIC_DEEPAGENT_EXCLUDED_TOOLS),
-    )
+    for provider in ("deepseek", "openai"):
+        register_harness_profile(
+            provider,
+            HarnessProfile(excluded_tools=COMAIC_DEEPAGENT_EXCLUDED_TOOLS),
+        )
     _PROFILE_REGISTERED = True
     logger.info(
         "Registered comaic DeepAgents profile excluded_tools=%s",

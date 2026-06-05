@@ -18,6 +18,8 @@ class ImagePromptGenerateItem:
     page_no: int
     image_prompt: str | None
     status: str
+    scene_key: str | None = None
+    character_keys: list[str] | None = None
     error: str | None = None
     error_code: str | None = None
 
@@ -40,6 +42,9 @@ class ImagePromptSourcePage:
     page_id: int
     page_no: int
     page_description: str
+    consistency_context: str
+    scene_key: str | None
+    character_keys: list[str]
 
 
 class ImagePromptService:
@@ -122,6 +127,11 @@ class ImagePromptService:
                 page_no=page.page_no,
                 image_prompt=page.image_prompt,
                 status=page.status.value,
+                scene_key=page.script_scene.scene_key if page.script_scene is not None else None,
+                character_keys=[
+                    character.character_key
+                    for character in sorted(page.visual_characters, key=lambda item: item.character_key)
+                ],
             )
             for page in pages
         ]
@@ -160,10 +170,10 @@ class ImagePromptService:
 
             async with semaphore:
                 try:
-                    prompt = await agent.generate(
+                    prompt = await self._generate_with_consistency_review(
+                        agent=agent,
                         system_prompt=system_preset.content,
-                        page_no=page.page_no,
-                        page_description=page.page_description,
+                        page=page,
                     )
                     if not prompt:
                         raise ValueError("Generated image prompt cannot be empty.")
@@ -186,6 +196,8 @@ class ImagePromptService:
                         page_no=saved_page.page_no,
                         image_prompt=saved_page.image_prompt,
                         status=saved_page.status.value,
+                        scene_key=page.scene_key,
+                        character_keys=page.character_keys,
                     )
                 )
             else:
@@ -197,6 +209,8 @@ class ImagePromptService:
                         page_no=page.page_no,
                         image_prompt=None,
                         status="failed",
+                        scene_key=page.scene_key,
+                        character_keys=page.character_keys,
                         error=error_code,
                         error_code=error_code,
                     )
@@ -240,10 +254,10 @@ class ImagePromptService:
 
             async with semaphore:
                 try:
-                    prompt = await agent.generate(
+                    prompt = await self._generate_with_consistency_review(
+                        agent=agent,
                         system_prompt=system_preset.content,
-                        page_no=page.page_no,
-                        page_description=page.page_description,
+                        page=page,
                     )
                     if not prompt:
                         raise ValueError("Generated image prompt cannot be empty.")
@@ -267,6 +281,8 @@ class ImagePromptService:
                         page_no=saved_page.page_no,
                         image_prompt=saved_page.image_prompt,
                         status=saved_page.status.value,
+                        scene_key=page.scene_key,
+                        character_keys=page.character_keys,
                     )
                 else:
                     error_code = app_error_from_exception(ValueError(error or "")).code
@@ -276,6 +292,8 @@ class ImagePromptService:
                         page_no=page.page_no,
                         image_prompt=None,
                         status="failed",
+                        scene_key=page.scene_key,
+                        character_keys=page.character_keys,
                         error=error_code,
                         error_code=error_code,
                     )
@@ -368,24 +386,172 @@ class ImagePromptService:
             raise ValueError(f"Script pages not found for task: {task_id}")
         if clear_existing:
             self.repository.clear_script_task_image_prompts(task.id)
+        scene_positions = self._scene_positions(pages)
         return (
             system_preset,
             [
                 ImagePromptSourcePage(
                     page_id=page.id,
                     page_no=page.page_no,
-                    page_description=self._page_description(page),
+                    consistency_context=self._visual_consistency_context(
+                        page,
+                        scene_position=scene_positions.get(page.id, "standalone"),
+                    ),
+                    page_description=self._page_description(
+                        page,
+                        scene_position=scene_positions.get(page.id, "standalone"),
+                    ),
+                    scene_key=page.script_scene.scene_key if page.script_scene is not None else None,
+                    character_keys=[
+                        character.character_key
+                        for character in sorted(page.visual_characters, key=lambda item: item.character_key)
+                    ],
                 )
                 for page in pages
             ],
         )
 
+    async def _generate_with_consistency_review(
+        self,
+        *,
+        agent: ImagePromptAgent,
+        system_prompt: str,
+        page: ImagePromptSourcePage,
+    ) -> str:
+        """生成并审查单页 Prompt；只对缺失视觉锁定信息的页面做局部重试。"""
+
+        description = page.page_description
+        last_issues: list[str] = []
+        for attempt in range(3):
+            prompt = await agent.generate(
+                system_prompt=system_prompt,
+                page_no=page.page_no,
+                page_description=description,
+            )
+            reviewed_prompt = self._merge_consistency_context(page, prompt)
+            issues = self._prompt_consistency_issues(reviewed_prompt, page)
+            if not issues:
+                return reviewed_prompt
+            last_issues = issues
+            description = "\n\n".join(
+                [
+                    page.page_description,
+                    "【上一版 Prompt 一致性审查未通过】",
+                    "；".join(issues),
+                    "请重新生成，并显式保留中心化场景/角色视觉锚点。",
+                    f"Retry attempt: {attempt + 1}",
+                ]
+            )
+        raise ValueError(
+            f"Image prompt consistency review failed for page {page.page_no}: "
+            f"{'; '.join(last_issues)}"
+        )
+
     @staticmethod
-    def _page_description(page) -> str:
+    def _scene_positions(pages: list) -> dict[int, str]:
+        """计算页面在同一场景中的位置，帮助 Prompt 区分建立镜头、延续和转场。"""
+
+        pages_by_scene_id: dict[int | None, list] = {}
+        for page in pages:
+            pages_by_scene_id.setdefault(page.scene_id, []).append(page)
+        positions: dict[int, str] = {}
+        for scene_pages in pages_by_scene_id.values():
+            sorted_pages = sorted(scene_pages, key=lambda item: item.page_no)
+            total = len(sorted_pages)
+            for index, page in enumerate(sorted_pages):
+                if total == 1:
+                    positions[page.id] = "standalone"
+                elif index == 0:
+                    positions[page.id] = "establishing"
+                elif index == total - 1:
+                    positions[page.id] = "transition"
+                else:
+                    positions[page.id] = "continuation"
+        return positions
+
+    @staticmethod
+    def _visual_consistency_context(page, *, scene_position: str) -> str:
+        """构造最终 Prompt 必须携带的视觉锁定上下文，强化跨页一致性。"""
+
+        scene = page.script_scene
+        lines = [
+            "VISUAL CONSISTENCY LOCK",
+            f"scene_key: {scene.scene_key if scene is not None else ''}",
+            f"scene_name: {scene.name if scene is not None else ''}",
+            f"scene_position: {scene_position}",
+            f"location_type: {scene.location_type if scene is not None else ''}",
+            f"time_of_day: {scene.time_of_day if scene is not None else ''}",
+            f"lighting: {scene.lighting if scene is not None else ''}",
+            f"weather: {scene.weather if scene is not None else ''}",
+            f"environment_details: {scene.environment_details if scene is not None else ''}",
+            f"scene_color_palette: {scene.color_palette if scene is not None else ''}",
+            f"scene_visual_anchors: {scene.visual_anchors if scene is not None else ''}",
+            f"scene_negative_constraints: {scene.negative_constraints if scene is not None else ''}",
+        ]
+        characters = sorted(page.visual_characters, key=lambda item: item.character_key)
+        if characters:
+            lines.append("CHARACTER CONSISTENCY LOCK")
+        for character in characters:
+            lines.extend(
+                [
+                    f"character_key: {character.character_key}",
+                    f"name: {character.name}",
+                    f"role: {character.role}",
+                    f"appearance: {character.appearance}",
+                    f"hairstyle: {character.hairstyle}",
+                    f"clothing_style: {character.clothing_style}",
+                    f"accessories: {character.accessories}",
+                    f"character_color_palette: {character.color_palette}",
+                    f"character_visual_anchors: {character.visual_anchors}",
+                    f"character_negative_constraints: {character.negative_constraints}",
+                ]
+            )
+        return "\n".join(line for line in lines if line.strip())
+
+    @staticmethod
+    def _page_description(page, *, scene_position: str) -> str:
         """把结构化分页脚本拼成图片 Prompt Agent 可理解的页面描述。"""
 
+        scene = page.script_scene
+        character_lines = []
+        for character in sorted(page.visual_characters, key=lambda item: item.character_key):
+            character_lines.append(
+                "\n".join(
+                    [
+                        f"- 角色 key：{character.character_key}",
+                        f"  名称：{character.name}",
+                        f"  身份：{character.role}",
+                        f"  固定外貌：{character.appearance}",
+                        f"  固定发型：{character.hairstyle}",
+                        f"  固定服装：{character.clothing_style}",
+                        f"  固定配件：{character.accessories}",
+                        f"  角色色彩：{character.color_palette}",
+                        f"  角色视觉锚点：{character.visual_anchors}",
+                        f"  角色禁止变化：{character.negative_constraints}",
+                    ]
+                )
+            )
         return "\n".join(
             [
+                "【中心化场景设定】",
+                ImagePromptService._visual_consistency_context(
+                    page,
+                    scene_position=scene_position,
+                ),
+                f"场景 key：{scene.scene_key if scene is not None else ''}",
+                f"场景名称：{scene.name if scene is not None else ''}",
+                f"地点类型：{scene.location_type if scene is not None else ''}",
+                f"时间：{scene.time_of_day if scene is not None else ''}",
+                f"固定光线：{scene.lighting if scene is not None else ''}",
+                f"天气/空气：{scene.weather if scene is not None else ''}",
+                f"稳定环境细节：{scene.environment_details if scene is not None else ''}",
+                f"场景色彩：{scene.color_palette if scene is not None else ''}",
+                f"场景视觉锚点：{scene.visual_anchors if scene is not None else ''}",
+                f"场景禁止变化：{scene.negative_constraints if scene is not None else ''}",
+                f"本页在该场景中的位置：{scene_position}",
+                "【中心化角色设定】",
+                "\n".join(character_lines) if character_lines else "无固定角色出场。",
+                "【本页局部变化】",
                 f"本页摘要：{page.summary or ''}",
                 f"人物：{page.characters or ''}",
                 f"服装：{page.clothing or ''}",
@@ -397,6 +563,32 @@ class ImagePromptService:
         ).strip()
 
     @staticmethod
+    def _merge_consistency_context(page: ImagePromptSourcePage, prompt: str) -> str:
+        """把中心化视觉锁定信息并入最终正向 Prompt，确保 ComfyUI 阶段拿到完整上下文。"""
+
+        if not page.consistency_context:
+            return prompt.strip()
+        return "\n".join(
+            [
+                page.consistency_context.strip(),
+                "PAGE-SPECIFIC IMAGE PROMPT",
+                prompt.strip(),
+            ]
+        ).strip()
+
+    @staticmethod
+    def _prompt_consistency_issues(prompt: str, page: ImagePromptSourcePage) -> list[str]:
+        """审查最终 Prompt 是否保留场景和角色 key；失败时只重试当前页。"""
+
+        issues: list[str] = []
+        if page.scene_key and page.scene_key not in prompt:
+            issues.append(f"missing scene_key {page.scene_key}")
+        for character_key in page.character_keys:
+            if character_key not in prompt:
+                issues.append(f"missing character_key {character_key}")
+        return issues
+
+    @staticmethod
     def _item_payload(item: ImagePromptGenerateItem) -> dict:
         """把单页生成结果转成可 JSON 序列化的 SSE payload。"""
 
@@ -405,6 +597,8 @@ class ImagePromptService:
             "page_no": item.page_no,
             "image_prompt": item.image_prompt,
             "status": item.status,
+            "scene_key": item.scene_key,
+            "character_keys": item.character_keys or [],
             "error": item.error,
             "error_code": item.error_code,
         }

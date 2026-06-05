@@ -2,6 +2,7 @@
 import { Bell, Setting } from '@element-plus/icons-vue'
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { useRouter } from 'vue-router'
 
 import { setLocale, type SupportedLocale } from '@/i18n'
 
@@ -10,6 +11,7 @@ defineProps<{
 }>()
 
 const { locale, t } = useI18n()
+const router = useRouter()
 
 const currentLocale = computed({
   get: () => locale.value as SupportedLocale,
@@ -31,7 +33,12 @@ const currentLocale = computed({
       </el-select>
       <el-tag effect="plain" type="success">{{ t('app.env') }}</el-tag>
       <el-button :icon="Bell" circle :aria-label="t('app.notifications')" />
-      <el-button :icon="Setting" circle :aria-label="t('app.settings')" />
+      <el-button
+        :icon="Setting"
+        circle
+        :aria-label="t('app.settings')"
+        @click="router.push('/settings')"
+      />
     </div>
   </header>
 </template>

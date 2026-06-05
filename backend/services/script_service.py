@@ -5,7 +5,9 @@ from backend.models.comic import (
     ComicPage,
     ComicProject,
     OutlineVersion,
+    ScriptCharacter,
     ScriptGenerationTask,
+    ScriptScene,
     ScriptSection,
 )
 from backend.models.enums import ScriptGenerationMode, ScriptGenerationTaskStatus
@@ -64,6 +66,18 @@ class ScriptService:
 
         self.get_script_task(task_id)
         return self.repository.list_script_task_pages(task_id)
+
+    def list_script_scenes(self, *, task_id: int) -> list[ScriptScene]:
+        """读取指定脚本任务下的中心化场景设定。"""
+
+        self.get_script_task(task_id)
+        return self.repository.list_script_scenes(task_id)
+
+    def list_script_characters(self, *, task_id: int) -> list[ScriptCharacter]:
+        """读取指定脚本任务下的中心化角色设定。"""
+
+        self.get_script_task(task_id)
+        return self.repository.list_script_characters(task_id)
 
     def upsert_manual_page_script(
         self,
@@ -178,6 +192,12 @@ class ScriptService:
                 user_requirement=user_requirement or "",
             )
             page_payload = self._find_page_payload(result.get("pages", []), page_no)
+            visual_settings = self._save_visual_settings(
+                task_id=task.id,
+                scenes=result.get("scenes", []),
+                characters=result.get("characters", []),
+                pages=[page_payload],
+            )
             page = self.repository.upsert_page_script(
                 project_id=project_id,
                 page_no=page_no,
@@ -185,6 +205,11 @@ class ScriptService:
                     task_id=task.id,
                     page_no=page_no,
                 ).id,
+                scene_id=visual_settings["scene_ids_by_key"][page_payload["scene_key"]],
+                character_ids=[
+                    visual_settings["character_ids_by_key"][key]
+                    for key in page_payload.get("character_keys", [])
+                ],
                 **self._page_payload_for_save(page_payload),
             )
             self.repository.update_script_task(
@@ -433,10 +458,17 @@ class ScriptService:
                     }
                     return
 
+                visual_settings = self._save_visual_settings(
+                    task_id=task.id,
+                    scenes=result.get("scenes", []),
+                    characters=result.get("characters", []),
+                    pages=normalized_pages,
+                )
                 saved_pages = self._save_section_pages(
                     project_id=project_id,
                     section=section,
                     pages=normalized_pages,
+                    visual_settings=visual_settings,
                 )
                 yield "phase", {"code": "script.section.saved", "section_no": section.section_no}
                 reviews = [
@@ -664,6 +696,107 @@ class ScriptService:
         }
 
     @staticmethod
+    def _normalize_scene_payload(raw_scene: dict) -> dict:
+        """规范化中心化场景设定，确保后续 Prompt 可以稳定复用。"""
+
+        payload = {
+            "scene_key": str(raw_scene.get("scene_key", "")).strip(),
+            "name": str(raw_scene.get("name", "")).strip(),
+            "location_type": str(raw_scene.get("location_type", "")).strip(),
+            "time_of_day": str(raw_scene.get("time_of_day", "")).strip(),
+            "lighting": str(raw_scene.get("lighting", "")).strip(),
+            "weather": str(raw_scene.get("weather", "")).strip(),
+            "environment_details": str(raw_scene.get("environment_details", "")).strip(),
+            "color_palette": str(raw_scene.get("color_palette", "")).strip(),
+            "visual_anchors": str(raw_scene.get("visual_anchors", "")).strip(),
+            "negative_constraints": str(raw_scene.get("negative_constraints", "")).strip(),
+        }
+        for field_name in ("scene_key", "name", "environment_details", "visual_anchors"):
+            if not payload[field_name]:
+                raise ValueError(f"scene setting missing required field: {field_name}")
+        return payload
+
+    @staticmethod
+    def _normalize_character_payload(raw_character: dict) -> dict:
+        """规范化中心化角色设定，确保同一角色跨页视觉锚点稳定。"""
+
+        payload = {
+            "character_key": str(raw_character.get("character_key", "")).strip(),
+            "name": str(raw_character.get("name", "")).strip(),
+            "role": str(raw_character.get("role", "")).strip(),
+            "appearance": str(raw_character.get("appearance", "")).strip(),
+            "hairstyle": str(raw_character.get("hairstyle", "")).strip(),
+            "clothing_style": str(raw_character.get("clothing_style", "")).strip(),
+            "accessories": str(raw_character.get("accessories", "")).strip(),
+            "color_palette": str(raw_character.get("color_palette", "")).strip(),
+            "visual_anchors": str(raw_character.get("visual_anchors", "")).strip(),
+            "negative_constraints": str(raw_character.get("negative_constraints", "")).strip(),
+        }
+        for field_name in ("character_key", "name", "appearance", "visual_anchors"):
+            if not payload[field_name]:
+                raise ValueError(f"character setting missing required field: {field_name}")
+        return payload
+
+    def _save_visual_settings(
+        self,
+        *,
+        task_id: int,
+        scenes: list,
+        characters: list,
+        pages: list[dict],
+    ) -> dict:
+        """保存场景/角色圣经，并返回页面绑定所需的 key 到 id 映射。"""
+
+        scene_payloads = [
+            self._normalize_scene_payload(scene)
+            for scene in scenes
+            if isinstance(scene, dict)
+        ]
+        character_payloads = [
+            self._normalize_character_payload(character)
+            for character in characters
+            if isinstance(character, dict)
+        ]
+        scene_keys = {scene["scene_key"] for scene in scene_payloads}
+        character_keys = {character["character_key"] for character in character_payloads}
+        for page in pages:
+            scene_key = str(page.get("scene_key", "")).strip()
+            if not scene_key:
+                raise ValueError(f"page {page.get('page_no')} missing required field: scene_key")
+            if scene_key not in scene_keys:
+                raise ValueError(f"page {page.get('page_no')} scene_key not found: {scene_key}")
+            page_character_keys = page.get("character_keys", [])
+            page_characters_text = str(page.get("characters", "")).strip()
+            if page_characters_text and page_characters_text != "无" and not page_character_keys:
+                raise ValueError(
+                    f"page {page.get('page_no')} has characters text but no character_keys"
+                )
+            for character_key in page_character_keys:
+                if character_key not in character_keys:
+                    raise ValueError(
+                        f"page {page.get('page_no')} character_key not found: {character_key}"
+                    )
+
+        scene_ids_by_key = {
+            scene["scene_key"]: self.repository.upsert_script_scene(
+                task_id=task_id,
+                **scene,
+            ).id
+            for scene in scene_payloads
+        }
+        character_ids_by_key = {
+            character["character_key"]: self.repository.upsert_script_character(
+                task_id=task_id,
+                **character,
+            ).id
+            for character in character_payloads
+        }
+        return {
+            "scene_ids_by_key": scene_ids_by_key,
+            "character_ids_by_key": character_ids_by_key,
+        }
+
+    @staticmethod
     def _normalize_section_plan(*, sections: list, total_pages: int) -> list[dict]:
         """校验并规范化分段计划，作为页面提交页码范围的权威依据。"""
 
@@ -723,6 +856,7 @@ class ScriptService:
             raise ValueError("section pages cannot be empty")
 
         required_text_fields = [
+            "scene_key",
             "summary",
             "characters",
             "clothing",
@@ -749,6 +883,9 @@ class ScriptService:
                 )
             if page_no in seen_page_nos:
                 raise ValueError(f"duplicate page_no in section {section.section_no}: {page_no}")
+            character_keys = raw_page.get("character_keys", [])
+            if not isinstance(character_keys, list):
+                raise ValueError(f"page {page_no} character_keys must be a list")
             for field_name in required_text_fields:
                 if not str(raw_page.get(field_name, "")).strip():
                     raise ValueError(f"page {page_no} missing required field: {field_name}")
@@ -757,6 +894,12 @@ class ScriptService:
                 {
                     "section_no": section_no,
                     "page_no": page_no,
+                    "scene_key": str(raw_page.get("scene_key", "")).strip(),
+                    "character_keys": [
+                        str(character_key).strip()
+                        for character_key in character_keys
+                        if str(character_key).strip()
+                    ],
                     "summary": str(raw_page.get("summary", "")).strip(),
                     "characters": str(raw_page.get("characters", "")).strip(),
                     "clothing": str(raw_page.get("clothing", "")).strip(),
@@ -785,16 +928,24 @@ class ScriptService:
         project_id: int,
         section: ScriptSection,
         pages: list[dict],
+        visual_settings: dict,
     ) -> list[ComicPage]:
         """当前 section 通过校验后再批量落库，避免保存半成品页面。"""
 
         saved_pages: list[ComicPage] = []
         for page_payload in pages:
+            scene_id = visual_settings["scene_ids_by_key"][page_payload["scene_key"]]
+            character_ids = [
+                visual_settings["character_ids_by_key"][key]
+                for key in page_payload.get("character_keys", [])
+            ]
             saved_pages.append(
                 self.repository.upsert_page_script(
                     project_id=project_id,
                     page_no=int(page_payload["page_no"]),
                     section_id=section.id,
+                    scene_id=scene_id,
+                    character_ids=character_ids,
                     **self._page_payload_for_save(page_payload),
                 )
             )
@@ -875,6 +1026,14 @@ class ScriptService:
         return {
             "completed_section_summaries": summaries,
             "recent_full_sections": recent_full_sections,
+            "known_scenes": [
+                self._scene_to_payload(scene)
+                for scene in self.repository.list_script_scenes(task_id)
+            ],
+            "known_characters": [
+                self._character_to_payload(character)
+                for character in self.repository.list_script_characters(task_id)
+            ],
         }
 
     @staticmethod
@@ -914,6 +1073,12 @@ class ScriptService:
             "section_id": page.section_id,
             "section_no": page.section.section_no if page.section is not None else None,
             "task_id": page.section.task_id if page.section is not None else None,
+            "scene_id": page.scene_id,
+            "scene_key": page.script_scene.scene_key if page.script_scene is not None else None,
+            "character_keys": [
+                character.character_key
+                for character in sorted(page.visual_characters, key=lambda item: item.character_key)
+            ],
             "page_no": page.page_no,
             "summary": page.summary,
             "characters": page.characters,
@@ -925,6 +1090,48 @@ class ScriptService:
             "status": page.status.value,
             "created_at": page.created_at.isoformat(),
             "updated_at": page.updated_at.isoformat(),
+        }
+
+    @staticmethod
+    def _scene_to_payload(scene: ScriptScene) -> dict:
+        """把中心化场景设定转成 Agent 上下文和 API 可复用的结构。"""
+
+        return {
+            "id": scene.id,
+            "task_id": scene.task_id,
+            "scene_key": scene.scene_key,
+            "name": scene.name,
+            "location_type": scene.location_type,
+            "time_of_day": scene.time_of_day,
+            "lighting": scene.lighting,
+            "weather": scene.weather,
+            "environment_details": scene.environment_details,
+            "color_palette": scene.color_palette,
+            "visual_anchors": scene.visual_anchors,
+            "negative_constraints": scene.negative_constraints,
+            "created_at": scene.created_at.isoformat(),
+            "updated_at": scene.updated_at.isoformat(),
+        }
+
+    @staticmethod
+    def _character_to_payload(character: ScriptCharacter) -> dict:
+        """把中心化角色设定转成 Agent 上下文和 API 可复用的结构。"""
+
+        return {
+            "id": character.id,
+            "task_id": character.task_id,
+            "character_key": character.character_key,
+            "name": character.name,
+            "role": character.role,
+            "appearance": character.appearance,
+            "hairstyle": character.hairstyle,
+            "clothing_style": character.clothing_style,
+            "accessories": character.accessories,
+            "color_palette": character.color_palette,
+            "visual_anchors": character.visual_anchors,
+            "negative_constraints": character.negative_constraints,
+            "created_at": character.created_at.isoformat(),
+            "updated_at": character.updated_at.isoformat(),
         }
 
     @staticmethod

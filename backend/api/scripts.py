@@ -10,13 +10,17 @@ from backend.api.schemas.script import (
     GenerateSinglePageScriptRequest,
     ScriptPageListResponse,
     ScriptPageResponse,
+    ScriptCharacterListResponse,
+    ScriptCharacterResponse,
+    ScriptSceneListResponse,
+    ScriptSceneResponse,
     ScriptSectionListResponse,
     ScriptSectionResponse,
     ScriptTaskResponse,
     SinglePageScriptResponse,
     UpdatePageScriptRequest,
 )
-from backend.models.comic import ComicPage, ScriptGenerationTask, ScriptSection
+from backend.models.comic import ComicPage, ScriptCharacter, ScriptGenerationTask, ScriptScene, ScriptSection
 from backend.models.database import SessionLocal
 from backend.models.enums import ScriptGenerationMode, ScriptGenerationTaskStatus
 from backend.repositories.comic_repository import ComicRepository
@@ -72,6 +76,12 @@ def page_to_response(page: ComicPage) -> ScriptPageResponse:
         section_id=page.section_id,
         section_no=page.section.section_no if page.section is not None else None,
         task_id=page.section.task_id if page.section is not None else None,
+        scene_id=page.scene_id,
+        scene_key=page.script_scene.scene_key if page.script_scene is not None else None,
+        character_keys=[
+            character.character_key
+            for character in sorted(page.visual_characters, key=lambda item: item.character_key)
+        ],
         page_no=page.page_no,
         summary=page.summary,
         characters=page.characters,
@@ -84,6 +94,48 @@ def page_to_response(page: ComicPage) -> ScriptPageResponse:
         status=page.status.value,
         created_at=page.created_at,
         updated_at=page.updated_at,
+    )
+
+
+def scene_to_response(scene: ScriptScene) -> ScriptSceneResponse:
+    """把中心化场景设定 ORM 对象转换为 API 响应。"""
+
+    return ScriptSceneResponse(
+        id=scene.id,
+        task_id=scene.task_id,
+        scene_key=scene.scene_key,
+        name=scene.name,
+        location_type=scene.location_type,
+        time_of_day=scene.time_of_day,
+        lighting=scene.lighting,
+        weather=scene.weather,
+        environment_details=scene.environment_details,
+        color_palette=scene.color_palette,
+        visual_anchors=scene.visual_anchors,
+        negative_constraints=scene.negative_constraints,
+        created_at=scene.created_at,
+        updated_at=scene.updated_at,
+    )
+
+
+def character_to_response(character: ScriptCharacter) -> ScriptCharacterResponse:
+    """把中心化角色设定 ORM 对象转换为 API 响应。"""
+
+    return ScriptCharacterResponse(
+        id=character.id,
+        task_id=character.task_id,
+        character_key=character.character_key,
+        name=character.name,
+        role=character.role,
+        appearance=character.appearance,
+        hairstyle=character.hairstyle,
+        clothing_style=character.clothing_style,
+        accessories=character.accessories,
+        color_palette=character.color_palette,
+        visual_anchors=character.visual_anchors,
+        negative_constraints=character.negative_constraints,
+        created_at=character.created_at,
+        updated_at=character.updated_at,
     )
 
 
@@ -240,6 +292,34 @@ def list_script_task_sections(task_id: int, http_request: Request) -> ScriptSect
         except ValueError as exc:
             raise http_exception(exc, request_locale(http_request)) from exc
         return ScriptSectionListResponse(items=[section_to_response(section) for section in sections])
+
+
+@router.get("/tasks/{task_id}/scenes", response_model=ScriptSceneListResponse)
+def list_script_task_scenes(task_id: int, http_request: Request) -> ScriptSceneListResponse:
+    """读取脚本任务下的中心化场景设定。"""
+
+    with SessionLocal() as db_session:
+        service = ScriptService(ComicRepository(db_session))
+        try:
+            scenes = service.list_script_scenes(task_id=task_id)
+        except ValueError as exc:
+            raise http_exception(exc, request_locale(http_request)) from exc
+        return ScriptSceneListResponse(items=[scene_to_response(scene) for scene in scenes])
+
+
+@router.get("/tasks/{task_id}/characters", response_model=ScriptCharacterListResponse)
+def list_script_task_characters(task_id: int, http_request: Request) -> ScriptCharacterListResponse:
+    """读取脚本任务下的中心化角色设定。"""
+
+    with SessionLocal() as db_session:
+        service = ScriptService(ComicRepository(db_session))
+        try:
+            characters = service.list_script_characters(task_id=task_id)
+        except ValueError as exc:
+            raise http_exception(exc, request_locale(http_request)) from exc
+        return ScriptCharacterListResponse(
+            items=[character_to_response(character) for character in characters]
+        )
 
 
 @router.delete("/tasks/{task_id}/sections", response_model=ScriptSectionListResponse)

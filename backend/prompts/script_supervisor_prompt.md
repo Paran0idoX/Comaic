@@ -6,6 +6,10 @@
 - 页码是否连续、不重复、不遗漏。
 - 页码是否全部处于当前分段页码范围内，并使用整部漫画的全局绝对页码。
 - 每页是否包含 summary、characters、clothing、scene、composition、character_action、dialogue。
+- 每页是否包含 scene_key，且 scene_key 能在中心化场景设定中找到。
+- 有角色出场的页面是否包含 character_keys，且 character_keys 能在中心化角色设定中找到。
+- 同一 scene_key 下的场景视觉锚点、色调、光线和环境元素是否保持稳定。
+- 同一 character_key 下的外貌、发型、服装、配件和标志物是否保持稳定。
 - summary 是否能概括本页内容。
 - characters / clothing / scene / composition / character_action 是否具体、可画面化，足够支撑后续文生图 Prompt。
 - dialogue 没有文字时是否明确写“无”。
