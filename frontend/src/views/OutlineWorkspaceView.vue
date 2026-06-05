@@ -9,7 +9,12 @@ import ConversationPanel, {
 } from '@/components/outline/ConversationPanel.vue'
 import OutlinePanel, { type OutlineVersionItem } from '@/components/outline/OutlinePanel.vue'
 import { apiErrorMessage } from '@/api/errors'
-import { resolveOutlineSession, streamOutlineChat, type OutlineVersion } from '@/api/outline'
+import {
+  confirmOutlineVersion,
+  resolveOutlineSession,
+  streamOutlineChat,
+  type OutlineVersion,
+} from '@/api/outline'
 
 const { t } = useI18n()
 const route = useRoute()
@@ -17,6 +22,7 @@ const router = useRouter()
 
 const loading = ref(false)
 const streaming = ref(false)
+const confirming = ref(false)
 const threadId = ref('')
 const messages = ref<ConversationMessage[]>([])
 const versions = ref<OutlineVersionItem[]>([])
@@ -42,6 +48,8 @@ const toOutlineVersionItem = (version: OutlineVersion): OutlineVersionItem => ({
   outline: version.outline,
   status: version.status,
   created_at: version.created_at,
+  confirmed_at: version.confirmed_at,
+  characters: version.characters,
 })
 
 const loadOutlineSession = async () => {
@@ -77,6 +85,23 @@ const appendVersion = (version: OutlineVersion) => {
         status: 'archived',
       })),
   ].slice(0, 5)
+}
+
+const confirmCurrentOutline = async () => {
+  const currentVersion = versions.value[0]
+  if (!currentVersion || confirming.value) {
+    return
+  }
+  confirming.value = true
+  try {
+    const confirmed = await confirmOutlineVersion(currentVersion.version_id)
+    appendVersion(confirmed)
+    ElMessage.success(t('outline.panel.confirmSuccess'))
+  } catch (error) {
+    ElMessage.error(apiErrorMessage(error, t, t('outline.errors.confirm')))
+  } finally {
+    confirming.value = false
+  }
 }
 
 const updateMessage = (messageId: number, update: (message: ConversationMessage) => ConversationMessage) => {
@@ -188,6 +213,8 @@ onMounted(() => {
         :outline="currentOutline"
         :versions="versions"
         :loading="loading"
+        :confirming="confirming"
+        @confirm="confirmCurrentOutline"
       />
     </div>
   </section>

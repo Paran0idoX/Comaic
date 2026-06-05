@@ -111,6 +111,7 @@ class ScriptDeepAgent:
         total_pages: int,
         current_section: dict,
         previous_context: dict,
+        outline_characters: list[dict] | None = None,
         user_requirement: str = "",
         feedback: str = "",
     ) -> dict[str, Any]:
@@ -131,6 +132,7 @@ class ScriptDeepAgent:
                 total_pages=total_pages,
                 current_section=current_section,
                 previous_context=previous_context,
+                outline_characters=outline_characters or [],
                 user_requirement=user_requirement,
                 feedback=feedback,
             ),
@@ -172,6 +174,7 @@ class ScriptDeepAgent:
         total_pages: int,
         current_section: dict,
         previous_context: dict,
+        outline_characters: list[dict],
         user_requirement: str,
         feedback: str,
     ) -> str:
@@ -183,6 +186,8 @@ class ScriptDeepAgent:
                 f"总页数：{total_pages}",
                 "当前需要生成的已锁定分段：",
                 json.dumps(current_section, ensure_ascii=False),
+                "大纲阶段已确认的角色基准设定：",
+                json.dumps(outline_characters, ensure_ascii=False),
                 "先前已完成分段上下文：",
                 json.dumps(previous_context, ensure_ascii=False),
                 "漫画大纲：",

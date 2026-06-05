@@ -9,11 +9,13 @@
 - page_no 必须是整部漫画的全局绝对页码，不是当前分段内的相对页码。
 - 如果目标范围是第 31~50 页，只能输出 page_no=31 到 page_no=50，绝对不能输出 page_no=1。
 - 每页必须包含：section_no、page_no、scene_key、character_keys、summary、characters、clothing、scene、composition、character_action、dialogue、is_revision、revision_note。
-- 本轮输出还必须包含当前分段涉及的中心化场景设定 scenes，以及中心化角色设定 characters。
+- 本轮输出还必须包含当前分段涉及的中心化场景设定 scenes，以及当前分段角色细化设定 characters。
 - scene_key 是稳定场景标识；同一地点、同一时间段、同一视觉锚点的场景必须复用同一个 scene_key。
-- character_keys 是本页出场角色的稳定标识列表；同一角色跨页必须复用同一个 character_key。
+- character_keys 是本页出场角色的稳定标识列表；必须优先复用“大纲阶段已确认的角色基准设定”中的 character_key。
 - 中心化场景设定必须包含：scene_key、name、location_type、time_of_day、lighting、weather、environment_details、color_palette、visual_anchors、negative_constraints。
-- 中心化角色设定必须包含：character_key、name、role、appearance、hairstyle、clothing_style、accessories、color_palette、visual_anchors、negative_constraints。
+- 当前分段角色细化设定必须包含：character_key、name、section_role、current_hairstyle、current_clothing、current_accessories、current_state、emotion、temporary_changes、visual_anchors、negative_constraints。
+- 大纲角色基准设定中的名称、身份、背景、固定样貌、视觉锚点和禁止项不能被改写。
+- 大纲角色基准设定中的默认发型、默认服装、默认配件和默认色彩只是默认值；当前分段可以根据剧情写入 current_* 覆盖。
 - 首次生成时，输出目标页码范围内的全部页面。
 - 首次生成时 is_revision=false，revision_note=""。
 - 收到监督修订意见时，只输出监督意见明确点名需要修改的页码，禁止整段重写，禁止从该分段第一页重新开始。

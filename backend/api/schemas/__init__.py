@@ -2,6 +2,7 @@
 
 from backend.api.schemas.outline import (
     CreateOutlineSessionRequest,
+    OutlineCharacterResponse,
     OutlineMessageResponse,
     OutlineChatStreamRequest,
     OutlineSessionResponse,
@@ -25,6 +26,7 @@ from backend.api.schemas.script import (
 
 __all__ = [
     "CreateOutlineSessionRequest",
+    "OutlineCharacterResponse",
     "OutlineMessageResponse",
     "OutlineChatStreamRequest",
     "OutlineSessionResponse",

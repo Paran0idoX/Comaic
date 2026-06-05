@@ -187,11 +187,51 @@ class OutlineVersion(Base):
         default=OutlineVersionStatus.ACTIVE,
     )
     created_at: Mapped[datetime] = mapped_column(AwareUTCDateTime(), default=utc_now)
+    confirmed_at: Mapped[Optional[datetime]] = mapped_column(
+        AwareUTCDateTime(),
+        nullable=True,
+    )
 
     project: Mapped["ComicProject"] = relationship(back_populates="outline_versions")
     session: Mapped["Session"] = relationship(back_populates="outline_versions")
+    characters: Mapped[list["OutlineCharacter"]] = relationship(
+        back_populates="outline_version",
+        cascade="all, delete-orphan",
+    )
     script_tasks: Mapped[list["ScriptGenerationTask"]] = relationship(
         back_populates="outline_version",
+    )
+
+
+class OutlineCharacter(TimestampMixin, Base):
+    """大纲版本级角色基准设定，保存跨分段不应轻易改变的角色识别信息。"""
+
+    __tablename__ = "outline_character"
+    __table_args__ = (
+        UniqueConstraint("outline_version_id", "character_key", name="uq_outline_character_version_key"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    outline_version_id: Mapped[int] = mapped_column(
+        ForeignKey("outline_version.id"),
+        index=True,
+    )
+    character_key: Mapped[str] = mapped_column(String(120), index=True)
+    name: Mapped[str] = mapped_column(String(255), default="")
+    role: Mapped[str] = mapped_column(String(255), default="")
+    background: Mapped[str] = mapped_column(Text, default="")
+    appearance: Mapped[str] = mapped_column(Text, default="")
+    visual_anchors: Mapped[str] = mapped_column(Text, default="")
+    negative_constraints: Mapped[str] = mapped_column(Text, default="")
+    # 这些字段是脚本阶段可覆盖的默认造型，不作为永久锁死项。
+    default_hairstyle: Mapped[str] = mapped_column(Text, default="")
+    default_clothing: Mapped[str] = mapped_column(Text, default="")
+    default_accessories: Mapped[str] = mapped_column(Text, default="")
+    default_color_palette: Mapped[str] = mapped_column(Text, default="")
+
+    outline_version: Mapped["OutlineVersion"] = relationship(back_populates="characters")
+    section_characters: Mapped[list["ScriptCharacter"]] = relationship(
+        back_populates="outline_character",
     )
 
 
@@ -339,10 +379,6 @@ class ScriptGenerationTask(TimestampMixin, Base):
         back_populates="task",
         cascade="all, delete-orphan",
     )
-    characters: Mapped[list["ScriptCharacter"]] = relationship(
-        back_populates="task",
-        cascade="all, delete-orphan",
-    )
 
 
 class ScriptSection(TimestampMixin, Base):
@@ -360,6 +396,10 @@ class ScriptSection(TimestampMixin, Base):
 
     task: Mapped["ScriptGenerationTask"] = relationship(back_populates="sections")
     pages: Mapped[list["ComicPage"]] = relationship(back_populates="section")
+    characters: Mapped[list["ScriptCharacter"]] = relationship(
+        back_populates="section",
+        cascade="all, delete-orphan",
+    )
 
 
 class ScriptScene(TimestampMixin, Base):
@@ -388,27 +428,36 @@ class ScriptScene(TimestampMixin, Base):
 
 
 class ScriptCharacter(TimestampMixin, Base):
-    """脚本任务内的中心化角色设定，用于保持同一角色跨页视觉一致。"""
+    """脚本分段内的角色细化设定，用于表达该分段中的造型和状态变化。"""
 
     __tablename__ = "script_character"
     __table_args__ = (
-        UniqueConstraint("task_id", "character_key", name="uq_script_character_task_key"),
+        UniqueConstraint("section_id", "character_key", name="uq_script_character_section_key"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    task_id: Mapped[int] = mapped_column(ForeignKey("script_generation_task.id"), index=True)
+    section_id: Mapped[int] = mapped_column(ForeignKey("script_section.id"), index=True)
+    outline_character_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("outline_character.id"),
+        nullable=True,
+        index=True,
+    )
     character_key: Mapped[str] = mapped_column(String(120), index=True)
     name: Mapped[str] = mapped_column(String(255), default="")
-    role: Mapped[str] = mapped_column(String(255), default="")
-    appearance: Mapped[str] = mapped_column(Text, default="")
-    hairstyle: Mapped[str] = mapped_column(Text, default="")
-    clothing_style: Mapped[str] = mapped_column(Text, default="")
-    accessories: Mapped[str] = mapped_column(Text, default="")
-    color_palette: Mapped[str] = mapped_column(Text, default="")
+    section_role: Mapped[str] = mapped_column(String(255), default="")
+    current_hairstyle: Mapped[str] = mapped_column(Text, default="")
+    current_clothing: Mapped[str] = mapped_column(Text, default="")
+    current_accessories: Mapped[str] = mapped_column(Text, default="")
+    current_state: Mapped[str] = mapped_column(Text, default="")
+    emotion: Mapped[str] = mapped_column(Text, default="")
+    temporary_changes: Mapped[str] = mapped_column(Text, default="")
     visual_anchors: Mapped[str] = mapped_column(Text, default="")
     negative_constraints: Mapped[str] = mapped_column(Text, default="")
 
-    task: Mapped["ScriptGenerationTask"] = relationship(back_populates="characters")
+    section: Mapped["ScriptSection"] = relationship(back_populates="characters")
+    outline_character: Mapped[Optional["OutlineCharacter"]] = relationship(
+        back_populates="section_characters",
+    )
     pages: Mapped[list["ComicPage"]] = relationship(
         secondary=comic_page_character_table,
         back_populates="visual_characters",
