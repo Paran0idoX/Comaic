@@ -161,8 +161,10 @@ Open the “Outline Workspace”:
 2. Create or reuse an outline session.
 3. Chat with the Agent to refine genre, protagonist, setting, conflict, ending direction, and other story information.
 4. After each turn, if the Agent decides the outline should be updated, a new outline version is saved on the right.
+5. Review the “Character Baseline” area for names, roles, backgrounds, fixed appearance, and default looks.
+6. Click “Confirm Outline” to confirm both the outline version and its character baseline.
 
-Outline versions are used as input for page script generation.
+Only confirmed outline versions can be used for page script generation. The outline-stage character baseline stores stable identity details; hairstyle, clothing, accessories, and colors are defaults that can be overridden later by script sections.
 
 ### 3. Generate page scripts
 
@@ -182,6 +184,8 @@ The system first creates story pacing sections, then generates page scripts sect
 - Composition
 - Character action
 - Dialogue
+
+During script generation, each section refines character state for that section, such as current clothing, hairstyle, emotion, physical state, and temporary changes. Image prompt generation combines the outline character baseline, section-level character details, and the page script.
 
 After generation, you can view, edit, clear, or delete page scripts. Batch generation can be paused, and generated content is kept after pausing.
 

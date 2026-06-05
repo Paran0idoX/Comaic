@@ -4,6 +4,7 @@ from backend.i18n.errors import app_error_from_exception
 from backend.models.comic import (
     ComicPage,
     ComicProject,
+    OutlineCharacter,
     OutlineVersion,
     ScriptCharacter,
     ScriptGenerationTask,
@@ -192,8 +193,14 @@ class ScriptService:
                 user_requirement=user_requirement or "",
             )
             page_payload = self._find_page_payload(result.get("pages", []), page_no)
+            section = self._create_single_page_section(
+                task_id=task.id,
+                page_no=page_no,
+            )
             visual_settings = self._save_visual_settings(
                 task_id=task.id,
+                section_id=section.id,
+                outline_version_id=outline_version.id,
                 scenes=result.get("scenes", []),
                 characters=result.get("characters", []),
                 pages=[page_payload],
@@ -201,10 +208,7 @@ class ScriptService:
             page = self.repository.upsert_page_script(
                 project_id=project_id,
                 page_no=page_no,
-                section_id=self._create_single_page_section(
-                    task_id=task.id,
-                    page_no=page_no,
-                ).id,
+                section_id=section.id,
                 scene_id=visual_settings["scene_ids_by_key"][page_payload["scene_key"]],
                 character_ids=[
                     visual_settings["character_ids_by_key"][key]
@@ -418,6 +422,7 @@ class ScriptService:
                             task_id=task.id,
                             current_section_no=section.section_no,
                         ),
+                        outline_characters=self._outline_characters_context(outline_version.id),
                         user_requirement=user_requirement,
                         feedback=feedback,
                     )
@@ -460,6 +465,8 @@ class ScriptService:
 
                 visual_settings = self._save_visual_settings(
                     task_id=task.id,
+                    section_id=section.id,
+                    outline_version_id=outline_version.id,
                     scenes=result.get("scenes", []),
                     characters=result.get("characters", []),
                     pages=normalized_pages,
@@ -527,11 +534,15 @@ class ScriptService:
                 raise ValueError(f"OutlineVersion not found: {outline_version_id}")
             if outline_version.session.project_id != project_id:
                 raise ValueError("OutlineVersion does not belong to project.")
+            if outline_version.confirmed_at is None:
+                raise ValueError("OutlineVersion is not confirmed.")
             return outline_version
 
         outline_version = self.repository.get_active_outline_version_for_project(project_id)
         if outline_version is None:
             raise ValueError(f"Active outline not found for project: {project_id}")
+        if outline_version.confirmed_at is None:
+            raise ValueError("OutlineVersion is not confirmed.")
         return outline_version
 
     def _resolve_manual_section(
@@ -718,21 +729,22 @@ class ScriptService:
 
     @staticmethod
     def _normalize_character_payload(raw_character: dict) -> dict:
-        """规范化中心化角色设定，确保同一角色跨页视觉锚点稳定。"""
+        """规范化分段角色细化设定，允许发型服装在当前分段内覆盖默认值。"""
 
         payload = {
             "character_key": str(raw_character.get("character_key", "")).strip(),
             "name": str(raw_character.get("name", "")).strip(),
-            "role": str(raw_character.get("role", "")).strip(),
-            "appearance": str(raw_character.get("appearance", "")).strip(),
-            "hairstyle": str(raw_character.get("hairstyle", "")).strip(),
-            "clothing_style": str(raw_character.get("clothing_style", "")).strip(),
-            "accessories": str(raw_character.get("accessories", "")).strip(),
-            "color_palette": str(raw_character.get("color_palette", "")).strip(),
+            "section_role": str(raw_character.get("section_role", "")).strip(),
+            "current_hairstyle": str(raw_character.get("current_hairstyle", "")).strip(),
+            "current_clothing": str(raw_character.get("current_clothing", "")).strip(),
+            "current_accessories": str(raw_character.get("current_accessories", "")).strip(),
+            "current_state": str(raw_character.get("current_state", "")).strip(),
+            "emotion": str(raw_character.get("emotion", "")).strip(),
+            "temporary_changes": str(raw_character.get("temporary_changes", "")).strip() or "无",
             "visual_anchors": str(raw_character.get("visual_anchors", "")).strip(),
             "negative_constraints": str(raw_character.get("negative_constraints", "")).strip(),
         }
-        for field_name in ("character_key", "name", "appearance", "visual_anchors"):
+        for field_name in ("character_key", "name", "section_role", "visual_anchors"):
             if not payload[field_name]:
                 raise ValueError(f"character setting missing required field: {field_name}")
         return payload
@@ -741,11 +753,13 @@ class ScriptService:
         self,
         *,
         task_id: int,
+        section_id: int,
+        outline_version_id: int,
         scenes: list,
         characters: list,
         pages: list[dict],
     ) -> dict:
-        """保存场景/角色圣经，并返回页面绑定所需的 key 到 id 映射。"""
+        """保存场景圣经和当前分段角色设定，并返回页面绑定所需的 key 到 id 映射。"""
 
         scene_payloads = [
             self._normalize_scene_payload(scene)
@@ -759,6 +773,10 @@ class ScriptService:
         ]
         scene_keys = {scene["scene_key"] for scene in scene_payloads}
         character_keys = {character["character_key"] for character in character_payloads}
+        outline_characters_by_key = {
+            character.character_key: character
+            for character in self.repository.list_outline_characters(outline_version_id)
+        }
         for page in pages:
             scene_key = str(page.get("scene_key", "")).strip()
             if not scene_key:
@@ -785,7 +803,13 @@ class ScriptService:
             for scene in scene_payloads
         }
         character_ids_by_key = {
-            character["character_key"]: self.repository.upsert_script_character(
+            character["character_key"]: self.repository.upsert_script_section_character(
+                section_id=section_id,
+                outline_character_id=(
+                    outline_characters_by_key[character["character_key"]].id
+                    if character["character_key"] in outline_characters_by_key
+                    else None
+                ),
                 task_id=task_id,
                 **character,
             ).id
@@ -1036,6 +1060,14 @@ class ScriptService:
             ],
         }
 
+    def _outline_characters_context(self, outline_version_id: int) -> list[dict]:
+        """读取已确认大纲版本下的角色基准，供分段 Agent 细化当前分段状态。"""
+
+        return [
+            self._outline_character_to_payload(character)
+            for character in self.repository.list_outline_characters(outline_version_id)
+        ]
+
     @staticmethod
     def _script_excerpt(text: str, *, limit: int) -> str:
         """压缩历史脚本，给后续分段提供衔接线索但控制上下文长度。"""
@@ -1115,23 +1147,51 @@ class ScriptService:
 
     @staticmethod
     def _character_to_payload(character: ScriptCharacter) -> dict:
-        """把中心化角色设定转成 Agent 上下文和 API 可复用的结构。"""
+        """把分段角色设定转成 Agent 上下文和 API 可复用的结构。"""
 
         return {
             "id": character.id,
-            "task_id": character.task_id,
+            "section_id": character.section_id,
+            "task_id": character.section.task_id if character.section is not None else None,
+            "outline_character_id": character.outline_character_id,
+            "character_key": character.character_key,
+            "name": character.name,
+            "section_role": character.section_role,
+            "current_hairstyle": character.current_hairstyle,
+            "current_clothing": character.current_clothing,
+            "current_accessories": character.current_accessories,
+            "current_state": character.current_state,
+            "emotion": character.emotion,
+            "temporary_changes": character.temporary_changes,
+            "visual_anchors": character.visual_anchors,
+            "negative_constraints": character.negative_constraints,
+            "outline_character": (
+                ScriptService._outline_character_to_payload(character.outline_character)
+                if character.outline_character is not None
+                else None
+            ),
+            "created_at": character.created_at.isoformat(),
+            "updated_at": character.updated_at.isoformat(),
+        }
+
+    @staticmethod
+    def _outline_character_to_payload(character: OutlineCharacter) -> dict:
+        """把大纲角色基准设定转成 Agent 上下文字典。"""
+
+        return {
+            "id": character.id,
+            "outline_version_id": character.outline_version_id,
             "character_key": character.character_key,
             "name": character.name,
             "role": character.role,
+            "background": character.background,
             "appearance": character.appearance,
-            "hairstyle": character.hairstyle,
-            "clothing_style": character.clothing_style,
-            "accessories": character.accessories,
-            "color_palette": character.color_palette,
             "visual_anchors": character.visual_anchors,
             "negative_constraints": character.negative_constraints,
-            "created_at": character.created_at.isoformat(),
-            "updated_at": character.updated_at.isoformat(),
+            "default_hairstyle": character.default_hairstyle,
+            "default_clothing": character.default_clothing,
+            "default_accessories": character.default_accessories,
+            "default_color_palette": character.default_color_palette,
         }
 
     @staticmethod
