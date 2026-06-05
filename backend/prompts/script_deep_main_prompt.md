@@ -14,11 +14,16 @@
 - page_no 必须是整部漫画的全局绝对页码，不是当前分段里的相对页码。
 - 如果当前分段范围是第 31~50 页，只能输出 page_no=31 到 page_no=50，绝对不能输出 page_no=1。
 - 每个 page_no 代表一整张漫画页图片，不是页内多个分镜。禁止在页面脚本中写“分镜1/分镜2/镜头1/镜头2/Panel/格子/第 N 格”等页内拆分。
-- 每页必须输出 summary、characters、clothing、scene、composition、character_action、dialogue。
+- 每页必须输出 scene_key、character_keys、summary、characters、clothing、scene、composition、character_action、dialogue。
+- 最终输出必须包含 scenes 和 characters：
+  - scenes 是当前分段涉及的中心化场景设定，scene_key 必须稳定复用。
+  - characters 是当前分段涉及的中心化角色设定，character_key 必须稳定复用。
+- 同一 scene_key 下的环境细节、色调、光线和视觉锚点必须保持一致。
+- 同一 character_key 下的外貌、发型、服装、配件和视觉锚点必须保持一致。
 - composition 描述整页统一构图、主体、视角、景别和空间关系。
 - character_action 精准描述本页人物核心动作、姿态、交互和动态。
 - dialogue 只写这一整页需要出现的少量文字；没有文字时写“无”。
-- 你的最终输出受 response_format 约束，必须通过 structured_response 返回，只能包含 reviews 和 pages。
+- 你的最终输出受 response_format 约束，必须通过 structured_response 返回，只能包含 scenes、characters、reviews 和 pages。
 - 不要输出自然语言解释、Markdown、代码块或额外说明。
 - 不要把结果写入 /final_output.json 或任何文件；后端只读取 structured_response。
 
@@ -32,10 +37,40 @@
       "revision_suggestions": []
     }
   ],
+  "scenes": [
+    {
+      "scene_key": "old_apartment_night",
+      "name": "旧公寓夜晚客厅",
+      "location_type": "室内客厅",
+      "time_of_day": "夜晚",
+      "lighting": "昏黄吊灯和窗外冷色月光混合",
+      "weather": "窗外小雨",
+      "environment_details": "旧木地板、低矮茶几、斑驳墙皮、绿色旧沙发",
+      "color_palette": "暗绿色、旧木棕、冷蓝月光",
+      "visual_anchors": "绿色旧沙发、斑驳墙皮、低矮茶几必须反复出现",
+      "negative_constraints": "不要变成现代豪宅，不要出现明亮阳光"
+    }
+  ],
+  "characters": [
+    {
+      "character_key": "heroine",
+      "name": "女主角",
+      "role": "主角",
+      "appearance": "年轻女性，瘦削，眼神敏感",
+      "hairstyle": "黑色齐肩短发",
+      "clothing_style": "深色连帽外套和浅色内搭",
+      "accessories": "银色旧耳机",
+      "color_palette": "深灰、黑色、少量银色",
+      "visual_anchors": "黑色齐肩短发、银色旧耳机必须保持",
+      "negative_constraints": "不要改成长发，不要移除耳机"
+    }
+  ],
   "pages": [
     {
       "section_no": 1,
       "page_no": 1,
+      "scene_key": "old_apartment_night",
+      "character_keys": ["heroine"],
       "summary": "本页内容摘要",
       "characters": "人物描述",
       "clothing": "服装描述",

@@ -63,6 +63,9 @@ class ScriptPageResponse(BaseModel):
     section_id: int | None = None
     section_no: int | None = None
     task_id: int | None = None
+    scene_id: int | None = None
+    scene_key: str | None = None
+    character_keys: list[str] = Field(default_factory=list)
     page_no: int
     summary: str | None
     characters: str | None
@@ -135,3 +138,53 @@ class ScriptSectionListResponse(BaseModel):
     """脚本任务分段列表响应体。"""
 
     items: list[ScriptSectionResponse]
+
+
+class ScriptSceneResponse(BaseModel):
+    """脚本任务内的中心化场景设定响应体。"""
+
+    id: int
+    task_id: int
+    scene_key: str
+    name: str
+    location_type: str
+    time_of_day: str
+    lighting: str
+    weather: str
+    environment_details: str
+    color_palette: str
+    visual_anchors: str
+    negative_constraints: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class ScriptSceneListResponse(BaseModel):
+    """脚本任务场景设定列表响应体。"""
+
+    items: list[ScriptSceneResponse]
+
+
+class ScriptCharacterResponse(BaseModel):
+    """脚本任务内的中心化角色设定响应体。"""
+
+    id: int
+    task_id: int
+    character_key: str
+    name: str
+    role: str
+    appearance: str
+    hairstyle: str
+    clothing_style: str
+    accessories: str
+    color_palette: str
+    visual_anchors: str
+    negative_constraints: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class ScriptCharacterListResponse(BaseModel):
+    """脚本任务角色设定列表响应体。"""
+
+    items: list[ScriptCharacterResponse]

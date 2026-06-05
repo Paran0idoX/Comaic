@@ -56,3 +56,9 @@ class ImagePromptPresetKind(str, Enum):
 
     SCRIPT_TO_IMAGE_SYSTEM_PROMPT = "script_to_image_system_prompt"
     NEGATIVE_PROMPT = "negative_prompt"
+
+
+class LLMProvider(str, Enum):
+    """LLM 服务商类型；MVP 先统一按 OpenAI 兼容接口处理。"""
+
+    OPENAI_COMPATIBLE = "openai_compatible"

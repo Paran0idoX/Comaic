@@ -6,6 +6,9 @@ export type ScriptPage = {
   section_id: number | null
   section_no: number | null
   task_id: number | null
+  scene_id: number | null
+  scene_key: string | null
+  character_keys: string[]
   page_no: number
   summary: string | null
   characters: string | null
@@ -39,6 +42,40 @@ export type ScriptSection = {
 
 export type ScriptSectionListResponse = {
   items: ScriptSection[]
+}
+
+export type ScriptScene = {
+  id: number
+  task_id: number
+  scene_key: string
+  name: string
+  location_type: string
+  time_of_day: string
+  lighting: string
+  weather: string
+  environment_details: string
+  color_palette: string
+  visual_anchors: string
+  negative_constraints: string
+  created_at: string
+  updated_at: string
+}
+
+export type ScriptCharacter = {
+  id: number
+  task_id: number
+  character_key: string
+  name: string
+  role: string
+  appearance: string
+  hairstyle: string
+  clothing_style: string
+  accessories: string
+  color_palette: string
+  visual_anchors: string
+  negative_constraints: string
+  created_at: string
+  updated_at: string
 }
 
 export type GenerateSinglePageScriptPayload = {
@@ -171,6 +208,16 @@ export const listScriptTaskPages = async (taskId: number): Promise<ScriptPage[]>
 
 export const listScriptTaskSections = async (taskId: number): Promise<ScriptSection[]> => {
   const result = await requestJson<ScriptSectionListResponse>(`/api/scripts/tasks/${taskId}/sections`)
+  return result.items
+}
+
+export const listScriptTaskScenes = async (taskId: number): Promise<ScriptScene[]> => {
+  const result = await requestJson<{ items: ScriptScene[] }>(`/api/scripts/tasks/${taskId}/scenes`)
+  return result.items
+}
+
+export const listScriptTaskCharacters = async (taskId: number): Promise<ScriptCharacter[]> => {
+  const result = await requestJson<{ items: ScriptCharacter[] }>(`/api/scripts/tasks/${taskId}/characters`)
   return result.items
 }
 
