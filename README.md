@@ -91,12 +91,13 @@ Edit `.env`:
 ```env
 DEEPSEEK_MODEL=deepseek-v4-flash
 DEEPSEEK_API_KEY=your_deepseek_api_key
+DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
 
 DATABASE_URL=sqlite:///data/comaic.sqlite3
 COMFYUI_BASE_URL=http://127.0.0.1:8188
 ```
 
-Do not commit your real `.env` file.
+Do not commit your real `.env` file. On first startup, comaic uses `.env` to initialize the default model configuration. After startup, you can also use the top-right “Settings” page to maintain multiple OpenAI-compatible APIs, API keys, and multiple model names under each API. New Agent calls use the active SQLite configuration and its default model first.
 
 ### 6. Start ComfyUI
 
@@ -138,6 +139,19 @@ npm run dev
 Open the “Projects” page, click “New Project”, and enter a project title.
 
 A project is the creative container. Outlines, scripts, image prompts, and image generation tasks are all associated with a project.
+
+### 1.1 Configure the model
+
+Click the top-right “Settings” button:
+
+1. Enter a configuration name and the OpenAI-compatible API Base URL.
+2. Enter one or more model names.
+3. Enter the API key.
+4. Optionally click “Test Connection”.
+5. Choose the default model and click “Save Settings”.
+6. If you have multiple API configurations, click “Use This Config” to switch the active one.
+
+For security, the backend never returns the saved API key to the frontend. The key is stored in the local SQLite database, so do not commit the `data/` directory.
 
 ### 2. Generate an outline
 
@@ -326,4 +340,3 @@ comaic is currently an MVP. The core pipeline works, and there is plenty of room
 - Permissions, project export, and deployment improvements
 
 You are welcome to use this project as a base for further experiments in AI-assisted comic creation.
-

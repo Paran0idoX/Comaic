@@ -3,7 +3,18 @@ from typing import Optional
 
 from enum import Enum
 
-from sqlalchemy import Boolean, Enum as SqlEnum, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    Boolean,
+    Column,
+    Enum as SqlEnum,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Table,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.models.database import Base
@@ -11,6 +22,7 @@ from backend.models.enums import (
     ComicPageStatus,
     GenerationTaskStatus,
     ImagePromptPresetKind,
+    LLMProvider,
     OutlineVersionStatus,
     ScriptGenerationMode,
     ScriptGenerationTaskStatus,
@@ -42,6 +54,14 @@ class TimestampMixin:
         default=utc_now,
         onupdate=utc_now,
     )
+
+
+comic_page_character_table = Table(
+    "comic_page_character",
+    Base.metadata,
+    Column("page_id", ForeignKey("comic_page.id"), primary_key=True),
+    Column("character_id", ForeignKey("script_character.id"), primary_key=True),
+)
 
 
 class ComicProject(TimestampMixin, Base):
@@ -111,6 +131,26 @@ class ComfyWorkflowPreset(TimestampMixin, Base):
     seed_input_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
 
+class LLMConfig(TimestampMixin, Base):
+    """全局 LLM 配置表：一组 OpenAI 兼容 API Key 下维护多个模型名。"""
+
+    __tablename__ = "llm_config"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), default="")
+    provider: Mapped[LLMProvider] = enum_column(
+        LLMProvider,
+        default=LLMProvider.OPENAI_COMPATIBLE,
+    )
+    base_url: Mapped[str] = mapped_column(String(1024))
+    # JSON 字符串数组，例如 ["deepseek-v4-flash", "deepseek-chat"]。
+    model_names: Mapped[str] = mapped_column(Text, default="[]")
+    default_model: Mapped[str] = mapped_column(String(255))
+    # 本地 MVP 直接保存在 SQLite；API 响应永远不返回明文。
+    api_key: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+
+
 class Session(TimestampMixin, Base):
     """通用会话表：用 purpose 区分大纲、脚本等不同业务场景。"""
 
@@ -167,6 +207,11 @@ class ComicPage(TimestampMixin, Base):
         nullable=True,
         index=True,
     )
+    scene_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("script_scene.id"),
+        nullable=True,
+        index=True,
+    )
     page_no: Mapped[int] = mapped_column(Integer)
     summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     characters: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -188,6 +233,12 @@ class ComicPage(TimestampMixin, Base):
 
     project: Mapped["ComicProject"] = relationship(back_populates="pages")
     section: Mapped[Optional["ScriptSection"]] = relationship(back_populates="pages")
+    script_scene: Mapped[Optional["ScriptScene"]] = relationship(back_populates="pages")
+    # visual_characters 是角色视觉设定绑定；characters 字段仍保存本页局部人物描述文本。
+    visual_characters: Mapped[list["ScriptCharacter"]] = relationship(
+        secondary=comic_page_character_table,
+        back_populates="pages",
+    )
     images: Mapped[list["ComicImage"]] = relationship(
         back_populates="page",
         cascade="all, delete-orphan",
@@ -284,6 +335,14 @@ class ScriptGenerationTask(TimestampMixin, Base):
         back_populates="task",
         cascade="all, delete-orphan",
     )
+    scenes: Mapped[list["ScriptScene"]] = relationship(
+        back_populates="task",
+        cascade="all, delete-orphan",
+    )
+    characters: Mapped[list["ScriptCharacter"]] = relationship(
+        back_populates="task",
+        cascade="all, delete-orphan",
+    )
 
 
 class ScriptSection(TimestampMixin, Base):
@@ -301,3 +360,56 @@ class ScriptSection(TimestampMixin, Base):
 
     task: Mapped["ScriptGenerationTask"] = relationship(back_populates="sections")
     pages: Mapped[list["ComicPage"]] = relationship(back_populates="section")
+
+
+class ScriptScene(TimestampMixin, Base):
+    """脚本任务内的中心化场景设定，用于保持同一场景跨页视觉一致。"""
+
+    __tablename__ = "script_scene"
+    __table_args__ = (
+        UniqueConstraint("task_id", "scene_key", name="uq_script_scene_task_key"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("script_generation_task.id"), index=True)
+    scene_key: Mapped[str] = mapped_column(String(120), index=True)
+    name: Mapped[str] = mapped_column(String(255), default="")
+    location_type: Mapped[str] = mapped_column(String(255), default="")
+    time_of_day: Mapped[str] = mapped_column(String(255), default="")
+    lighting: Mapped[str] = mapped_column(Text, default="")
+    weather: Mapped[str] = mapped_column(String(255), default="")
+    environment_details: Mapped[str] = mapped_column(Text, default="")
+    color_palette: Mapped[str] = mapped_column(Text, default="")
+    visual_anchors: Mapped[str] = mapped_column(Text, default="")
+    negative_constraints: Mapped[str] = mapped_column(Text, default="")
+
+    task: Mapped["ScriptGenerationTask"] = relationship(back_populates="scenes")
+    pages: Mapped[list["ComicPage"]] = relationship(back_populates="script_scene")
+
+
+class ScriptCharacter(TimestampMixin, Base):
+    """脚本任务内的中心化角色设定，用于保持同一角色跨页视觉一致。"""
+
+    __tablename__ = "script_character"
+    __table_args__ = (
+        UniqueConstraint("task_id", "character_key", name="uq_script_character_task_key"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("script_generation_task.id"), index=True)
+    character_key: Mapped[str] = mapped_column(String(120), index=True)
+    name: Mapped[str] = mapped_column(String(255), default="")
+    role: Mapped[str] = mapped_column(String(255), default="")
+    appearance: Mapped[str] = mapped_column(Text, default="")
+    hairstyle: Mapped[str] = mapped_column(Text, default="")
+    clothing_style: Mapped[str] = mapped_column(Text, default="")
+    accessories: Mapped[str] = mapped_column(Text, default="")
+    color_palette: Mapped[str] = mapped_column(Text, default="")
+    visual_anchors: Mapped[str] = mapped_column(Text, default="")
+    negative_constraints: Mapped[str] = mapped_column(Text, default="")
+
+    task: Mapped["ScriptGenerationTask"] = relationship(back_populates="characters")
+    pages: Mapped[list["ComicPage"]] = relationship(
+        secondary=comic_page_character_table,
+        back_populates="visual_characters",
+    )
