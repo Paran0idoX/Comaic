@@ -15,12 +15,16 @@ import {
   deleteScriptTaskSections,
   listProjectScriptTasks,
   listScriptTaskPages,
+  listScriptTaskCharacters,
+  listScriptTaskScenes,
   listScriptTaskSections,
   suspendScriptTask,
   streamBatchScriptGeneration,
   streamContinueScriptGeneration,
   updatePageScript,
   type ScriptPage,
+  type ScriptCharacter,
+  type ScriptScene,
   type ScriptSection,
   type ScriptTask,
 } from '@/api/scripts'
@@ -47,6 +51,8 @@ const projects = ref<Project[]>([])
 const outlineVersions = ref<OutlineVersion[]>([])
 const scriptTasks = ref<ScriptTask[]>([])
 const sections = ref<ScriptSection[]>([])
+const scenes = ref<ScriptScene[]>([])
+const visualCharacters = ref<ScriptCharacter[]>([])
 const pages = ref<ScriptPage[]>([])
 const selectedProjectId = ref<number | null>(null)
 const selectedOutlineVersionId = ref<number | null>(null)
@@ -76,6 +82,7 @@ const loadingProjects = ref(false)
 const loadingOutlineVersions = ref(false)
 const loadingTasks = ref(false)
 const loadingSections = ref(false)
+const loadingVisualSettings = ref(false)
 const loadingPages = ref(false)
 const generatingBatch = ref(false)
 const suspendingBatch = ref(false)
@@ -435,6 +442,28 @@ const loadSections = async () => {
   }
 }
 
+const loadVisualSettings = async () => {
+  if (selectedTaskId.value === null) {
+    scenes.value = []
+    visualCharacters.value = []
+    return
+  }
+
+  loadingVisualSettings.value = true
+  try {
+    const [sceneItems, characterItems] = await Promise.all([
+      listScriptTaskScenes(selectedTaskId.value),
+      listScriptTaskCharacters(selectedTaskId.value),
+    ])
+    scenes.value = sceneItems
+    visualCharacters.value = characterItems
+  } catch {
+    ElMessage.error(t('scripts.errors.loadVisualSettings'))
+  } finally {
+    loadingVisualSettings.value = false
+  }
+}
+
 const loadScriptTasks = async (preferredTaskId?: number | null) => {
   if (selectedProjectId.value === null || selectedOutlineVersionId.value === null) {
     scriptTasks.value = []
@@ -588,11 +617,13 @@ const generateBatch = async () => {
               upsertPageInList(page)
             }
             void loadSections()
+            void loadVisualSettings()
           }
           if (event === 'done') {
             void loadScriptTasks(currentTaskId.value)
             void loadPages()
             void loadSections()
+            void loadVisualSettings()
             ElMessage.success(t('scripts.messages.batchSuccess'))
           }
           if (event === 'suspended') {
@@ -639,11 +670,13 @@ const continueBatch = async () => {
               upsertPageInList(page)
             }
             void loadSections()
+            void loadVisualSettings()
           }
           if (event === 'done') {
             void loadScriptTasks(selectedTaskId.value)
             void loadPages()
             void loadSections()
+            void loadVisualSettings()
             ElMessage.success(t('scripts.messages.continueSuccess'))
           }
           if (event === 'suspended') {
@@ -687,6 +720,7 @@ const suspendBatch = async () => {
 const refreshCurrentProject = async () => {
   await loadScriptTasks(selectedTaskId.value)
   await loadSections()
+  await loadVisualSettings()
   await loadPages()
   addProgressEvent('refreshed', { message: t('scripts.events.refreshed') })
 }
@@ -827,12 +861,15 @@ const deleteCurrentTaskSections = async () => {
     await deleteScriptTaskSections(taskId)
     pages.value = []
     sections.value = []
+    scenes.value = []
+    visualCharacters.value = []
     selectedPage.value = selectedPage.value?.task_id === taskId ? null : selectedPage.value
     if (selectedPage.value === null) {
       detailVisible.value = false
     }
     await loadScriptTasks(taskId)
     await loadSections()
+    await loadVisualSettings()
     ElMessage.success(t('scripts.messages.taskSectionsDeleted'))
   } catch (error) {
     if (error !== 'cancel' && error !== 'close') {
@@ -859,6 +896,8 @@ watch(selectedProjectId, async (projectId) => {
   if (projectId === null) {
     pages.value = []
     sections.value = []
+    scenes.value = []
+    visualCharacters.value = []
     scriptTasks.value = []
     outlineVersions.value = []
     selectedOutlineVersionId.value = null
@@ -880,6 +919,8 @@ watch(selectedOutlineVersionId, async () => {
   selectedSectionNo.value = null
   pages.value = []
   sections.value = []
+  scenes.value = []
+  visualCharacters.value = []
   await loadScriptTasks()
   syncProjectQuery()
 })
@@ -891,6 +932,7 @@ watch(selectedTaskId, async (taskId) => {
     totalPages.value = currentTask.value.total_pages
   }
   await loadSections()
+  await loadVisualSettings()
   await loadPages()
   syncProjectQuery()
 })
@@ -1145,6 +1187,46 @@ onActivated(async () => {
           </div>
         </section>
 
+        <section class="panel visual-settings">
+          <div class="panel__heading">
+            <div class="panel__heading-main">
+              <el-icon><View /></el-icon>
+              <div>
+                <h2>{{ t('scripts.visual.title') }}</h2>
+                <p>{{ t('scripts.visual.description') }}</p>
+              </div>
+            </div>
+          </div>
+          <div v-loading="loadingVisualSettings" class="visual-settings__grid">
+            <div class="visual-settings__column">
+              <h3>{{ t('scripts.visual.scenes') }}</h3>
+              <el-empty v-if="scenes.length === 0" :description="t('scripts.visual.emptyScenes')" :image-size="72" />
+              <template v-else>
+                <article v-for="scene in scenes" :key="scene.id" class="visual-card">
+                  <strong>{{ scene.scene_key }} · {{ scene.name }}</strong>
+                  <p>{{ scene.environment_details }}</p>
+                  <small>{{ scene.visual_anchors }}</small>
+                </article>
+              </template>
+            </div>
+            <div class="visual-settings__column">
+              <h3>{{ t('scripts.visual.characters') }}</h3>
+              <el-empty
+                v-if="visualCharacters.length === 0"
+                :description="t('scripts.visual.emptyCharacters')"
+                :image-size="72"
+              />
+              <template v-else>
+                <article v-for="character in visualCharacters" :key="character.id" class="visual-card">
+                  <strong>{{ character.character_key }} · {{ character.name }}</strong>
+                  <p>{{ character.appearance }}</p>
+                  <small>{{ character.visual_anchors }}</small>
+                </article>
+              </template>
+            </div>
+          </div>
+        </section>
+
         <section class="panel script-results">
           <div class="panel__heading script-results__heading">
             <div class="panel__heading-main">
@@ -1263,6 +1345,14 @@ onActivated(async () => {
         <section class="script-detail__block">
           <strong>{{ t('scripts.fields.scene') }}</strong>
           <p>{{ selectedPage.scene }}</p>
+        </section>
+        <section class="script-detail__block">
+          <strong>{{ t('scripts.visual.sceneKey') }}</strong>
+          <p>{{ selectedPage.scene_key || '-' }}</p>
+        </section>
+        <section class="script-detail__block">
+          <strong>{{ t('scripts.visual.characterKeys') }}</strong>
+          <p>{{ selectedPage.character_keys.join(', ') || '-' }}</p>
         </section>
         <section class="script-detail__block">
           <strong>{{ t('scripts.fields.composition') }}</strong>
@@ -1438,6 +1528,41 @@ onActivated(async () => {
 .script-config__actions .el-button {
   width: 100%;
   margin-left: 0;
+}
+
+.visual-settings__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  padding: 18px 22px 22px;
+}
+
+.visual-settings__column {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.visual-settings__column h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.visual-card {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.visual-card p,
+.visual-card small {
+  margin: 0;
+  color: var(--color-muted);
+  line-height: 1.45;
 }
 
 .script-task-progress {

@@ -6,12 +6,14 @@ from backend.models.comic import (
     ComicProject,
     ComfyWorkflowPreset,
     GenerationTask,
+    LLMConfig,
     OutlineVersion,
     Session,
 )
 from backend.models.enums import (
     ComicPageStatus,
     GenerationTaskStatus,
+    LLMProvider,
     OutlineVersionStatus,
     SessionPurpose,
 )
@@ -22,10 +24,12 @@ __all__ = [
     "ComicProject",
     "ComfyWorkflowPreset",
     "GenerationTask",
+    "LLMConfig",
     "OutlineVersion",
     "Session",
     "ComicPageStatus",
     "GenerationTaskStatus",
+    "LLMProvider",
     "OutlineVersionStatus",
     "SessionPurpose",
 ]

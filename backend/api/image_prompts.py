@@ -61,6 +61,8 @@ def generation_item_to_response(item: ImagePromptGenerateItem) -> ImagePromptGen
         page_no=item.page_no,
         image_prompt=item.image_prompt,
         status=item.status,
+        scene_key=item.scene_key,
+        character_keys=item.character_keys or [],
         error=item.error,
         error_code=item.error_code,
     )

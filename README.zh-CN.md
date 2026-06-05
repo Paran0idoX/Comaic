@@ -91,12 +91,13 @@ cp backend/.env.example .env
 ```env
 DEEPSEEK_MODEL=deepseek-v4-flash
 DEEPSEEK_API_KEY=your_deepseek_api_key
+DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
 
 DATABASE_URL=sqlite:///data/comaic.sqlite3
 COMFYUI_BASE_URL=http://127.0.0.1:8188
 ```
 
-真实 `.env` 不要提交到 Git。
+真实 `.env` 不要提交到 Git。首次启动时，系统会用 `.env` 初始化默认模型配置；启动后也可以在右上角“设置”页面维护多组 OpenAI 兼容 API、API Key，以及每组 API 下的多个模型名。页面保存后，新建的 Agent 调用会优先使用 SQLite 中 active 配置的默认模型。
 
 ### 6. 启动 ComfyUI
 
@@ -138,6 +139,19 @@ npm run dev
 进入“项目”页面，点击“新建项目”，输入项目标题。
 
 项目只是创作容器；大纲、脚本、图片 Prompt 和图片生成任务都会关联到具体项目。
+
+### 1.1 配置模型
+
+点击右上角“设置”按钮，进入模型配置页：
+
+1. 填写配置名称和 OpenAI 兼容 API Base URL。
+2. 填写一个或多个模型名。
+3. 填写 API Key。
+4. 可选点击“测试连接”，确认配置可用。
+5. 选择默认模型，并点击“保存设置”。
+6. 如有多组 API 配置，点击“设为当前使用”切换 active 配置。
+
+出于安全考虑，后端不会把已保存的 API Key 回显给前端。API Key 保存在本地 SQLite 数据库中，请不要提交 `data/` 目录。
 
 ### 2. 生成大纲
 
@@ -326,4 +340,3 @@ comaic 目前是 MVP 版本，核心链路已经跑通，但仍适合继续扩�
 - 更细的权限、项目导出和部署方案
 
 欢迎基于这个项目继续实验和改造 AI 漫画创作流程。
-

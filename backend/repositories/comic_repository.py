@@ -10,7 +10,10 @@ from backend.models.comic import (
     ComfyWorkflowPreset,
     GenerationTask,
     ImagePromptPreset,
+    LLMConfig,
     OutlineVersion,
+    ScriptCharacter,
+    ScriptScene,
     ScriptSection,
     ScriptGenerationTask,
     Session as ComicSession,
@@ -19,12 +22,16 @@ from backend.models.enums import (
     ComicPageStatus,
     GenerationTaskStatus,
     ImagePromptPresetKind,
+    LLMProvider,
     OutlineVersionStatus,
     ScriptGenerationMode,
     ScriptGenerationTaskStatus,
     SessionPurpose,
 )
 from backend.models.time import utc_now
+
+
+KEEP_EXISTING_VALUE = object()
 
 
 class ComicRepository:
@@ -82,6 +89,133 @@ class ComicRepository:
 
         self.session.delete(project)
         self.session.commit()
+
+    def get_active_llm_config(self) -> LLMConfig | None:
+        """读取当前启用的全局 LLM 配置；没有配置时返回 None。"""
+
+        statement = (
+            select(LLMConfig)
+            .where(LLMConfig.is_active.is_(True))
+            .order_by(LLMConfig.updated_at.desc(), LLMConfig.id.desc())
+            .limit(1)
+        )
+        return self.session.scalar(statement)
+
+    def get_llm_config(self, config_id: int) -> LLMConfig | None:
+        """按主键读取 LLM 配置。"""
+
+        return self.session.get(LLMConfig, config_id)
+
+    def list_llm_configs(self) -> list[LLMConfig]:
+        """读取全部 LLM 配置，active 配置优先展示。"""
+
+        statement = select(LLMConfig).order_by(
+            LLMConfig.is_active.desc(),
+            LLMConfig.updated_at.desc(),
+            LLMConfig.id.desc(),
+        )
+        return list(self.session.scalars(statement))
+
+    def create_llm_config(
+        self,
+        *,
+        name: str,
+        provider: LLMProvider,
+        base_url: str,
+        model_names: str,
+        default_model: str,
+        api_key: str | None,
+        is_active: bool = True,
+    ) -> LLMConfig:
+        """创建一组 LLM API 配置；active 配置仍保持全局唯一。"""
+
+        if is_active:
+            self._deactivate_llm_configs()
+        config = LLMConfig(
+            name=name,
+            provider=provider,
+            base_url=base_url,
+            model_names=model_names,
+            default_model=default_model,
+            api_key=api_key,
+            is_active=is_active,
+        )
+        self.session.add(config)
+        self.session.commit()
+        self.session.refresh(config)
+        return config
+
+    def update_llm_config(
+        self,
+        *,
+        config_id: int,
+        name: str,
+        provider: LLMProvider,
+        base_url: str,
+        model_names: str,
+        default_model: str,
+        api_key: str | None | object,
+        clear_api_key: bool = False,
+    ) -> LLMConfig:
+        """更新一组 LLM API 配置；api_key 为 sentinel 时保留旧值。"""
+
+        config = self.session.get(LLMConfig, config_id)
+        if config is None:
+            raise ValueError(f"LLMConfig not found: {config_id}")
+        config.name = name
+        config.provider = provider
+        config.base_url = base_url
+        config.model_names = model_names
+        config.default_model = default_model
+        if clear_api_key:
+            config.api_key = None
+        elif api_key is not KEEP_EXISTING_VALUE:
+            config.api_key = str(api_key) if api_key is not None else None
+        self.session.commit()
+        self.session.refresh(config)
+        return config
+
+    def activate_llm_config(self, config_id: int) -> LLMConfig:
+        """设置某组 LLM 配置为当前 active。"""
+
+        config = self.session.get(LLMConfig, config_id)
+        if config is None:
+            raise ValueError(f"LLMConfig not found: {config_id}")
+        self._deactivate_llm_configs()
+        config.is_active = True
+        self.session.commit()
+        self.session.refresh(config)
+        return config
+
+    def delete_llm_config(self, config_id: int) -> None:
+        """删除一组 LLM 配置；删除 active 时自动激活剩余最近配置。"""
+
+        configs = self.list_llm_configs()
+        if len(configs) <= 1:
+            raise ValueError("Cannot delete the last LLMConfig.")
+        config = self.session.get(LLMConfig, config_id)
+        if config is None:
+            raise ValueError(f"LLMConfig not found: {config_id}")
+        was_active = config.is_active
+        self.session.delete(config)
+        self.session.flush()
+        if was_active:
+            fallback = self.session.scalar(
+                select(LLMConfig)
+                .order_by(LLMConfig.updated_at.desc(), LLMConfig.id.desc())
+                .limit(1)
+            )
+            if fallback is not None:
+                fallback.is_active = True
+        self.session.commit()
+
+    def _deactivate_llm_configs(self) -> None:
+        """取消其它 LLM 配置的 active 状态，保持全局唯一。"""
+
+        for config in self.session.scalars(
+            select(LLMConfig).where(LLMConfig.is_active.is_(True))
+        ):
+            config.is_active = False
 
     def create_session(
         self,
@@ -303,6 +437,106 @@ class ComicRepository:
         )
         return list(self.session.scalars(statement))
 
+    def list_script_scenes(self, task_id: int) -> list[ScriptScene]:
+        """读取某次脚本任务下的中心化场景设定。"""
+
+        statement = (
+            select(ScriptScene)
+            .where(ScriptScene.task_id == task_id)
+            .order_by(ScriptScene.scene_key, ScriptScene.id)
+        )
+        return list(self.session.scalars(statement))
+
+    def list_script_characters(self, task_id: int) -> list[ScriptCharacter]:
+        """读取某次脚本任务下的中心化角色设定。"""
+
+        statement = (
+            select(ScriptCharacter)
+            .where(ScriptCharacter.task_id == task_id)
+            .order_by(ScriptCharacter.character_key, ScriptCharacter.id)
+        )
+        return list(self.session.scalars(statement))
+
+    def get_script_scene_by_key(self, *, task_id: int, scene_key: str) -> ScriptScene | None:
+        """按稳定 key 读取任务内场景设定。"""
+
+        statement = select(ScriptScene).where(
+            ScriptScene.task_id == task_id,
+            ScriptScene.scene_key == scene_key,
+        )
+        return self.session.scalar(statement)
+
+    def get_script_character_by_key(
+        self,
+        *,
+        task_id: int,
+        character_key: str,
+    ) -> ScriptCharacter | None:
+        """按稳定 key 读取任务内角色设定。"""
+
+        statement = select(ScriptCharacter).where(
+            ScriptCharacter.task_id == task_id,
+            ScriptCharacter.character_key == character_key,
+        )
+        return self.session.scalar(statement)
+
+    def upsert_script_scene(self, *, task_id: int, **payload) -> ScriptScene:
+        """创建或补充任务内场景设定；已有关键视觉锚点不被后续输出覆盖。"""
+
+        scene_key = str(payload["scene_key"]).strip()
+        scene = self.get_script_scene_by_key(task_id=task_id, scene_key=scene_key)
+        if scene is None:
+            scene = ScriptScene(task_id=task_id, scene_key=scene_key)
+            self.session.add(scene)
+        self._fill_empty_fields(
+            scene,
+            payload,
+            [
+                "name",
+                "location_type",
+                "time_of_day",
+                "lighting",
+                "weather",
+                "environment_details",
+                "color_palette",
+                "visual_anchors",
+                "negative_constraints",
+            ],
+        )
+        self.session.commit()
+        self.session.refresh(scene)
+        return scene
+
+    def upsert_script_character(self, *, task_id: int, **payload) -> ScriptCharacter:
+        """创建或补充任务内角色设定；已有外貌锚点保持稳定。"""
+
+        character_key = str(payload["character_key"]).strip()
+        character = self.get_script_character_by_key(
+            task_id=task_id,
+            character_key=character_key,
+        )
+        if character is None:
+            character = ScriptCharacter(task_id=task_id, character_key=character_key)
+            self.session.add(character)
+        self._fill_empty_fields(
+            character,
+            payload,
+            [
+                "name",
+                "role",
+                "appearance",
+                "hairstyle",
+                "clothing_style",
+                "accessories",
+                "color_palette",
+                "visual_anchors",
+                "negative_constraints",
+            ],
+        )
+        self.session.commit()
+        self.session.refresh(character)
+        return character
+
     def has_script_sections(self, task_id: int) -> bool:
         """判断任务是否已有分段；用于实现分段计划首次注册后锁定。"""
 
@@ -403,6 +637,7 @@ class ComicRepository:
         for page in pages:
             # 断开最终选中图引用后再删除页面，让候选图级联删除更稳定。
             page.selected_image_id = None
+            page.visual_characters = []
             self.session.delete(page)
 
         for section in sections:
@@ -632,6 +867,8 @@ class ComicRepository:
         character_action: str,
         dialogue: str,
         section_id: int | None = None,
+        scene_id: int | None = None,
+        character_ids: list[int] | None = None,
     ) -> ComicPage:
         """按页码创建或更新结构化页面脚本，并标记为脚本已生成。"""
 
@@ -657,6 +894,13 @@ class ComicRepository:
         page.composition = composition
         page.character_action = character_action
         page.dialogue = dialogue
+        page.scene_id = scene_id
+        if character_ids is not None:
+            page.visual_characters = list(
+                self.session.scalars(
+                    select(ScriptCharacter).where(ScriptCharacter.id.in_(character_ids))
+                )
+            )
         page.status = ComicPageStatus.SCRIPT_READY
         self.session.commit()
         self.session.refresh(page)
@@ -684,6 +928,8 @@ class ComicRepository:
         page.composition = None
         page.character_action = None
         page.dialogue = None
+        page.scene_id = None
+        page.visual_characters = []
         page.status = ComicPageStatus.DRAFT
         self.session.commit()
         self.session.refresh(page)
@@ -711,6 +957,7 @@ class ComicRepository:
         for page in pages:
             # 页面和候选图之间存在最终选中图的额外引用，删除前先断开更稳妥。
             page.selected_image_id = None
+            page.visual_characters = []
             self.session.delete(page)
 
         self.session.commit()
@@ -726,6 +973,16 @@ class ComicRepository:
         self.session.commit()
         self.session.refresh(page)
         return page
+
+    @staticmethod
+    def _fill_empty_fields(target, payload: dict, field_names: list[str]) -> None:
+        """只填充空字段，避免后续分段改写已建立的视觉锚点。"""
+
+        for field_name in field_names:
+            current_value = str(getattr(target, field_name, "") or "").strip()
+            next_value = str(payload.get(field_name, "") or "").strip()
+            if not current_value and next_value:
+                setattr(target, field_name, next_value)
 
     def clear_script_task_image_prompts(self, task_id: int) -> None:
         """清空某次脚本任务下所有页面的图片 Prompt，重新生成前避免新旧 Prompt 混用。"""

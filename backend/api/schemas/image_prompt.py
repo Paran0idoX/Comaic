@@ -46,6 +46,8 @@ class ImagePromptGenerationItemResponse(BaseModel):
     page_no: int
     image_prompt: str | None
     status: str
+    scene_key: str | None = None
+    character_keys: list[str] = Field(default_factory=list)
     error: str | None = None
     error_code: str | None = None
 

@@ -22,6 +22,11 @@ class PageScriptItem(BaseModel):
 
     section_no: int = Field(description="当前页面所属分段编号。", gt=0)
     page_no: int = Field(description="整部漫画中的全局绝对页码。", gt=0)
+    scene_key: str = Field(description="本页绑定的中心化场景 key，必须能在 scenes 中找到。")
+    character_keys: list[str] = Field(
+        default_factory=list,
+        description="本页出现的中心化角色 key 列表，必须能在 characters 中找到。",
+    )
     summary: str = Field(description="本页内容摘要。")
     characters: str = Field(description="本页出场人物、身份、表情和状态。")
     clothing: str = Field(description="本页人物服装、发型、配件和辨识特征。")
@@ -37,6 +42,36 @@ class PageScriptWriterResponse(BaseModel):
     """分页脚本编写子 Agent 的结构化输出。"""
 
     pages: list[PageScriptItem] = Field(description="本次生成或修订的页面脚本列表。")
+
+
+class ScriptSceneItem(BaseModel):
+    """当前脚本任务内的中心化场景设定。"""
+
+    scene_key: str = Field(description="稳定场景 key，同一场景跨页必须复用。")
+    name: str = Field(description="场景名称。")
+    location_type: str = Field(description="地点类型。")
+    time_of_day: str = Field(description="时间段。")
+    lighting: str = Field(description="固定光线设定。")
+    weather: str = Field(description="天气或空气状态。")
+    environment_details: str = Field(description="稳定环境细节。")
+    color_palette: str = Field(description="场景主色调。")
+    visual_anchors: str = Field(description="跨页必须保留的视觉锚点。")
+    negative_constraints: str = Field(description="同场景禁止出现或禁止改变的元素。")
+
+
+class ScriptCharacterItem(BaseModel):
+    """当前脚本任务内的中心化角色设定。"""
+
+    character_key: str = Field(description="稳定角色 key，同一角色跨页必须复用。")
+    name: str = Field(description="角色名称。")
+    role: str = Field(description="角色身份或叙事功能。")
+    appearance: str = Field(description="固定外貌特征。")
+    hairstyle: str = Field(description="固定发型。")
+    clothing_style: str = Field(description="固定服装风格。")
+    accessories: str = Field(description="固定配件和标志物。")
+    color_palette: str = Field(description="角色主色调。")
+    visual_anchors: str = Field(description="跨页必须保留的角色视觉锚点。")
+    negative_constraints: str = Field(description="同角色禁止出现或禁止改变的元素。")
 
 
 class ScriptReviewItem(BaseModel):
@@ -61,6 +96,14 @@ class ScriptSupervisorResponse(BaseModel):
 class ScriptDeepAgentResponse(BaseModel):
     """分页脚本主 Agent 的最终结构化输出，避免主 Agent 用自然语言收尾。"""
 
+    scenes: list[ScriptSceneItem] = Field(
+        default_factory=list,
+        description="本轮涉及的中心化场景设定。",
+    )
+    characters: list[ScriptCharacterItem] = Field(
+        default_factory=list,
+        description="本轮涉及的中心化角色设定。",
+    )
     reviews: list[ScriptReviewItem] = Field(
         default_factory=list,
         description="本轮最终审查结果。",
