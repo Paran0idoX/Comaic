@@ -6,13 +6,14 @@ from sse_starlette.sse import EventSourceResponse
 from backend.agents.outline_agent import OutlineAgent
 from backend.api.schemas.outline import (
     CreateOutlineSessionRequest,
+    OutlineCharacterResponse,
     OutlineMessageResponse,
     OutlineChatStreamRequest,
     OutlineSessionResponse,
     OutlineVersionResponse,
     ResolveOutlineSessionResponse,
 )
-from backend.models.comic import OutlineVersion
+from backend.models.comic import OutlineCharacter, OutlineVersion
 from backend.models.database import SessionLocal
 from backend.models.enums import SessionPurpose
 from backend.repositories.comic_repository import ComicRepository
@@ -42,6 +43,33 @@ def outline_version_to_response(version: OutlineVersion) -> OutlineVersionRespon
         outline=version.content,
         status=version.status.value,
         created_at=version.created_at,
+        confirmed_at=version.confirmed_at,
+        characters=[
+            outline_character_to_response(character)
+            for character in sorted(version.characters, key=lambda item: item.character_key)
+        ],
+    )
+
+
+def outline_character_to_response(character: OutlineCharacter) -> OutlineCharacterResponse:
+    """把大纲角色基准设定 ORM 对象转换为 API 响应。"""
+
+    return OutlineCharacterResponse(
+        id=character.id,
+        outline_version_id=character.outline_version_id,
+        character_key=character.character_key,
+        name=character.name,
+        role=character.role,
+        background=character.background,
+        appearance=character.appearance,
+        visual_anchors=character.visual_anchors,
+        negative_constraints=character.negative_constraints,
+        default_hairstyle=character.default_hairstyle,
+        default_clothing=character.default_clothing,
+        default_accessories=character.default_accessories,
+        default_color_palette=character.default_color_palette,
+        created_at=character.created_at,
+        updated_at=character.updated_at,
     )
 
 
@@ -151,18 +179,29 @@ def stream_outline_chat(request: OutlineChatStreamRequest, http_request: Request
                         thread_id=request.thread_id,
                         outline=outline,
                     )
+                    await service.generate_and_save_outline_characters(
+                        outline_version=outline_version,
+                        user_message=request.message,
+                    )
                     yield sse_event(
                         "outline",
-                        {
-                            "version_id": outline_version.id,
-                            "version_no": outline_version.version_no,
-                            "outline": outline_version.content,
-                            "status": outline_version.status.value,
-                            "created_at": outline_version.created_at.isoformat(),
-                        },
+                        outline_version_to_response(outline_version).model_dump(mode="json"),
                     )
                 yield sse_event("done", {"thread_id": request.thread_id})
             except Exception as exc:
                 yield sse_event("error", sse_error_payload(exc, locale))
 
     return EventSourceResponse(event_generator())
+
+
+@router.post("/versions/{version_id}/confirm", response_model=OutlineVersionResponse)
+def confirm_outline_version(version_id: int, http_request: Request) -> OutlineVersionResponse:
+    """确认大纲版本和该版本下的角色基准设定。"""
+
+    with SessionLocal() as db_session:
+        service = OutlineService(ComicRepository(db_session))
+        try:
+            outline_version = service.confirm_outline_version(outline_version_id=version_id)
+        except ValueError as exc:
+            raise http_exception(exc, request_locale(http_request)) from exc
+        return outline_version_to_response(outline_version)

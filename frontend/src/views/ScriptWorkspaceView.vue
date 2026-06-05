@@ -101,6 +101,12 @@ const sortedPages = computed(() =>
 const currentTask = computed(() =>
   scriptTasks.value.find((task) => task.id === selectedTaskId.value) ?? null,
 )
+const selectedOutlineVersion = computed(
+  () => outlineVersions.value.find((version) => version.version_id === selectedOutlineVersionId.value) ?? null,
+)
+const isSelectedOutlineConfirmed = computed(() =>
+  Boolean(selectedOutlineVersion.value?.confirmed_at),
+)
 
 const displayedPages = computed(() => {
   if (selectedSectionNo.value === null) {
@@ -122,6 +128,7 @@ const canGenerate = computed(
   () =>
     selectedProjectId.value !== null &&
     selectedOutlineVersionId.value !== null &&
+    isSelectedOutlineConfirmed.value &&
     !needsOutline.value &&
     !generatingBatch.value &&
     !continuingBatch.value,
@@ -229,7 +236,9 @@ const outlineStatusLabel = (status: string) => {
 }
 
 const outlineVersionLabel = (version: OutlineVersion) =>
-  `v${version.version_no} · ${outlineStatusLabel(version.status)} · ${formatDateTime(version.created_at)}`
+  `v${version.version_no} · ${outlineStatusLabel(version.status)} · ${
+    version.confirmed_at ? t('scripts.config.outlineConfirmed') : t('scripts.config.outlineUnconfirmed')
+  } · ${formatDateTime(version.created_at)}`
 
 const taskStatusLabel = (status: string) => {
   const key = `scripts.taskStatus.${status}`
@@ -542,7 +551,8 @@ const loadOutlineVersions = async (projectId: number) => {
 
 const isOutlineMissingError = (error: unknown) =>
   error instanceof ApiError &&
-  (error.code === 'outline.required' || error.code === 'outline.version_not_found')
+  (error.code === 'outline.required' ||
+    error.code === 'outline.version_not_found')
 
 const handleGenerationError = (error: unknown, fallback: string) => {
   if (isOutlineMissingError(error)) {
@@ -568,6 +578,11 @@ const validateBatchGenerationInput = () => {
 
   if (selectedOutlineVersionId.value === null) {
     ElMessage.warning(t('scripts.errors.selectOutlineVersion'))
+    return false
+  }
+
+  if (!isSelectedOutlineConfirmed.value) {
+    ElMessage.warning(t('backendErrors.outline.version_not_confirmed'))
     return false
   }
 
@@ -1218,8 +1233,11 @@ onActivated(async () => {
               />
               <template v-else>
                 <article v-for="character in visualCharacters" :key="character.id" class="visual-card">
-                  <strong>{{ character.character_key }} · {{ character.name }}</strong>
-                  <p>{{ character.appearance }}</p>
+                  <strong>
+                    {{ character.character_key }} · {{ character.name }}
+                    <span v-if="character.section_no">· S{{ character.section_no }}</span>
+                  </strong>
+                  <p>{{ character.current_clothing || character.current_state || character.section_role }}</p>
                   <small>{{ character.visual_anchors }}</small>
                 </article>
               </template>

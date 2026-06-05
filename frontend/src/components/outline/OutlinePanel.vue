@@ -6,18 +6,43 @@ import { useI18n } from 'vue-i18n'
 
 import { formatLocalDateTime } from '@/utils/datetime'
 
+export type OutlineCharacterItem = {
+  id: number
+  outline_version_id: number
+  character_key: string
+  name: string
+  role: string
+  background: string
+  appearance: string
+  visual_anchors: string
+  negative_constraints: string
+  default_hairstyle: string
+  default_clothing: string
+  default_accessories: string
+  default_color_palette: string
+  created_at: string
+  updated_at: string
+}
+
 export type OutlineVersionItem = {
   version_id: number
   version_no: number
   outline: string
   status: string
   created_at: string
+  confirmed_at: string | null
+  characters: OutlineCharacterItem[]
 }
 
 const props = defineProps<{
   outline: string
   versions: OutlineVersionItem[]
   loading: boolean
+  confirming: boolean
+}>()
+
+const emit = defineEmits<{
+  confirm: []
 }>()
 
 const { locale, t } = useI18n()
@@ -30,6 +55,9 @@ const markdown = new MarkdownIt({
 })
 
 const renderedOutline = computed(() => markdown.render(props.outline))
+const currentVersion = computed(() => props.versions[0] ?? null)
+const currentCharacters = computed(() => currentVersion.value?.characters ?? [])
+const isConfirmed = computed(() => Boolean(currentVersion.value?.confirmed_at))
 
 const formatDate = (value: string) => {
   return formatLocalDateTime(value, locale.value)
@@ -43,8 +71,14 @@ const formatDate = (value: string) => {
         <h3>{{ t('outline.panel.title') }}</h3>
         <p>{{ t('outline.panel.description') }}</p>
       </div>
-      <el-button type="success" :icon="Check" :disabled="!outline">
-        {{ t('outline.panel.confirm') }}
+      <el-button
+        type="success"
+        :icon="Check"
+        :loading="confirming"
+        :disabled="!outline || isConfirmed"
+        @click="emit('confirm')"
+      >
+        {{ isConfirmed ? t('outline.panel.confirmed') : t('outline.panel.confirm') }}
       </el-button>
     </header>
 
@@ -53,6 +87,39 @@ const formatDate = (value: string) => {
       <el-scrollbar v-else class="outline-panel__outline-scroll" always>
         <article class="outline-panel__outline markdown-body" v-html="renderedOutline" />
       </el-scrollbar>
+
+      <el-divider />
+
+      <div class="outline-panel__characters">
+        <h4>{{ t('outline.characters.title') }}</h4>
+        <p>{{ t('outline.characters.description') }}</p>
+        <el-empty
+          v-if="currentCharacters.length === 0"
+          :description="t('outline.characters.empty')"
+        />
+        <div v-else class="outline-panel__character-grid">
+          <article
+            v-for="character in currentCharacters"
+            :key="character.id"
+            class="outline-panel__character"
+          >
+            <header>
+              <strong>{{ character.name }}</strong>
+              <el-tag size="small" effect="plain">{{ character.character_key }}</el-tag>
+            </header>
+            <p><span>{{ t('outline.characters.role') }}</span>{{ character.role || '-' }}</p>
+            <p><span>{{ t('outline.characters.background') }}</span>{{ character.background || '-' }}</p>
+            <p><span>{{ t('outline.characters.appearance') }}</span>{{ character.appearance || '-' }}</p>
+            <p><span>{{ t('outline.characters.defaults') }}</span>{{ [
+              character.default_hairstyle,
+              character.default_clothing,
+              character.default_accessories,
+              character.default_color_palette,
+            ].filter(Boolean).join(' / ') || '-' }}</p>
+            <p><span>{{ t('outline.characters.anchors') }}</span>{{ character.visual_anchors || '-' }}</p>
+          </article>
+        </div>
+      </div>
 
       <el-divider />
 
@@ -191,6 +258,54 @@ const formatDate = (value: string) => {
 .outline-panel__versions {
   display: grid;
   gap: 12px;
+}
+
+.outline-panel__characters {
+  display: grid;
+  gap: 12px;
+}
+
+.outline-panel__characters h4,
+.outline-panel__characters p {
+  margin: 0;
+}
+
+.outline-panel__characters > p {
+  color: var(--text-soft);
+}
+
+.outline-panel__character-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.outline-panel__character {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.outline-panel__character header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.outline-panel__character p {
+  color: var(--text-regular);
+  line-height: 1.55;
+}
+
+.outline-panel__character span {
+  display: block;
+  margin-bottom: 2px;
+  color: var(--text-soft);
+  font-size: 12px;
 }
 
 .outline-panel__version {

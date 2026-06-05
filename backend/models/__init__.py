@@ -7,6 +7,7 @@ from backend.models.comic import (
     ComfyWorkflowPreset,
     GenerationTask,
     LLMConfig,
+    OutlineCharacter,
     OutlineVersion,
     Session,
 )
@@ -25,6 +26,7 @@ __all__ = [
     "ComfyWorkflowPreset",
     "GenerationTask",
     "LLMConfig",
+    "OutlineCharacter",
     "OutlineVersion",
     "Session",
     "ComicPageStatus",

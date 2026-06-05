@@ -23,6 +23,7 @@ ERROR_MESSAGES: dict[str, dict[str, str]] = {
         "outline.session_invalid": "当前会话不是大纲会话。",
         "outline.version_not_found": "大纲版本不存在。",
         "outline.version_project_mismatch": "大纲版本不属于当前项目。",
+        "outline.version_not_confirmed": "请先确认大纲和角色基准设定。",
         "outline.required": "当前项目还没有可用的大纲版本。",
         "script.task_not_found": "脚本生成任务不存在。",
         "script.section_not_found": "脚本分段不存在。",
@@ -69,6 +70,7 @@ ERROR_MESSAGES: dict[str, dict[str, str]] = {
         "outline.session_invalid": "This session is not an outline session.",
         "outline.version_not_found": "Outline version not found.",
         "outline.version_project_mismatch": "The outline version does not belong to this project.",
+        "outline.version_not_confirmed": "Confirm the outline and character baseline first.",
         "outline.required": "This project has no available outline version.",
         "script.task_not_found": "Script generation task not found.",
         "script.section_not_found": "Script section not found.",
@@ -198,6 +200,8 @@ def code_from_message(message: str) -> tuple[str, int]:
         return "outline.version_project_mismatch", 400
     if "outlineversion not found" in lowered:
         return "outline.version_not_found", 404
+    if "outlineversion is not confirmed" in lowered:
+        return "outline.version_not_confirmed", 400
     if "active outline not found" in lowered:
         return "outline.required", 400
     if "scriptgenerationtask must be succeeded" in lowered:
