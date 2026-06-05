@@ -38,6 +38,8 @@ export type ImagePromptGenerationItem = {
   page_no: number
   image_prompt: string | null
   status: string
+  scene_key?: string | null
+  character_keys?: string[]
   error: string | null
   error_code?: string | null
 }

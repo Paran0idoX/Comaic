@@ -109,8 +109,8 @@ class ScriptPlanningAgent:
 
     @staticmethod
     def _default_llm() -> Any:
-        """懒加载脚本阶段 DeepSeek ChatModel，避免导入模块时校验 .env。"""
+        """读取当前设置页保存的模型配置，创建脚本规划 ChatModel。"""
 
-        from backend.llm_clients.deepseek import deepseek_tool_chat_model
+        from backend.llm_clients.factory import get_tool_chat_model
 
-        return deepseek_tool_chat_model
+        return get_tool_chat_model()
