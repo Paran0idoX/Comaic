@@ -63,17 +63,22 @@ export type ScriptScene = {
 
 export type ScriptCharacter = {
   id: number
-  task_id: number
+  task_id: number | null
+  section_id: number
+  section_no: number | null
+  outline_character_id: number | null
   character_key: string
   name: string
-  role: string
-  appearance: string
-  hairstyle: string
-  clothing_style: string
-  accessories: string
-  color_palette: string
+  section_role: string
+  current_hairstyle: string
+  current_clothing: string
+  current_accessories: string
+  current_state: string
+  emotion: string
+  temporary_changes: string
   visual_anchors: string
   negative_constraints: string
+  outline_character: Record<string, unknown> | null
   created_at: string
   updated_at: string
 }

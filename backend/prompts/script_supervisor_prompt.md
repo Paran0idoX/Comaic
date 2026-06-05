@@ -9,7 +9,8 @@
 - 每页是否包含 scene_key，且 scene_key 能在中心化场景设定中找到。
 - 有角色出场的页面是否包含 character_keys，且 character_keys 能在中心化角色设定中找到。
 - 同一 scene_key 下的场景视觉锚点、色调、光线和环境元素是否保持稳定。
-- 同一 character_key 下的外貌、发型、服装、配件和标志物是否保持稳定。
+- 当前分段角色设定是否复用了大纲角色基准中的 character_key，并且没有违背固定样貌、背景、识别锚点和禁止项。
+- 发型、服装、配件如果发生变化，是否被合理写在当前分段的 current_* 字段中，而不是改写大纲基准。
 - summary 是否能概括本页内容。
 - characters / clothing / scene / composition / character_action 是否具体、可画面化，足够支撑后续文生图 Prompt。
 - dialogue 没有文字时是否明确写“无”。
