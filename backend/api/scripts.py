@@ -1,4 +1,5 @@
 import json
+import logging
 
 from fastapi import APIRouter, Request
 from sse_starlette.sse import EventSourceResponse, ServerSentEvent
@@ -31,6 +32,7 @@ from backend.services.script_service import ScriptService
 
 router = APIRouter(prefix="/api/scripts", tags=["scripts"])
 project_pages_router = APIRouter(prefix="/api/projects", tags=["scripts"])
+logger = logging.getLogger(__name__)
 
 SSE_HEADERS = {
     "Cache-Control": "no-cache, no-transform",
@@ -235,6 +237,12 @@ def stream_batch_script_generation(
                 ):
                     yield sse_event(event, payload)
             except Exception as exc:
+                logger.exception(
+                    "Unhandled script batch SSE error project_id=%s outline_version_id=%s total_pages=%s",
+                    request.project_id,
+                    request.outline_version_id,
+                    request.total_pages,
+                )
                 yield sse_event("error", sse_error_payload(exc, locale))
 
     return EventSourceResponse(event_generator(), headers=SSE_HEADERS, ping=5)
@@ -260,6 +268,7 @@ def stream_continue_batch_script_generation(
                 ):
                     yield sse_event(event, payload)
             except Exception as exc:
+                logger.exception("Unhandled script continue SSE error task_id=%s", task_id)
                 yield sse_event("error", sse_error_payload(exc, locale))
 
     return EventSourceResponse(event_generator(), headers=SSE_HEADERS, ping=5)

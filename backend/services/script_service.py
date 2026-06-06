@@ -1,5 +1,13 @@
-from backend.agents.script_deep_agent import ScriptDeepAgent
+import asyncio
+import json
+import logging
+from collections.abc import Awaitable
+from dataclasses import dataclass
+from typing import TypeVar
+
+from backend.agents.page_script_writer_agent import PageScriptWriterAgent
 from backend.agents.script_planning_agent import ScriptPlanningAgent
+from backend.agents.script_supervisor_agent import ScriptSupervisorAgent
 from backend.i18n.errors import app_error_from_exception
 from backend.models.comic import (
     ComicPage,
@@ -14,6 +22,21 @@ from backend.models.comic import (
 from backend.models.enums import ScriptGenerationMode, ScriptGenerationTaskStatus
 from backend.repositories.comic_repository import ComicRepository
 from backend.services.task_runtime import RuntimeTaskType, running_task_registry
+
+
+AgentResultT = TypeVar("AgentResultT")
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class PendingSectionReview:
+    """当前 SSE 批次内的异步分段审查任务。"""
+
+    section: ScriptSection
+    pages: list[dict]
+    visual_context: dict
+    review_round: int
+    task: asyncio.Task[dict]
 
 
 class ScriptService:
@@ -186,24 +209,64 @@ class ScriptService:
         running_task_registry.register(RuntimeTaskType.SCRIPT_GENERATION_TASK, task.id)
 
         try:
-            result = await ScriptDeepAgent().generate_single_page(
-                outline=outline_version.content,
-                total_pages=total_pages,
-                page_no=page_no,
-                user_requirement=user_requirement or "",
-            )
-            page_payload = self._find_page_payload(result.get("pages", []), page_no)
             section = self._create_single_page_section(
                 task_id=task.id,
                 page_no=page_no,
             )
-            visual_settings = self._save_visual_settings(
+            outline_characters = self._outline_characters_context(outline_version.id)
+            section_scenes = [self._default_single_page_scene()]
+            section_characters = self._default_single_page_characters(outline_characters)
+            self._save_section_visual_settings(
                 task_id=task.id,
                 section_id=section.id,
                 outline_version_id=outline_version.id,
-                scenes=result.get("scenes", []),
-                characters=result.get("characters", []),
-                pages=[page_payload],
+                scenes=section_scenes,
+                characters=section_characters,
+            )
+            writer_agent = PageScriptWriterAgent()
+            supervisor_agent = ScriptSupervisorAgent()
+            previous_context = {"completed_section_summaries": [], "recent_full_sections": []}
+            feedback = ""
+            normalized_pages: list[dict] | None = None
+            for attempt in range(1, 4):
+                pages = await writer_agent.generate_page(
+                    outline=outline_version.content,
+                    total_pages=total_pages,
+                    current_section=self._section_to_payload(section),
+                    target_page_no=page_no,
+                    section_scenes=section_scenes,
+                    section_characters=section_characters,
+                    previous_context=previous_context,
+                    outline_characters=outline_characters,
+                    user_requirement=user_requirement or "",
+                    feedback=feedback,
+                )
+                normalized_pages = self._normalize_single_page(
+                    pages=pages,
+                    section=section,
+                    page_no=page_no,
+                )
+                review_result = await supervisor_agent.review_section_pages(
+                    outline=outline_version.content,
+                    current_section=self._section_to_payload(section),
+                    section_scenes=section_scenes,
+                    section_characters=section_characters,
+                    outline_characters=outline_characters,
+                    pages=normalized_pages,
+                )
+                if self._section_review_passed(review_result):
+                    break
+                feedback = self._review_feedback(review_result.get("reviews", []))
+                if attempt >= 3:
+                    raise ValueError(f"单页脚本连续 3 次监督未通过：{feedback}")
+            if normalized_pages is None:
+                raise ValueError(f"Generated script missing page_no: {page_no}")
+            page_payload = self._find_page_payload(normalized_pages, page_no)
+            visual_settings = self._visual_settings_for_section(
+                task_id=task.id,
+                section_id=section.id,
+                outline_version_id=outline_version.id,
+                pages=normalized_pages,
             )
             page = self.repository.upsert_page_script(
                 project_id=project_id,
@@ -325,6 +388,7 @@ class ScriptService:
 
         try:
             persisted_sections = self.repository.list_script_sections(task.id)
+            outline_characters = self._outline_characters_context(outline_version.id)
             if not persisted_sections:
                 normalized_sections: list[dict] | None = None
                 planning_feedback = ""
@@ -341,12 +405,22 @@ class ScriptService:
                             "code": "script.planning.retry",
                             "attempt": attempt,
                         }
-                    raw_sections = await planning_agent.generate_section_plan(
-                        outline=outline_version.content,
-                        total_pages=total_pages,
-                        user_requirement=user_requirement,
-                        feedback=planning_feedback,
+                    suspended, raw_sections = await self._await_agent_or_suspended(
+                        task.id,
+                        planning_agent.generate_section_plan(
+                            outline=outline_version.content,
+                            total_pages=total_pages,
+                            outline_characters=outline_characters,
+                            user_requirement=user_requirement,
+                            feedback=planning_feedback,
+                        ),
                     )
+                    if suspended:
+                        yield "suspended", {
+                            "task_id": task.id,
+                            "status": ScriptGenerationTaskStatus.SUSPENDED.value,
+                        }
+                        return
                     try:
                         normalized_sections = self._normalize_section_plan(
                             sections=raw_sections,
@@ -369,6 +443,7 @@ class ScriptService:
 
                 persisted_sections = self._persist_section_plan(
                     task_id=task.id,
+                    outline_version_id=outline_version.id,
                     normalized_sections=normalized_sections,
                 )
             yield "section_plan", {
@@ -378,9 +453,12 @@ class ScriptService:
                 yield "section", self._section_to_payload(section)
             yield "phase", {"code": "script.planning.locked"}
 
-            script_agent = ScriptDeepAgent()
+            writer_agent = PageScriptWriterAgent()
+            supervisor_agent = ScriptSupervisorAgent()
+            pending_reviews: list[PendingSectionReview] = []
             for section in persisted_sections:
                 if self._is_script_task_suspended(task.id):
+                    self._cancel_pending_reviews(pending_reviews)
                     yield "suspended", {"task_id": task.id, "status": ScriptGenerationTaskStatus.SUSPENDED.value}
                     return
                 if self.repository.is_script_section_completed(section.id):
@@ -392,113 +470,177 @@ class ScriptService:
                     }
                     continue
 
-                yield "phase", {
-                    "code": "script.section.generating",
-                    "section_no": section.section_no,
-                    "page_start": section.page_start,
-                    "page_end": section.page_end,
-                }
-                feedback = ""
-                normalized_pages: list[dict] | None = None
-                result: dict | None = None
-                for attempt in range(1, 4):
-                    if self._is_script_task_suspended(task.id):
-                        yield "suspended", {
-                            "task_id": task.id,
-                            "status": ScriptGenerationTaskStatus.SUSPENDED.value,
-                        }
-                        return
-                    if attempt > 1:
-                        yield "phase", {
-                            "code": "script.section.retry",
-                            "section_no": section.section_no,
-                            "attempt": attempt,
-                        }
-                    result = await script_agent.generate_section(
-                        outline=outline_version.content,
-                        total_pages=total_pages,
-                        current_section=self._section_to_payload(section),
-                        previous_context=self._build_previous_sections_context(
-                            task_id=task.id,
-                            current_section_no=section.section_no,
-                        ),
-                        outline_characters=self._outline_characters_context(outline_version.id),
-                        user_requirement=user_requirement,
-                        feedback=feedback,
-                    )
-                    yield "phase", {
-                        "code": "script.section.agent_returned",
-                        "section_no": section.section_no,
-                        "page_start": section.page_start,
-                        "page_end": section.page_end,
-                    }
-                    try:
-                        normalized_pages = self._normalize_section_pages(
-                            pages=result.get("pages", []),
-                            section=section,
-                        )
-                        yield "phase", {
-                            "code": "script.section.validated",
-                            "section_no": section.section_no,
-                            "count": len(normalized_pages),
-                        }
-                        break
-                    except ValueError as exc:
-                        feedback = str(exc)
-                        yield "phase", {
-                            "code": "script.section.validation_failed",
-                            "section_no": section.section_no,
-                        }
-                        if attempt >= 3:
-                            raise ValueError(
-                                f"第 {section.section_no} 段脚本连续 3 次校验失败：{feedback}"
-                            ) from exc
-
-                if normalized_pages is None or result is None:
-                    raise ValueError(f"第 {section.section_no} 段脚本生成失败。")
-                if self._is_script_task_suspended(task.id):
+                suspended, review_events = await self._drain_completed_section_reviews(
+                    pending_reviews=pending_reviews,
+                    supervisor_agent=supervisor_agent,
+                    writer_agent=writer_agent,
+                    task_id=task.id,
+                    project_id=project_id,
+                    outline=outline_version.content,
+                    total_pages=total_pages,
+                    outline_characters=outline_characters,
+                    user_requirement=user_requirement,
+                    wait=False,
+                )
+                for event_name, payload in review_events:
+                    yield event_name, payload
+                if suspended:
                     yield "suspended", {
                         "task_id": task.id,
                         "status": ScriptGenerationTaskStatus.SUSPENDED.value,
                     }
                     return
 
-                visual_settings = self._save_visual_settings(
+                yield "phase", {
+                    "code": "script.section.generating",
+                    "section_no": section.section_no,
+                    "page_start": section.page_start,
+                    "page_end": section.page_end,
+                }
+                visual_context = self._section_visual_context(
                     task_id=task.id,
-                    section_id=section.id,
-                    outline_version_id=outline_version.id,
-                    scenes=result.get("scenes", []),
-                    characters=result.get("characters", []),
-                    pages=normalized_pages,
-                )
-                saved_pages = self._save_section_pages(
-                    project_id=project_id,
                     section=section,
-                    pages=normalized_pages,
-                    visual_settings=visual_settings,
+                    outline_version_id=outline_version.id,
                 )
-                yield "phase", {"code": "script.section.saved", "section_no": section.section_no}
-                reviews = [
-                    review if isinstance(review, dict) else {"comments": str(review)}
-                    for review in result.get("reviews", [])
+                previous_context = self._build_previous_sections_context(
+                    task_id=task.id,
+                    current_section_no=section.section_no,
+                )
+                section_pages_by_no: dict[int, dict] = {}
+                saved_pages_by_no: dict[int, ComicPage] = {}
+                for page_no in range(section.page_start, section.page_end + 1):
+                    if self._is_script_task_suspended(task.id):
+                        self._cancel_pending_reviews(pending_reviews)
+                        yield "suspended", {
+                            "task_id": task.id,
+                            "status": ScriptGenerationTaskStatus.SUSPENDED.value,
+                        }
+                        return
+
+                    suspended, review_events = await self._drain_completed_section_reviews(
+                        pending_reviews=pending_reviews,
+                        supervisor_agent=supervisor_agent,
+                        writer_agent=writer_agent,
+                        task_id=task.id,
+                        project_id=project_id,
+                        outline=outline_version.content,
+                        total_pages=total_pages,
+                        outline_characters=outline_characters,
+                        user_requirement=user_requirement,
+                        wait=False,
+                    )
+                    for event_name, payload in review_events:
+                        yield event_name, payload
+                    if suspended:
+                        yield "suspended", {
+                            "task_id": task.id,
+                            "status": ScriptGenerationTaskStatus.SUSPENDED.value,
+                        }
+                        return
+
+                    current_pages = self._recent_section_pages_for_writer(
+                        pages_by_no=section_pages_by_no,
+                        target_page_no=page_no,
+                        include_target=False,
+                    )
+                    suspended, page_payload, saved_page, page_events = await self._generate_and_save_page(
+                        writer_agent=writer_agent,
+                        task_id=task.id,
+                        project_id=project_id,
+                        outline=outline_version.content,
+                        total_pages=total_pages,
+                        section=section,
+                        page_no=page_no,
+                        visual_context=visual_context,
+                        outline_characters=outline_characters,
+                        previous_context=previous_context,
+                        user_requirement=user_requirement,
+                        current_pages=current_pages,
+                        is_revision=False,
+                        feedback="",
+                    )
+                    for event_name, payload in page_events:
+                        yield event_name, payload
+                    if suspended:
+                        self._cancel_pending_reviews(pending_reviews)
+                        yield "suspended", {
+                            "task_id": task.id,
+                            "status": ScriptGenerationTaskStatus.SUSPENDED.value,
+                        }
+                        return
+                    if page_payload is None or saved_page is None:
+                        raise ValueError(f"第 {page_no} 页脚本生成失败。")
+                    section_pages_by_no[page_no] = page_payload
+                    saved_pages_by_no[page_no] = saved_page
+
+                section_pages = [
+                    section_pages_by_no[page_no]
+                    for page_no in sorted(section_pages_by_no)
                 ]
-                for review in reviews:
-                    yield "review", {"section_no": section.section_no, **review}
+                saved_pages = [
+                    saved_pages_by_no[page_no]
+                    for page_no in sorted(saved_pages_by_no)
+                ]
+                yield "phase", {"code": "script.section.saved", "section_no": section.section_no}
                 yield "section_pages", {
                     "section": self._section_to_payload(section),
                     "pages": [self._page_to_payload(page) for page in saved_pages],
-                    "reviews": reviews,
+                    "reviews": [],
+                }
+                pending_reviews.append(
+                    self._start_section_review(
+                        supervisor_agent=supervisor_agent,
+                        outline=outline_version.content,
+                        section=section,
+                        visual_context=visual_context,
+                        outline_characters=outline_characters,
+                        pages=section_pages,
+                        review_round=1,
+                    )
+                )
+                yield "phase", {
+                    "code": "script.section.review_started",
+                    "section_no": section.section_no,
                 }
 
             if self._is_script_task_suspended(task.id):
+                self._cancel_pending_reviews(pending_reviews)
                 yield "suspended", {"task_id": task.id, "status": ScriptGenerationTaskStatus.SUSPENDED.value}
                 return
+            while pending_reviews:
+                suspended, review_events = await self._drain_completed_section_reviews(
+                    pending_reviews=pending_reviews,
+                    supervisor_agent=supervisor_agent,
+                    writer_agent=writer_agent,
+                    task_id=task.id,
+                    project_id=project_id,
+                    outline=outline_version.content,
+                    total_pages=total_pages,
+                    outline_characters=outline_characters,
+                    user_requirement=user_requirement,
+                    wait=True,
+                )
+                for event_name, payload in review_events:
+                    yield event_name, payload
+                if suspended:
+                    self._cancel_pending_reviews(pending_reviews)
+                    yield "suspended", {
+                        "task_id": task.id,
+                        "status": ScriptGenerationTaskStatus.SUSPENDED.value,
+                    }
+                    return
             task = self.repository.update_script_task(
                 task_id=task.id,
                 status=ScriptGenerationTaskStatus.SUCCEEDED,
             )
             yield "done", {"task_id": task.id, "status": task.status.value}
         except Exception as exc:
+            logger.exception(
+                "Script batch task failed task_id=%s project_id=%s outline_version_id=%s",
+                task.id,
+                task.project_id,
+                task.outline_version_id,
+            )
             task = self.repository.update_script_task(
                 task_id=task.id,
                 status=ScriptGenerationTaskStatus.FAILED,
@@ -622,16 +764,18 @@ class ScriptService:
         self,
         *,
         task_id: int,
+        outline_version_id: int,
         normalized_sections: list[dict],
     ) -> list[ScriptSection]:
-        """保存已校验通过的分段计划；这是任务内唯一允许锁定分段的入口。"""
+        """保存已校验通过的分段计划和视觉设定；这是任务内唯一锁定入口。"""
 
         self.repository.update_script_task(
             task_id=task_id,
             section_plan=self._json_dumps(normalized_sections),
         )
-        return [
-            self.repository.upsert_script_section(
+        persisted_sections: list[ScriptSection] = []
+        for section in normalized_sections:
+            persisted_section = self.repository.upsert_script_section(
                 task_id=task_id,
                 section_no=section["section_no"],
                 page_start=section["page_start"],
@@ -639,8 +783,330 @@ class ScriptService:
                 title=section["title"],
                 description=section["description"],
             )
-            for section in normalized_sections
+            self._save_section_visual_settings(
+                task_id=task_id,
+                section_id=persisted_section.id,
+                outline_version_id=outline_version_id,
+                scenes=section["scenes"],
+                characters=section["characters"],
+            )
+            persisted_sections.append(persisted_section)
+        return persisted_sections
+
+    async def _await_agent_or_suspended(
+        self,
+        task_id: int,
+        coro: Awaitable[AgentResultT],
+    ) -> tuple[bool, AgentResultT | None]:
+        """等待 Agent 调用，同时轮询暂停状态；暂停后取消当前调用并返回信号。"""
+
+        agent_task = asyncio.create_task(coro)
+        while True:
+            done, _ = await asyncio.wait({agent_task}, timeout=1)
+            if done:
+                return False, agent_task.result()
+            if self._is_script_task_suspended(task_id):
+                agent_task.cancel()
+                try:
+                    await agent_task
+                except asyncio.CancelledError:
+                    pass
+                return True, None
+
+    @staticmethod
+    def _recent_section_pages_for_writer(
+        *,
+        pages_by_no: dict[int, dict],
+        target_page_no: int,
+        include_target: bool,
+        limit: int = 5,
+    ) -> list[dict]:
+        """裁剪 Writer 上下文，只保留当前分段内目标页附近最近页面。"""
+
+        candidate_page_nos = [
+            page_no
+            for page_no in sorted(pages_by_no)
+            if page_no < target_page_no or (include_target and page_no == target_page_no)
         ]
+        return [pages_by_no[page_no] for page_no in candidate_page_nos[-limit:]]
+
+    async def _generate_and_save_page(
+        self,
+        *,
+        writer_agent: PageScriptWriterAgent,
+        task_id: int,
+        project_id: int,
+        outline: str,
+        total_pages: int,
+        section: ScriptSection,
+        page_no: int,
+        visual_context: dict,
+        outline_characters: list[dict],
+        previous_context: dict,
+        user_requirement: str,
+        current_pages: list[dict],
+        is_revision: bool,
+        feedback: str,
+    ) -> tuple[bool, dict | None, ComicPage | None, list[tuple[str, dict]]]:
+        """生成并保存单页脚本；失败只重试当前页，不影响其它页。"""
+
+        events: list[tuple[str, dict]] = []
+        page_feedback = feedback
+        for attempt in range(1, 4):
+            if self._is_script_task_suspended(task_id):
+                return True, None, None, events
+            events.append(
+                (
+                    "phase",
+                    {
+                        "code": "script.page.generating",
+                        "section_no": section.section_no,
+                        "page_no": page_no,
+                        "attempt": attempt,
+                    },
+                )
+            )
+            suspended, raw_pages = await self._await_agent_or_suspended(
+                task_id,
+                writer_agent.generate_page(
+                    outline=outline,
+                    total_pages=total_pages,
+                    current_section=self._section_to_payload(section),
+                    target_page_no=page_no,
+                    section_scenes=visual_context["scenes"],
+                    section_characters=visual_context["characters"],
+                    previous_context=previous_context,
+                    outline_characters=outline_characters,
+                    user_requirement=user_requirement,
+                    feedback=page_feedback,
+                    is_revision=is_revision,
+                    current_pages=current_pages,
+                ),
+            )
+            if suspended:
+                return True, None, None, events
+            try:
+                normalized_page = self._normalize_single_page(
+                    pages=raw_pages,
+                    section=section,
+                    page_no=page_no,
+                )[0]
+                visual_settings = self._visual_settings_for_section(
+                    task_id=task_id,
+                    section_id=section.id,
+                    outline_version_id=0,
+                    pages=[normalized_page],
+                )
+                saved_page = self._save_section_pages(
+                    project_id=project_id,
+                    section=section,
+                    pages=[normalized_page],
+                    visual_settings=visual_settings,
+                )[0]
+                events.append(
+                    (
+                        "page",
+                        {
+                            "action": "updated" if is_revision else "created",
+                            "page": self._page_to_payload(saved_page),
+                            "page_no": saved_page.page_no,
+                            "revision_note": normalized_page.get("revision_note", ""),
+                        },
+                    )
+                )
+                events.append(
+                    (
+                        "phase",
+                        {
+                            "code": "script.page.saved",
+                            "section_no": section.section_no,
+                            "page_no": page_no,
+                        },
+                    )
+                )
+                return False, normalized_page, saved_page, events
+            except ValueError as exc:
+                page_feedback = str(exc)
+                events.append(
+                    (
+                        "phase",
+                        {
+                            "code": "script.page.validation_failed",
+                            "section_no": section.section_no,
+                            "page_no": page_no,
+                            "attempt": attempt,
+                        },
+                    )
+                )
+                if attempt >= 3:
+                    raise ValueError(f"第 {page_no} 页脚本连续 3 次校验失败：{page_feedback}") from exc
+        return False, None, None, events
+
+    def _start_section_review(
+        self,
+        *,
+        supervisor_agent: ScriptSupervisorAgent,
+        outline: str,
+        section: ScriptSection,
+        visual_context: dict,
+        outline_characters: list[dict],
+        pages: list[dict],
+        review_round: int,
+    ) -> PendingSectionReview:
+        """启动当前分段异步审查；审查输入不包含其它分段上下文。"""
+
+        review_task = asyncio.create_task(
+            supervisor_agent.review_section_pages(
+                outline=outline,
+                current_section=self._section_to_payload(section),
+                section_scenes=visual_context["scenes"],
+                section_characters=visual_context["characters"],
+                outline_characters=outline_characters,
+                pages=pages,
+            )
+        )
+        return PendingSectionReview(
+            section=section,
+            pages=pages,
+            visual_context=visual_context,
+            review_round=review_round,
+            task=review_task,
+        )
+
+    async def _drain_completed_section_reviews(
+        self,
+        *,
+        pending_reviews: list[PendingSectionReview],
+        supervisor_agent: ScriptSupervisorAgent,
+        writer_agent: PageScriptWriterAgent,
+        task_id: int,
+        project_id: int,
+        outline: str,
+        total_pages: int,
+        outline_characters: list[dict],
+        user_requirement: str,
+        wait: bool,
+    ) -> tuple[bool, list[tuple[str, dict]]]:
+        """处理已经完成的异步监督审查，并对问题页做局部修订。"""
+
+        events: list[tuple[str, dict]] = []
+        if not pending_reviews:
+            return False, events
+        if self._is_script_task_suspended(task_id):
+            self._cancel_pending_reviews(pending_reviews)
+            return True, events
+        if wait and not any(pending.task.done() for pending in pending_reviews):
+            await asyncio.wait(
+                {pending.task for pending in pending_reviews},
+                timeout=1,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if self._is_script_task_suspended(task_id):
+                self._cancel_pending_reviews(pending_reviews)
+                return True, events
+
+        completed = [pending for pending in pending_reviews if pending.task.done()]
+        for pending in completed:
+            pending_reviews.remove(pending)
+            review_result = pending.task.result()
+            reviews = [
+                review if isinstance(review, dict) else {"summary": str(review)}
+                for review in review_result.get("reviews", [])
+            ]
+            for review in reviews:
+                events.append(("review", {"section_no": pending.section.section_no, **review}))
+            if self._section_review_passed(review_result):
+                events.append(
+                    (
+                        "phase",
+                        {
+                            "code": "script.section.review_passed",
+                            "section_no": pending.section.section_no,
+                        },
+                    )
+                )
+                continue
+
+            revision_page_nos = self._revision_page_nos_from_reviews(reviews)
+            if not revision_page_nos:
+                raise ValueError(f"第 {pending.section.section_no} 段监督未通过，但没有可修订页码。")
+            if pending.review_round >= 3:
+                feedback = self._review_feedback(reviews)
+                raise ValueError(
+                    f"第 {pending.section.section_no} 段脚本连续 3 次监督未通过：{feedback}"
+                )
+            events.append(
+                (
+                    "phase",
+                    {
+                        "code": "script.section.review_revision_started",
+                        "section_no": pending.section.section_no,
+                        "revision_page_nos": revision_page_nos,
+                    },
+                )
+            )
+            pages_by_no = {int(page["page_no"]): page for page in pending.pages}
+            feedback_by_page_no = self._review_feedback_by_page_no(reviews)
+            for page_no in revision_page_nos:
+                current_pages = self._recent_section_pages_for_writer(
+                    pages_by_no=pages_by_no,
+                    target_page_no=page_no,
+                    include_target=True,
+                )
+                suspended, page_payload, _saved_page, page_events = await self._generate_and_save_page(
+                    writer_agent=writer_agent,
+                    task_id=task_id,
+                    project_id=project_id,
+                    outline=outline,
+                    total_pages=total_pages,
+                    section=pending.section,
+                    page_no=page_no,
+                    visual_context=pending.visual_context,
+                    outline_characters=outline_characters,
+                    previous_context={"completed_section_summaries": [], "recent_full_sections": []},
+                    user_requirement=user_requirement,
+                    current_pages=current_pages,
+                    is_revision=True,
+                    feedback=feedback_by_page_no.get(page_no, self._review_feedback(reviews)),
+                )
+                events.extend(page_events)
+                if suspended:
+                    return True, events
+                if page_payload is None:
+                    raise ValueError(f"第 {page_no} 页修订失败。")
+                pages_by_no[page_no] = page_payload
+            revised_pages = [pages_by_no[key] for key in sorted(pages_by_no)]
+            pending_reviews.append(
+                self._start_section_review(
+                    supervisor_agent=supervisor_agent,
+                    outline=outline,
+                    section=pending.section,
+                    visual_context=pending.visual_context,
+                    outline_characters=outline_characters,
+                    pages=revised_pages,
+                    review_round=pending.review_round + 1,
+                )
+            )
+            events.append(
+                (
+                    "phase",
+                    {
+                        "code": "script.section.review_started",
+                        "section_no": pending.section.section_no,
+                        "attempt": pending.review_round + 1,
+                    },
+                )
+            )
+        return False, events
+
+    @staticmethod
+    def _cancel_pending_reviews(pending_reviews: list[PendingSectionReview]) -> None:
+        """暂停任务时取消仍在运行的监督审查调用。"""
+
+        for pending in pending_reviews:
+            if not pending.task.done():
+                pending.task.cancel()
+        pending_reviews.clear()
 
     def _is_script_task_suspended(self, task_id: int) -> bool:
         """从数据库判断任务是否已被前端暂停，避免长任务继续落库。"""
@@ -749,7 +1215,7 @@ class ScriptService:
                 raise ValueError(f"character setting missing required field: {field_name}")
         return payload
 
-    def _save_visual_settings(
+    def _save_section_visual_settings(
         self,
         *,
         task_id: int,
@@ -757,9 +1223,8 @@ class ScriptService:
         outline_version_id: int,
         scenes: list,
         characters: list,
-        pages: list[dict],
-    ) -> dict:
-        """保存场景圣经和当前分段角色设定，并返回页面绑定所需的 key 到 id 映射。"""
+    ) -> None:
+        """保存规划阶段锁定的场景圣经和当前分段角色设定。"""
 
         scene_payloads = [
             self._normalize_scene_payload(scene)
@@ -771,39 +1236,18 @@ class ScriptService:
             for character in characters
             if isinstance(character, dict)
         ]
-        scene_keys = {scene["scene_key"] for scene in scene_payloads}
-        character_keys = {character["character_key"] for character in character_payloads}
+        if not scene_payloads:
+            raise ValueError("section visual settings must include at least one scene")
+        if not character_payloads:
+            raise ValueError("section visual settings must include at least one character")
         outline_characters_by_key = {
             character.character_key: character
             for character in self.repository.list_outline_characters(outline_version_id)
         }
-        for page in pages:
-            scene_key = str(page.get("scene_key", "")).strip()
-            if not scene_key:
-                raise ValueError(f"page {page.get('page_no')} missing required field: scene_key")
-            if scene_key not in scene_keys:
-                raise ValueError(f"page {page.get('page_no')} scene_key not found: {scene_key}")
-            page_character_keys = page.get("character_keys", [])
-            page_characters_text = str(page.get("characters", "")).strip()
-            if page_characters_text and page_characters_text != "无" and not page_character_keys:
-                raise ValueError(
-                    f"page {page.get('page_no')} has characters text but no character_keys"
-                )
-            for character_key in page_character_keys:
-                if character_key not in character_keys:
-                    raise ValueError(
-                        f"page {page.get('page_no')} character_key not found: {character_key}"
-                    )
-
-        scene_ids_by_key = {
-            scene["scene_key"]: self.repository.upsert_script_scene(
-                task_id=task_id,
-                **scene,
-            ).id
-            for scene in scene_payloads
-        }
-        character_ids_by_key = {
-            character["character_key"]: self.repository.upsert_script_section_character(
+        for scene in scene_payloads:
+            self.repository.upsert_script_scene(task_id=task_id, **scene)
+        for character in character_payloads:
+            self.repository.upsert_script_section_character(
                 section_id=section_id,
                 outline_character_id=(
                     outline_characters_by_key[character["character_key"]].id
@@ -812,13 +1256,234 @@ class ScriptService:
                 ),
                 task_id=task_id,
                 **character,
-            ).id
-            for character in character_payloads
+            )
+
+    def _visual_settings_for_section(
+        self,
+        *,
+        task_id: int,
+        section_id: int,
+        outline_version_id: int,
+        pages: list[dict],
+    ) -> dict:
+        """读取已锁定视觉设定并校验页面引用，防止 Writer 新增或改写设定。"""
+
+        del outline_version_id
+        scene_ids_by_key = {
+            scene.scene_key: scene.id
+            for scene in self.repository.list_script_scenes(task_id)
         }
+        character_ids_by_key = {
+            character.character_key: character.id
+            for character in self.repository.list_script_section_characters(section_id)
+        }
+        for page in pages:
+            scene_key = str(page.get("scene_key", "")).strip()
+            if not scene_key:
+                raise ValueError(f"page {page.get('page_no')} missing required field: scene_key")
+            if scene_key not in scene_ids_by_key:
+                raise ValueError(f"page {page.get('page_no')} scene_key not found: {scene_key}")
+            page_character_keys = page.get("character_keys", [])
+            page_characters_text = str(page.get("characters", "")).strip()
+            if page_characters_text and page_characters_text != "无" and not page_character_keys:
+                raise ValueError(
+                    f"page {page.get('page_no')} has characters text but no character_keys"
+                )
+            for character_key in page_character_keys:
+                if character_key not in character_ids_by_key:
+                    raise ValueError(
+                        f"page {page.get('page_no')} character_key not found: {character_key}"
+                    )
+
         return {
             "scene_ids_by_key": scene_ids_by_key,
             "character_ids_by_key": character_ids_by_key,
         }
+
+    def _section_visual_context(
+        self,
+        *,
+        task_id: int,
+        section: ScriptSection,
+        outline_version_id: int,
+    ) -> dict:
+        """读取当前分段已锁定的场景和角色设定，作为 Writer/Supervisor 的唯一视觉来源。"""
+
+        del outline_version_id
+        task = self.get_script_task(task_id)
+        planned_section = self._planned_section_payload(
+            section_plan=task.section_plan,
+            section_no=section.section_no,
+        )
+        planned_scene_keys = {
+            str(scene.get("scene_key", "")).strip()
+            for scene in planned_section.get("scenes", [])
+            if isinstance(scene, dict)
+        }
+        all_scenes = [self._scene_to_payload(scene) for scene in self.repository.list_script_scenes(task_id)]
+        section_scenes = (
+            [scene for scene in all_scenes if scene["scene_key"] in planned_scene_keys]
+            if planned_scene_keys
+            else all_scenes
+        )
+        section_characters = [
+            self._character_to_payload(character)
+            for character in self.repository.list_script_section_characters(section.id)
+        ]
+        if not section_scenes:
+            raise ValueError(f"section {section.section_no} has no locked scenes")
+        if not section_characters:
+            raise ValueError(f"section {section.section_no} has no locked characters")
+        return {
+            "scenes": section_scenes,
+            "characters": section_characters,
+        }
+
+    @staticmethod
+    def _planned_section_payload(*, section_plan: str | None, section_no: int) -> dict:
+        """从任务保存的 section_plan JSON 中取回某个分段的原始规划内容。"""
+
+        if not section_plan:
+            return {}
+        try:
+            sections = json.loads(section_plan)
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(sections, list):
+            return {}
+        for section in sections:
+            if isinstance(section, dict) and int(section.get("section_no", 0)) == section_no:
+                return section
+        return {}
+
+    @staticmethod
+    def _section_review_passed(review_result: dict) -> bool:
+        """判断监督结果是否整体通过；只要任一页不通过就进入修订重试。"""
+
+        reviews = review_result.get("reviews", [])
+        valid_reviews = [review for review in reviews if isinstance(review, dict)]
+        return bool(valid_reviews) and all(bool(review.get("passed")) for review in valid_reviews)
+
+    @staticmethod
+    def _review_feedback(reviews: list[dict]) -> str:
+        """把监督意见压成给 Writer 的修订反馈，保持按页定位。"""
+
+        feedback_lines: list[str] = []
+        for review in reviews:
+            if review.get("passed"):
+                continue
+            suggestions = review.get("revision_suggestions", [])
+            if not isinstance(suggestions, list):
+                suggestions = [str(suggestions)]
+            feedback_lines.append(
+                "第 {page_no} 页：{summary}；修改意见：{suggestions}".format(
+                    page_no=review.get("page_no", "-"),
+                    summary=review.get("summary", ""),
+                    suggestions="；".join(str(item) for item in suggestions if str(item).strip()),
+                )
+            )
+        return "\n".join(feedback_lines) or "监督未通过，请按逐页意见修订。"
+
+    @staticmethod
+    def _review_feedback_by_page_no(reviews: list[dict]) -> dict[int, str]:
+        """把监督意见按页码拆分，供单页修订时精确传入。"""
+
+        feedback_by_page_no: dict[int, str] = {}
+        scene_revision_rule = (
+            "硬性结构限制：每页只能绑定一个 scene_key；修订时必须让 scene、composition、"
+            "character_action 完全服务于同一个主场景，删除其它场景的核心家具、主光源、"
+            "空间结构或主体道具。"
+        )
+        for review in reviews:
+            if not isinstance(review, dict) or review.get("passed"):
+                continue
+            try:
+                page_no = int(review.get("page_no", 0))
+            except (TypeError, ValueError):
+                continue
+            if page_no <= 0:
+                continue
+            suggestions = review.get("revision_suggestions", [])
+            if not isinstance(suggestions, list):
+                suggestions = [str(suggestions)]
+            feedback_by_page_no[page_no] = "{rule}\n第 {page_no} 页：{summary}；修改意见：{suggestions}".format(
+                rule=scene_revision_rule,
+                page_no=page_no,
+                summary=review.get("summary", ""),
+                suggestions="；".join(str(item) for item in suggestions if str(item).strip()),
+            )
+        return feedback_by_page_no
+
+    @staticmethod
+    def _revision_page_nos_from_reviews(reviews: list[dict]) -> list[int]:
+        """从监督结果中提取需要局部修订的页码。"""
+
+        page_nos: set[int] = set()
+        for review in reviews:
+            if not isinstance(review, dict) or review.get("passed"):
+                continue
+            try:
+                page_no = int(review.get("page_no", 0))
+            except (TypeError, ValueError):
+                continue
+            if page_no > 0:
+                page_nos.add(page_no)
+        return sorted(page_nos)
+
+    @staticmethod
+    def _default_single_page_scene() -> dict:
+        """单页生成兼容入口使用的最小默认场景；前端主流程已不使用单页生成。"""
+
+        return {
+            "scene_key": "single_page_scene",
+            "name": "单页场景",
+            "location_type": "按当前页面脚本决定",
+            "time_of_day": "按当前页面脚本决定",
+            "lighting": "按当前页面脚本决定",
+            "weather": "按当前页面脚本决定",
+            "environment_details": "根据大纲和本页内容生成统一场景。",
+            "color_palette": "按当前页面情绪决定。",
+            "visual_anchors": "保持大纲中的主要地点和氛围一致。",
+            "negative_constraints": "不要生成与大纲冲突的地点和时代元素。",
+        }
+
+    @staticmethod
+    def _default_single_page_characters(outline_characters: list[dict]) -> list[dict]:
+        """单页生成兼容入口把大纲角色基准转成当前分段角色设定默认值。"""
+
+        if not outline_characters:
+            return [
+                {
+                    "character_key": "unknown_character",
+                    "name": "未指定角色",
+                    "section_role": "按当前页面脚本决定",
+                    "current_hairstyle": "按当前页面脚本决定",
+                    "current_clothing": "按当前页面脚本决定",
+                    "current_accessories": "无",
+                    "current_state": "按当前页面脚本决定",
+                    "emotion": "按当前页面脚本决定",
+                    "temporary_changes": "无",
+                    "visual_anchors": "保持角色在大纲中的识别特征。",
+                    "negative_constraints": "不要生成与大纲冲突的角色设定。",
+                }
+            ]
+        return [
+            {
+                "character_key": str(character.get("character_key", "")).strip(),
+                "name": str(character.get("name", "")).strip(),
+                "section_role": str(character.get("role", "")).strip() or "单页出场角色",
+                "current_hairstyle": str(character.get("default_hairstyle", "")).strip() or "沿用大纲默认发型",
+                "current_clothing": str(character.get("default_clothing", "")).strip() or "沿用大纲默认服装",
+                "current_accessories": str(character.get("default_accessories", "")).strip() or "沿用大纲默认配件",
+                "current_state": "按当前页面脚本决定",
+                "emotion": "按当前页面脚本决定",
+                "temporary_changes": "无",
+                "visual_anchors": str(character.get("visual_anchors", "")).strip() or "沿用大纲角色视觉锚点",
+                "negative_constraints": str(character.get("negative_constraints", "")).strip() or "不得违背大纲角色基准",
+            }
+            for character in outline_characters
+            if str(character.get("character_key", "")).strip()
+        ]
 
     @staticmethod
     def _normalize_section_plan(*, sections: list, total_pages: int) -> list[dict]:
@@ -846,6 +1511,16 @@ class ScriptService:
                     "page_end": page_end,
                     "title": str(raw_section.get("title", "")),
                     "description": str(raw_section.get("description", "")),
+                    "scenes": [
+                        ScriptService._normalize_scene_payload(scene)
+                        for scene in raw_section.get("scenes", [])
+                        if isinstance(scene, dict)
+                    ],
+                    "characters": [
+                        ScriptService._normalize_character_payload(character)
+                        for character in raw_section.get("characters", [])
+                        if isinstance(character, dict)
+                    ],
                 }
             )
 
@@ -865,6 +1540,10 @@ class ScriptService:
                     f"section plan must be continuous; expected page_start={expected_start}, "
                     f"got {section['page_start']} for section {section['section_no']}"
                 )
+            if not section["scenes"]:
+                raise ValueError(f"section {section['section_no']} must define at least one scene")
+            if not section["characters"]:
+                raise ValueError(f"section {section['section_no']} must define at least one character")
             expected_start = section["page_end"] + 1
         if expected_start != total_pages + 1:
             raise ValueError(
@@ -876,8 +1555,69 @@ class ScriptService:
     def _normalize_section_pages(self, *, pages: list, section: ScriptSection) -> list[dict]:
         """校验当前分段脚本输出，确保 Agent 只能交付当前 section 的完整页码范围。"""
 
+        expected_page_nos = set(range(section.page_start, section.page_end + 1))
+        return self._normalize_pages_for_expected_page_nos(
+            pages=pages,
+            section=section,
+            expected_page_nos=expected_page_nos,
+            error_label=(
+                f"section {section.section_no} pages must cover "
+                f"{section.page_start}-{section.page_end}"
+            ),
+        )
+
+    def _normalize_single_page(
+        self,
+        *,
+        pages: list,
+        section: ScriptSection,
+        page_no: int,
+    ) -> list[dict]:
+        """校验单页 Writer 输出，只允许返回当前目标页。"""
+
+        return self._normalize_pages_for_expected_page_nos(
+            pages=pages,
+            section=section,
+            expected_page_nos={page_no},
+            error_label=(
+                f"section {section.section_no} page generation must return exactly page {page_no}"
+            ),
+        )
+
+    def _normalize_revision_pages(
+        self,
+        *,
+        pages: list,
+        section: ScriptSection,
+        expected_page_nos: list[int],
+    ) -> list[dict]:
+        """校验监督修订输出，只允许返回被监督点名的页面。"""
+
+        expected_page_no_set = set(expected_page_nos)
+        return self._normalize_pages_for_expected_page_nos(
+            pages=pages,
+            section=section,
+            expected_page_nos=expected_page_no_set,
+            error_label=(
+                f"section {section.section_no} revision pages must be exactly "
+                f"{sorted(expected_page_no_set)}"
+            ),
+        )
+
+    def _normalize_pages_for_expected_page_nos(
+        self,
+        *,
+        pages: list,
+        section: ScriptSection,
+        expected_page_nos: set[int],
+        error_label: str,
+    ) -> list[dict]:
+        """统一校验页面脚本字段和页码集合；全量/局部修订共用这一套规则。"""
+
         if not isinstance(pages, list) or not pages:
             raise ValueError("section pages cannot be empty")
+        if not expected_page_nos:
+            raise ValueError("expected page numbers cannot be empty")
 
         required_text_fields = [
             "scene_key",
@@ -936,15 +1676,26 @@ class ScriptService:
                 }
             )
 
-        expected_page_nos = set(range(section.page_start, section.page_end + 1))
         if seen_page_nos != expected_page_nos:
             missing = sorted(expected_page_nos - seen_page_nos)
             extra = sorted(seen_page_nos - expected_page_nos)
-            raise ValueError(
-                f"section {section.section_no} pages must cover "
-                f"{section.page_start}-{section.page_end}; missing={missing}, extra={extra}"
-            )
+            raise ValueError(f"{error_label}; missing={missing}, extra={extra}")
         return sorted(normalized_pages, key=lambda page: page["page_no"])
+
+    @staticmethod
+    def _merge_revision_pages(
+        *,
+        current_pages: list[dict] | None,
+        revision_pages: list[dict],
+    ) -> list[dict]:
+        """把监督修订页按 page_no 覆盖进当前完整 section 页面集。"""
+
+        if not current_pages:
+            raise ValueError("revision cannot be merged before full section pages exist")
+        pages_by_no = {int(page["page_no"]): page for page in current_pages}
+        for page in revision_pages:
+            pages_by_no[int(page["page_no"])] = page
+        return [pages_by_no[page_no] for page_no in sorted(pages_by_no)]
 
     def _save_section_pages(
         self,
@@ -1053,10 +1804,6 @@ class ScriptService:
             "known_scenes": [
                 self._scene_to_payload(scene)
                 for scene in self.repository.list_script_scenes(task_id)
-            ],
-            "known_characters": [
-                self._character_to_payload(character)
-                for character in self.repository.list_script_characters(task_id)
             ],
         }
 

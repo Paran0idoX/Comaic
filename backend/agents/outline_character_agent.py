@@ -1,10 +1,10 @@
 import logging
 from typing import Any
 
-from langchain.agents import create_agent
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field
 
+from backend.agents.agent_factory import create_structured_agent
 from backend.agents.structured_output import ainvoke_structured_with_retries
 from backend.utils.prompt_loader import PromptLoader
 
@@ -49,11 +49,10 @@ class OutlineCharacterAgent:
         self.llm = llm or self._default_llm()
         self.max_structured_retries = max_structured_retries
         self.prompt = PromptLoader.load(prompt_name)
-        self._agent = create_agent(
+        self._agent = create_structured_agent(
             model=self.llm,
-            tools=[],
             system_prompt=self.prompt,
-            response_format=OutlineCharacterResponse,
+            response_model=OutlineCharacterResponse,
             name="outline_character_agent",
         )
 
