@@ -1,10 +1,11 @@
 import logging
 from typing import Any
 
-from langchain.agents import create_agent
 from langchain_core.messages import HumanMessage
 
+from backend.agents.agent_factory import create_structured_agent
 from backend.agents.script_agent_models import StoryPacingResponse
+from backend.agents.script_prompt_formatters import format_outline_characters
 from backend.agents.structured_output import ainvoke_structured_with_retries
 from backend.utils.prompt_loader import PromptLoader
 
@@ -28,11 +29,10 @@ class ScriptPlanningAgent:
         self.max_structured_retries = max_structured_retries
         self.prompt = PromptLoader.load(prompt_name)
         logger.info("Initializing ScriptPlanningAgent prompt=%s", prompt_name)
-        self._agent = create_agent(
+        self._agent = create_structured_agent(
             model=self.llm,
-            tools=[],
             system_prompt=self.prompt,
-            response_format=StoryPacingResponse,
+            response_model=StoryPacingResponse,
             name="script_planning_agent",
         )
 
@@ -41,15 +41,17 @@ class ScriptPlanningAgent:
         *,
         outline: str,
         total_pages: int,
+        outline_characters: list[dict] | None = None,
         user_requirement: str = "",
         feedback: str = "",
     ) -> list[dict]:
-        """生成完整分段计划；校验和保存由 Service 负责。"""
+        """生成完整分段计划和每段视觉设定；校验和保存由 Service 负责。"""
 
         logger.info(
-            "ScriptPlanningAgent generation started total_pages=%s outline_chars=%s requirement_chars=%s feedback_chars=%s",
+            "ScriptPlanningAgent generation started total_pages=%s outline_chars=%s character_count=%s requirement_chars=%s feedback_chars=%s",
             total_pages,
             len(outline),
+            len(outline_characters or []),
             len(user_requirement),
             len(feedback),
         )
@@ -60,6 +62,7 @@ class ScriptPlanningAgent:
                     content=self._build_input(
                         outline=outline,
                         total_pages=total_pages,
+                        outline_characters=outline_characters or [],
                         user_requirement=user_requirement,
                         feedback=feedback,
                     )
@@ -76,16 +79,22 @@ class ScriptPlanningAgent:
 
     @staticmethod
     def _validate_response(response: StoryPacingResponse) -> None:
-        """分段规划至少需要返回一个分段；连续性等细节由 Service 统一校验。"""
+        """分段规划至少需要返回分段、场景和角色；连续性由 Service 校验。"""
 
         if not response.sections:
             raise ValueError("ScriptPlanningAgent structured_response contains no sections.")
+        for section in response.sections:
+            if not section.scenes:
+                raise ValueError(f"section {section.section_no} contains no scenes.")
+            if not section.characters:
+                raise ValueError(f"section {section.section_no} contains no characters.")
 
     @staticmethod
     def _build_input(
         *,
         outline: str,
         total_pages: int,
+        outline_characters: list[dict],
         user_requirement: str,
         feedback: str,
     ) -> str:
@@ -95,6 +104,8 @@ class ScriptPlanningAgent:
             f"目标总页数：{total_pages}",
             "漫画大纲：",
             outline,
+            "大纲阶段已确认的角色基准设定：",
+            format_outline_characters(outline_characters),
             "用户补充要求：",
             user_requirement or "无",
         ]
