@@ -1,4 +1,6 @@
-# Comaic
+<p align="center">
+  <img src="./frontend/src/assets/logo/logo-wordmark.svg" alt="Comaic" width="320" />
+</p>
 
 English | [简体中文](./README.zh-CN.md)
 
