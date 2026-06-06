@@ -199,6 +199,26 @@ async def generate_for_script_task(
         return generation_result_to_response(result)
 
 
+@router.post("/pages/{page_id}/generate", response_model=ImagePromptGenerationItemResponse)
+async def generate_for_page(
+    page_id: int,
+    request: GenerateImagePromptsRequest,
+    http_request: Request,
+) -> ImagePromptGenerationItemResponse:
+    """为单页重新生成图片 Prompt，供失败页或人工挑选页局部重试。"""
+
+    with SessionLocal() as db_session:
+        service = ImagePromptService(ComicRepository(db_session))
+        try:
+            item = await service.generate_for_page(
+                page_id=page_id,
+                system_prompt_preset_id=request.system_prompt_preset_id,
+            )
+        except ValueError as exc:
+            raise http_exception(exc, request_locale(http_request)) from exc
+        return generation_item_to_response(item)
+
+
 @router.post("/script-tasks/{task_id}/generate/stream")
 def stream_generate_for_script_task(
     task_id: int,

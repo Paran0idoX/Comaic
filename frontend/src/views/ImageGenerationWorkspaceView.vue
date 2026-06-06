@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Delete, EditPen, Picture, Plus, Refresh, Search, Select, UploadFilled, VideoPause, View } from '@element-plus/icons-vue'
+import { Delete, EditPen, Picture, Plus, Search, Select, UploadFilled, VideoPause, View } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { UploadFile } from 'element-plus'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
@@ -590,14 +590,6 @@ onMounted(() => {
 
 <template>
   <section v-loading="loading" class="image-generation-page">
-    <div class="page-header">
-      <div>
-        <h1 class="page-title">{{ t('imageGeneration.title') }}</h1>
-        <p class="page-subtitle">{{ t('imageGeneration.subtitle') }}</p>
-      </div>
-      <el-button :icon="Refresh" @click="refreshAll">{{ t('imageGeneration.actions.refresh') }}</el-button>
-    </div>
-
     <div class="image-generation-grid">
       <section class="panel generation-config">
         <header class="panel-header">
@@ -637,7 +629,14 @@ onMounted(() => {
         </el-form>
 
         <div class="generation-actions">
-          <el-button type="primary" :icon="Picture" :loading="generating" :disabled="!canGenerate" @click="generateBatch">
+          <el-button
+            class="ai-gradient-button"
+            type="primary"
+            :icon="Picture"
+            :loading="generating"
+            :disabled="!canGenerate"
+            @click="generateBatch"
+          >
             {{ t('imageGeneration.actions.generate') }}
           </el-button>
           <el-button
@@ -715,9 +714,6 @@ onMounted(() => {
             <h2>{{ t('imageGeneration.pages.title') }}</h2>
             <p>{{ selectedProject?.title || t('imageGeneration.pages.noProject') }}</p>
           </div>
-          <el-button text :icon="Refresh" :loading="loadingPages" @click="loadPages">
-            {{ t('imageGeneration.actions.refresh') }}
-          </el-button>
         </header>
 
         <el-table v-loading="loadingPages" :data="sortedPages" height="620">
@@ -834,18 +830,22 @@ onMounted(() => {
 .page-header,
 .panel-header {
   display: flex;
-  justify-content: space-between;
   gap: 16px;
 }
 
-.page-title,
-.page-subtitle,
+.page-header {
+  justify-content: flex-end;
+}
+
+.panel-header {
+  justify-content: space-between;
+}
+
 .panel-header h2,
 .panel-header p {
   margin: 0;
 }
 
-.page-subtitle,
 .panel-header p,
 .muted {
   color: var(--text-soft);

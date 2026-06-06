@@ -1,15 +1,13 @@
 export const messages = {
   zh: {
     app: {
-      productName: 'comaic',
+      productName: 'Comaic',
       productSubtitle: 'AI 漫画工作台',
-      preview: 'MVP Preview',
       env: 'local',
       notifications: '通知',
       settings: '设置',
     },
     nav: {
-      projects: '项目',
       outline: '大纲工作台',
       scripts: '分页脚本',
       prompts: '图片 Prompt',
@@ -17,23 +15,19 @@ export const messages = {
     },
     projects: {
       title: '项目',
-      subtitle: '管理漫画项目、进入大纲对话，并查看每个项目当前推进阶段。',
+      subtitle: '管理漫画项目，并进入大纲对话继续创作。',
       create: '新建项目',
       edit: '编辑',
       delete: '删除',
       save: '保存',
       saving: '保存中',
       loading: '加载中',
-      totalProjects: '项目总数',
-      outlineSessions: '大纲会话',
-      pendingPages: '待确认页面',
       search: '搜索项目',
-      filter: '筛选',
+      searchAction: '搜索',
       empty: '还没有项目',
       emptyDescription: '先创建一个漫画项目，再进入大纲工作台。',
       columns: {
         title: '项目名',
-        stage: '阶段',
         pages: '页面',
         sessions: '会话',
         createdAt: '创建时间',
@@ -69,7 +63,9 @@ export const messages = {
     outline: {
       title: '大纲工作台',
       subtitle: '左侧进行多轮大纲对话，右侧展示每轮对话后生成的大纲快照。',
-      viewProject: '查看项目',
+      manageProjects: '项目',
+      projectPlaceholder: '选择项目',
+      emptyProjects: '还没有可用项目，请先创建项目。',
       errors: {
         missingProject: '请先从项目列表选择一个项目进入大纲工作台。',
         loadSession: '大纲会话加载失败',
@@ -151,7 +147,6 @@ export const messages = {
     scripts: {
       title: '分页脚本',
       subtitle: '选择项目、大纲版本和脚本任务，查看分段与页面脚本，并支持未完成任务继续生成。',
-      refresh: '刷新',
       config: {
         title: '生成配置',
         description: '先选择项目和大纲版本，再创建或选择脚本任务。',
@@ -242,7 +237,6 @@ export const messages = {
         error: '任务失败',
         single_done: '单页生成完成',
         missing_outline: '缺少大纲',
-        refreshed: '已刷新',
         batchStarted: '批量生成已开始',
         reviewDone: '审查完成',
       },
@@ -335,7 +329,6 @@ export const messages = {
       title: '设置',
       subtitle: '配置后端 Agent 使用的 LangChain Provider、API Key 和该组 API 下的多个模型名。',
       actions: {
-        refresh: '刷新',
         addConfig: '新增 API 配置',
         addModel: '新增模型',
         save: '保存设置',
@@ -386,7 +379,6 @@ export const messages = {
       },
     },
     routeTitles: {
-      projects: '项目',
       outline: '大纲工作台',
       scripts: '分页脚本',
       prompts: '图片 Prompt',
@@ -398,7 +390,6 @@ export const messages = {
       subtitle: '维护 ComfyUI workflow，并为已完成脚本任务批量生成页面图片。',
       emptyText: '暂无内容',
       actions: {
-        refresh: '刷新',
         generate: '批量生成图片',
         suspend: '暂停生成',
         addWorkflow: '新增 Workflow',
@@ -505,12 +496,14 @@ export const messages = {
       subtitle: '维护脚本转图 SystemPrompt 与 Negative Prompt，并为已完成脚本任务生成文生图 Prompt。',
       emptyText: '暂无内容',
       actions: {
-        refresh: '刷新',
         generate: '生成图片 Prompt',
         addPreset: '新增配置',
         editPreset: '编辑',
         deletePreset: '删除',
         view: '查看',
+        retryPage: '重试',
+        copy: '复制',
+        close: '关闭',
       },
       generation: {
         title: '任务生成',
@@ -558,9 +551,12 @@ export const messages = {
         presetDeleted: '配置已删除',
         deletePresetConfirm: '确定删除配置“{name}”吗？已生成到页面的 Prompt 不会被删除。',
         historyLoaded: '已加载历史图片 Prompt',
+        historyLoadedAt: '历史已加载：{time}',
         regenerateConfirm: '再次生成会先清空该脚本任务已有的图片 Prompt，确定继续吗？',
         generatingProgress: '生成进度：{completed} / {total}',
         generated: '图片 Prompt 生成完成',
+        pageRetrySucceeded: '该页图片 Prompt 已重新生成',
+        copied: '已复制',
       },
       errors: {
         loadFailed: '图片 Prompt 数据加载失败',
@@ -571,6 +567,8 @@ export const messages = {
         selectTask: '请先选择已完成脚本任务',
         selectSystemPreset: '请先选择脚本转图 SystemPrompt',
         generateFailed: '图片 Prompt 生成失败',
+        pageRetryFailed: '单页图片 Prompt 重试失败',
+        copyFailed: '复制失败',
       },
     },
     backendEvents: {
@@ -672,15 +670,13 @@ export const messages = {
   },
   en: {
     app: {
-      productName: 'comaic',
+      productName: 'Comaic',
       productSubtitle: 'AI Comics Workspace',
-      preview: 'MVP Preview',
       env: 'local',
       notifications: 'Notifications',
       settings: 'Settings',
     },
     nav: {
-      projects: 'Projects',
       outline: 'Outline Workspace',
       scripts: 'Page Scripts',
       prompts: 'Image Prompts',
@@ -688,23 +684,19 @@ export const messages = {
     },
     projects: {
       title: 'Projects',
-      subtitle: 'Manage comic projects, open outline sessions, and track each project stage.',
+      subtitle: 'Manage comic projects and open the outline workspace to keep creating.',
       create: 'New Project',
       edit: 'Edit',
       delete: 'Delete',
       save: 'Save',
       saving: 'Saving',
       loading: 'Loading',
-      totalProjects: 'Total Projects',
-      outlineSessions: 'Outline Sessions',
-      pendingPages: 'Pending Pages',
       search: 'Search projects',
-      filter: 'Filter',
+      searchAction: 'Search',
       empty: 'No projects yet',
       emptyDescription: 'Create a comic project first, then open the outline workspace.',
       columns: {
         title: 'Project',
-        stage: 'Stage',
         pages: 'Pages',
         sessions: 'Sessions',
         createdAt: 'Created',
@@ -742,7 +734,9 @@ export const messages = {
       title: 'Outline Workspace',
       subtitle:
         'Run multi-turn outline conversations on the left and review generated outline snapshots on the right.',
-      viewProject: 'View Project',
+      manageProjects: 'Project',
+      projectPlaceholder: 'Select project',
+      emptyProjects: 'No projects yet. Create a project first.',
       errors: {
         missingProject: 'Open the outline workspace from a project first.',
         loadSession: 'Failed to load outline session',
@@ -828,7 +822,6 @@ export const messages = {
       title: 'Page Scripts',
       subtitle:
         'Select a project, outline version, and script task to review sections, pages, and continue unfinished tasks.',
-      refresh: 'Refresh',
       config: {
         title: 'Generation Setup',
         description: 'Choose a project and outline version, then create or select a script task.',
@@ -920,7 +913,6 @@ export const messages = {
         error: 'Failed',
         single_done: 'Single Page Done',
         missing_outline: 'Missing Outline',
-        refreshed: 'Refreshed',
         batchStarted: 'Batch generation started',
         reviewDone: 'Review complete',
       },
@@ -1015,7 +1007,6 @@ export const messages = {
       subtitle:
         'Configure LangChain providers, API keys, and multiple model names under each API.',
       actions: {
-        refresh: 'Refresh',
         addConfig: 'Add API Config',
         addModel: 'Add Model',
         save: 'Save Settings',
@@ -1068,7 +1059,6 @@ export const messages = {
       },
     },
     routeTitles: {
-      projects: 'Projects',
       outline: 'Outline Workspace',
       scripts: 'Page Scripts',
       prompts: 'Image Prompts',
@@ -1080,7 +1070,6 @@ export const messages = {
       subtitle: 'Manage ComfyUI workflows and generate page images from completed script tasks.',
       emptyText: 'No content',
       actions: {
-        refresh: 'Refresh',
         generate: 'Generate Images',
         suspend: 'Pause Generation',
         addWorkflow: 'Add Workflow',
@@ -1189,12 +1178,14 @@ export const messages = {
         'Manage script-to-image system prompts and negative prompts, then generate image prompts for completed script tasks.',
       emptyText: 'No content',
       actions: {
-        refresh: 'Refresh',
         generate: 'Generate Image Prompts',
         addPreset: 'Add Preset',
         editPreset: 'Edit',
         deletePreset: 'Delete',
         view: 'View',
+        retryPage: 'Retry',
+        copy: 'Copy',
+        close: 'Close',
       },
       generation: {
         title: 'Generation',
@@ -1243,10 +1234,13 @@ export const messages = {
         deletePresetConfirm:
           'Delete preset "{name}"? Prompts already saved to pages will not be deleted.',
         historyLoaded: 'Loaded existing image prompts',
+        historyLoadedAt: 'History loaded: {time}',
         regenerateConfirm:
           'Generating again will clear existing image prompts for this script task first. Continue?',
         generatingProgress: 'Progress: {completed} / {total}',
         generated: 'Image prompts generated',
+        pageRetrySucceeded: 'Image prompt regenerated for this page',
+        copied: 'Copied',
       },
       errors: {
         loadFailed: 'Failed to load image prompt data',
@@ -1257,6 +1251,8 @@ export const messages = {
         selectTask: 'Select a completed script task first',
         selectSystemPreset: 'Select a script-to-image SystemPrompt first',
         generateFailed: 'Failed to generate image prompts',
+        pageRetryFailed: 'Failed to retry this page',
+        copyFailed: 'Failed to copy',
       },
     },
     backendEvents: {

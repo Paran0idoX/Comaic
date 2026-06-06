@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { ChatLineRound, FolderOpened, MagicStick, Picture, Tickets } from '@element-plus/icons-vue'
+import { ChatLineRound, MagicStick, Picture, Tickets } from '@element-plus/icons-vue'
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute } from 'vue-router'
+
+import logoUrl from '@/assets/logo/logo.svg'
 
 const route = useRoute()
 const { t } = useI18n()
@@ -14,7 +16,7 @@ const activePath = computed(() => route.path)
 <template>
   <aside class="sidebar-nav">
     <div class="sidebar-nav__brand">
-      <div class="sidebar-nav__mark">C</div>
+      <img class="sidebar-nav__mark" :src="logoUrl" :alt="t('app.productName')" />
       <div>
         <strong>{{ t('app.productName') }}</strong>
         <span>{{ t('app.productSubtitle') }}</span>
@@ -24,15 +26,11 @@ const activePath = computed(() => route.path)
     <el-menu
       :default-active="activePath"
       router
-      background-color="#111827"
-      text-color="#cbd5e1"
+      background-color="transparent"
+      text-color="#aebfd6"
       active-text-color="#ffffff"
       class="sidebar-nav__menu"
     >
-      <el-menu-item index="/projects">
-        <el-icon><FolderOpened /></el-icon>
-        <span>{{ t('nav.projects') }}</span>
-      </el-menu-item>
       <el-menu-item index="/outline">
         <el-icon><ChatLineRound /></el-icon>
         <span>{{ t('nav.outline') }}</span>
@@ -57,6 +55,7 @@ const activePath = computed(() => route.path)
 .sidebar-nav {
   min-height: 100%;
   padding: 22px 14px;
+  background: transparent;
 }
 
 .sidebar-nav__brand {
@@ -67,13 +66,9 @@ const activePath = computed(() => route.path)
 }
 
 .sidebar-nav__mark {
-  display: grid;
   width: 38px;
   height: 38px;
-  place-items: center;
-  border-radius: 8px;
-  background: #4f6bff;
-  font-weight: 800;
+  object-fit: contain;
 }
 
 .sidebar-nav__brand strong,
@@ -83,16 +78,34 @@ const activePath = computed(() => route.path)
 
 .sidebar-nav__brand span {
   margin-top: 4px;
-  color: #94a3b8;
+  color: #93a8c7;
   font-size: 12px;
 }
 
 .sidebar-nav__menu {
   border-right: 0;
+  background: transparent;
 }
 
 :deep(.el-menu-item) {
+  height: 46px;
+  margin: 4px 0;
   border-radius: 8px;
+  color: #aebfd6;
+}
+
+:deep(.el-menu-item:hover) {
+  background: rgba(16, 181, 244, 0.1);
+  color: #ffffff;
+}
+
+:deep(.el-menu-item.is-active) {
+  background: linear-gradient(135deg, #10b5f4, #176dff, #8b1cff);
+  box-shadow: none;
+}
+
+:deep(.el-menu-item.is-active .el-icon) {
+  color: #ffffff;
 }
 
 @media (max-width: 860px) {

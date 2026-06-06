@@ -25,7 +25,6 @@ const editingProjectId = ref<number | null>(null)
 const projectTitle = ref('')
 const searchKeyword = ref('')
 
-// 本页先只接项目 CRUD；会话数和待确认页面后续随 API 扩展再替换为真实统计。
 const filteredProjects = computed(() => {
   const keyword = searchKeyword.value.trim().toLowerCase()
   if (!keyword) {
@@ -131,39 +130,22 @@ onMounted(() => {
 <template>
   <section>
     <div class="page-header">
-      <div>
-        <h1 class="page-title">{{ t('projects.title') }}</h1>
-        <p class="page-subtitle">{{ t('projects.subtitle') }}</p>
-      </div>
       <el-button type="primary" :icon="Plus" @click="openCreateDialog">
         {{ t('projects.create') }}
       </el-button>
     </div>
 
-    <div class="project-stats">
-      <el-card shadow="never">
-        <span>{{ t('projects.totalProjects') }}</span>
-        <strong>{{ projects.length }}</strong>
-      </el-card>
-      <el-card shadow="never">
-        <span>{{ t('projects.outlineSessions') }}</span>
-        <strong>0</strong>
-      </el-card>
-      <el-card shadow="never">
-        <span>{{ t('projects.pendingPages') }}</span>
-        <strong>0</strong>
-      </el-card>
-    </div>
-
     <section class="project-list panel">
       <header class="project-list__toolbar">
-        <el-input
-          v-model="searchKeyword"
-          :placeholder="t('projects.search')"
-          :prefix-icon="Search"
-          clearable
-        />
-        <el-button>{{ t('projects.filter') }}</el-button>
+        <div class="project-list__search">
+          <el-input
+            v-model="searchKeyword"
+            :placeholder="t('projects.search')"
+            :prefix-icon="Search"
+            clearable
+          />
+          <el-button>{{ t('projects.searchAction') }}</el-button>
+        </div>
       </header>
 
       <el-table
@@ -173,11 +155,6 @@ onMounted(() => {
         class="project-list__table"
       >
         <el-table-column prop="title" :label="t('projects.columns.title')" min-width="220" />
-        <el-table-column :label="t('projects.columns.stage')" width="130">
-          <template #default>
-            <el-tag effect="plain">{{ t('projects.stages.outline') }}</el-tag>
-          </template>
-        </el-table-column>
         <el-table-column :label="t('projects.columns.createdAt')" min-width="180">
           <template #default="{ row }">
             {{ formatDate(row.created_at) }}
@@ -239,40 +216,26 @@ onMounted(() => {
 </template>
 
 <style scoped>
-.project-stats {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 18px;
-  margin-bottom: 22px;
-}
-
-.project-stats :deep(.el-card__body) {
-  display: grid;
-  gap: 10px;
-}
-
-.project-stats span {
-  color: var(--text-soft);
-}
-
-.project-stats strong {
-  font-size: 30px;
-}
-
 .project-list {
   overflow: hidden;
 }
 
 .project-list__toolbar {
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 14px;
   padding: 18px;
   border-bottom: 1px solid var(--panel-border);
 }
 
-.project-list__toolbar .el-input {
-  max-width: 360px;
+.project-list__search {
+  display: flex;
+  gap: 10px;
+  width: min(100%, 460px);
+}
+
+.project-list__search .el-input {
+  flex: 1;
 }
 
 .project-list__table {
@@ -284,16 +247,12 @@ onMounted(() => {
 }
 
 @media (max-width: 900px) {
-  .project-stats {
-    grid-template-columns: 1fr;
-  }
-
   .project-list__toolbar {
-    flex-direction: column;
+    justify-content: stretch;
   }
 
-  .project-list__toolbar .el-input {
-    max-width: none;
+  .project-list__search {
+    width: 100%;
   }
 }
 </style>
