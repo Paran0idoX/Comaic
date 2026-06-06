@@ -126,6 +126,15 @@ export const generateImagePromptsForTask = (
     body: JSON.stringify(payload),
   })
 
+export const generateImagePromptForPage = (
+  pageId: number,
+  payload: GenerateImagePromptsPayload,
+): Promise<ImagePromptGenerationItem> =>
+  requestJson<ImagePromptGenerationItem>(`/api/image-prompts/pages/${pageId}/generate`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+
 export const streamGenerateImagePromptsForTask = async (
   taskId: number,
   payload: GenerateImagePromptsPayload,

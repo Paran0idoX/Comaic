@@ -2,13 +2,14 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import MarkdownIt from 'markdown-it'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Delete, EditPen, MagicStick, Plus, Refresh, View } from '@element-plus/icons-vue'
+import { CopyDocument, Delete, EditPen, MagicStick, Plus, Refresh, View } from '@element-plus/icons-vue'
 import { useI18n } from 'vue-i18n'
 
 import {
   IMAGE_PROMPT_PRESET_KINDS,
   createImagePromptPreset,
   deleteImagePromptPreset,
+  generateImagePromptForPage,
   listCompletedScriptTasks,
   listImagePromptPresets,
   listScriptTaskImagePrompts,
@@ -49,6 +50,8 @@ const detailItem = ref<ImagePromptGenerationItem | null>(null)
 const detailVisible = ref(false)
 const editorVisible = ref(false)
 const editingPresetId = ref<number | null>(null)
+const historyLoadedAt = ref<string | null>(null)
+const retryingPageIds = ref<Set<number>>(new Set())
 
 const presetForm = reactive({
   name: '',
@@ -70,6 +73,15 @@ const renderedPresetContent = computed(() => markdown.render(presetForm.content 
 const sortedGenerationItems = computed(() =>
   [...(generationResult.value?.items ?? [])].sort((left, right) => left.page_no - right.page_no),
 )
+const completedCount = computed(() =>
+  generationResult.value === null ? 0 : generationResult.value.succeeded + generationResult.value.failed,
+)
+const progressPercentage = computed(() => {
+  if (generationResult.value === null || generationResult.value.total <= 0) {
+    return 0
+  }
+  return Math.round((completedCount.value / generationResult.value.total) * 100)
+})
 
 const formatDate = (value: string) => {
   return formatLocalDateTime(value, locale.value)
@@ -139,14 +151,16 @@ const loadTasks = async () => {
 const loadTaskPrompts = async () => {
   if (selectedTaskId.value === null) {
     generationResult.value = null
+    historyLoadedAt.value = null
     return
   }
   loadingPrompts.value = true
   try {
     generationResult.value = await listScriptTaskImagePrompts(selectedTaskId.value)
-    ElMessage.success(t('prompts.messages.historyLoaded'))
+    historyLoadedAt.value = formatDate(new Date().toISOString())
   } catch {
     generationResult.value = null
+    historyLoadedAt.value = null
     ElMessage.error(t('prompts.errors.loadTaskPromptsFailed'))
   } finally {
     loadingPrompts.value = false
@@ -251,6 +265,14 @@ const stringFromPayload = (payload: Record<string, unknown>, key: string) => {
   return typeof value === 'string' ? value : null
 }
 
+const refreshGenerationCounters = () => {
+  if (generationResult.value === null) {
+    return
+  }
+  generationResult.value.succeeded = generationResult.value.items.filter((item) => item.image_prompt).length
+  generationResult.value.failed = generationResult.value.items.filter((item) => item.error).length
+}
+
 const upsertGenerationItem = (item: ImagePromptGenerationItem) => {
   if (generationResult.value === null) {
     return
@@ -263,6 +285,39 @@ const upsertGenerationItem = (item: ImagePromptGenerationItem) => {
     items.push(item)
   }
   items.sort((left, right) => left.page_no - right.page_no)
+  refreshGenerationCounters()
+}
+
+const isRetryingPage = (pageId: number) => retryingPageIds.value.has(pageId)
+
+const setRetryingPage = (pageId: number, value: boolean) => {
+  const next = new Set(retryingPageIds.value)
+  if (value) {
+    next.add(pageId)
+  } else {
+    next.delete(pageId)
+  }
+  retryingPageIds.value = next
+}
+
+const retryPagePrompt = async (item: ImagePromptGenerationItem) => {
+  if (selectedSystemPresetId.value === null) {
+    ElMessage.warning(t('prompts.errors.selectSystemPreset'))
+    return
+  }
+  setRetryingPage(item.page_id, true)
+  try {
+    const updated = await generateImagePromptForPage(item.page_id, {
+      system_prompt_preset_id: selectedSystemPresetId.value,
+      concurrency: 1,
+    })
+    upsertGenerationItem(updated)
+    ElMessage.success(t('prompts.messages.pageRetrySucceeded'))
+  } catch (error) {
+    ElMessage.error(apiErrorMessage(error, t, t('prompts.errors.pageRetryFailed')))
+  } finally {
+    setRetryingPage(item.page_id, false)
+  }
 }
 
 const generatePrompts = async () => {
@@ -301,6 +356,7 @@ const generatePrompts = async () => {
       {
         onEvent: (event, payload) => {
           if (event === 'start') {
+            historyLoadedAt.value = null
             generationResult.value = {
               task_id: numberFromPayload(payload, 'task_id', selectedTaskId.value ?? 0),
               total: numberFromPayload(payload, 'total'),
@@ -358,6 +414,19 @@ const openDetail = (item: ImagePromptGenerationItem) => {
   detailVisible.value = true
 }
 
+const copyDetailPrompt = async () => {
+  const text = itemErrorText(detailItem.value) || detailItem.value?.image_prompt || ''
+  if (!text) {
+    return
+  }
+  try {
+    await navigator.clipboard.writeText(text)
+    ElMessage.success(t('prompts.messages.copied'))
+  } catch {
+    ElMessage.error(t('prompts.errors.copyFailed'))
+  }
+}
+
 onMounted(() => {
   void refreshAll()
 })
@@ -365,15 +434,6 @@ onMounted(() => {
 
 <template>
   <section v-loading="loading" class="prompt-page">
-    <div class="page-header">
-      <div>
-        <p class="eyebrow">{{ t('app.preview') }}</p>
-        <h1 class="page-title">{{ t('prompts.title') }}</h1>
-        <p class="page-subtitle">{{ t('prompts.subtitle') }}</p>
-      </div>
-      <el-button :icon="Refresh" @click="refreshAll">{{ t('prompts.actions.refresh') }}</el-button>
-    </div>
-
     <div class="prompt-grid">
       <section class="panel generation-panel">
         <header class="panel-header">
@@ -382,6 +442,7 @@ onMounted(() => {
             <p>{{ t('prompts.generation.description') }}</p>
           </div>
           <el-button
+            class="ai-gradient-button"
             type="primary"
             :icon="MagicStick"
             :loading="generating"
@@ -395,7 +456,7 @@ onMounted(() => {
         <div class="generation-form">
           <el-form label-position="top">
             <el-form-item :label="t('prompts.generation.project')">
-              <el-select v-model="selectedProjectId" filterable>
+              <el-select v-model="selectedProjectId" :disabled="generating" filterable>
                 <el-option
                   v-for="project in projects"
                   :key="project.id"
@@ -405,7 +466,7 @@ onMounted(() => {
               </el-select>
             </el-form-item>
             <el-form-item :label="t('prompts.generation.scriptTask')">
-              <el-select v-model="selectedTaskId" :loading="loadingTasks" filterable>
+              <el-select v-model="selectedTaskId" :loading="loadingTasks" :disabled="generating" filterable>
                 <el-option
                   v-for="task in tasks"
                   :key="task.id"
@@ -415,7 +476,7 @@ onMounted(() => {
               </el-select>
             </el-form-item>
             <el-form-item :label="t('prompts.generation.systemPreset')">
-              <el-select v-model="selectedSystemPresetId" filterable>
+              <el-select v-model="selectedSystemPresetId" :disabled="generating" filterable>
                 <el-option
                   v-for="preset in systemPresets"
                   :key="preset.id"
@@ -425,7 +486,7 @@ onMounted(() => {
               </el-select>
             </el-form-item>
             <el-form-item :label="t('prompts.generation.concurrency')">
-              <el-input-number v-model="concurrency" :min="1" :max="50" />
+              <el-input-number v-model="concurrency" :min="1" :max="50" :disabled="generating" />
             </el-form-item>
           </el-form>
 
@@ -438,6 +499,23 @@ onMounted(() => {
         </div>
 
         <el-divider />
+
+        <div v-if="generationResult !== null" class="generation-progress">
+          <div class="generation-progress__header">
+            <strong>
+              {{
+                t('prompts.messages.generatingProgress', {
+                  completed: completedCount,
+                  total: generationResult.total,
+                })
+              }}
+            </strong>
+            <span v-if="historyLoadedAt && !generating">
+              {{ t('prompts.messages.historyLoadedAt', { time: historyLoadedAt }) }}
+            </span>
+          </div>
+          <el-progress :percentage="progressPercentage" :status="generationResult.failed > 0 ? 'exception' : undefined" />
+        </div>
 
         <div class="result-summary">
           <el-statistic
@@ -453,15 +531,6 @@ onMounted(() => {
             :value="generationResult?.failed ?? 0"
           />
         </div>
-        <p v-if="generating && generationResult !== null" class="progress-text">
-          {{
-            t('prompts.messages.generatingProgress', {
-              completed: generationResult.succeeded + generationResult.failed,
-              total: generationResult.total,
-            })
-          }}
-        </p>
-
         <el-table
           v-loading="loadingPrompts"
           :data="sortedGenerationItems"
@@ -497,10 +566,21 @@ onMounted(() => {
               {{ shortText(row.image_prompt) }}
             </template>
           </el-table-column>
-          <el-table-column :label="t('prompts.result.actions')" width="100" fixed="right">
+          <el-table-column :label="t('prompts.result.actions')" width="150" fixed="right">
             <template #default="{ row }">
               <el-button link type="primary" :icon="View" @click="openDetail(row)">
                 {{ t('prompts.actions.view') }}
+              </el-button>
+              <el-button
+                v-if="row.error"
+                link
+                type="warning"
+                :icon="Refresh"
+                :loading="isRetryingPage(row.page_id)"
+                :disabled="generating || selectedSystemPresetId === null"
+                @click="retryPagePrompt(row)"
+              >
+                {{ t('prompts.actions.retryPage') }}
               </el-button>
             </template>
           </el-table-column>
@@ -600,6 +680,14 @@ onMounted(() => {
         </span>
       </div>
       <pre class="prompt-detail">{{ itemErrorText(detailItem) || detailItem?.image_prompt }}</pre>
+      <template #footer>
+        <el-button :icon="CopyDocument" @click="copyDetailPrompt">
+          {{ t('prompts.actions.copy') }}
+        </el-button>
+        <el-button type="primary" @click="detailVisible = false">
+          {{ t('prompts.actions.close') }}
+        </el-button>
+      </template>
     </el-dialog>
   </section>
 </template>
@@ -612,32 +700,13 @@ onMounted(() => {
 
 .page-header {
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 16px;
 }
 
-.eyebrow,
-.page-title,
-.page-subtitle,
 .panel-header h2,
 .panel-header p {
   margin: 0;
-}
-
-.eyebrow {
-  color: var(--text-soft);
-  font-size: 13px;
-  font-weight: 700;
-}
-
-.page-title {
-  margin-top: 6px;
-  font-size: 30px;
-}
-
-.page-subtitle {
-  margin-top: 10px;
-  color: var(--text-soft);
 }
 
 .prompt-grid {
@@ -679,15 +748,26 @@ onMounted(() => {
   padding: 0 24px 16px;
 }
 
-.progress-text {
-  margin: 0;
-  padding: 0 24px 12px;
-  color: var(--text-soft);
-  font-weight: 700;
-}
-
 .result-table {
   width: 100%;
+}
+
+.generation-progress {
+  padding: 0 24px 16px;
+}
+
+.generation-progress__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+  color: var(--text-soft);
+  font-size: 13px;
+}
+
+.generation-progress__header strong {
+  color: var(--text-main);
 }
 
 .preset-list {

@@ -1,7 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
 
 import OutlineWorkspaceView from '@/views/OutlineWorkspaceView.vue'
-import ProjectListView from '@/views/ProjectListView.vue'
 import ImagePromptWorkspaceView from '@/views/ImagePromptWorkspaceView.vue'
 import ImageGenerationWorkspaceView from '@/views/ImageGenerationWorkspaceView.vue'
 import SettingsView from '@/views/SettingsView.vue'
@@ -12,15 +11,11 @@ const router = createRouter({
   routes: [
     {
       path: '/',
-      redirect: '/projects',
+      redirect: '/outline',
     },
     {
       path: '/projects',
-      name: 'projects',
-      component: ProjectListView,
-      meta: {
-        titleKey: 'routeTitles.projects',
-      },
+      redirect: '/outline',
     },
     {
       path: '/outline',
