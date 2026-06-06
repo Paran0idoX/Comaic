@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { ElMessage } from 'element-plus'
-import { computed, onMounted, ref } from 'vue'
+import { Delete, EditPen, Plus } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -15,20 +16,34 @@ import {
   streamOutlineChat,
   type OutlineVersion,
 } from '@/api/outline'
+import {
+  createProject,
+  deleteProject,
+  listProjects,
+  updateProject,
+  type Project,
+} from '@/api/projects'
 
 const { t } = useI18n()
 const route = useRoute()
 const router = useRouter()
 
 const loading = ref(false)
+const loadingProjects = ref(false)
 const streaming = ref(false)
 const confirming = ref(false)
+const savingProject = ref(false)
+const projectDialogVisible = ref(false)
+const editingProjectId = ref<number | null>(null)
+const projectTitle = ref('')
+const projects = ref<Project[]>([])
+const selectedProjectId = ref<number | null>(null)
 const threadId = ref('')
 const messages = ref<ConversationMessage[]>([])
 const versions = ref<OutlineVersionItem[]>([])
 const messageId = ref(1)
 
-const projectId = computed(() => {
+const routeProjectId = computed(() => {
   const rawProjectId = route.query.project_id
   const value = Array.isArray(rawProjectId) ? rawProjectId[0] : rawProjectId
   const parsed = Number(value)
@@ -36,10 +51,16 @@ const projectId = computed(() => {
 })
 
 const currentOutline = computed(() => versions.value[0]?.outline ?? '')
-const isDisabled = computed(() => loading.value || projectId.value === null || !threadId.value)
+const isDisabled = computed(() => loading.value || selectedProjectId.value === null || !threadId.value)
+const isEditingProject = computed(() => editingProjectId.value !== null)
+const projectDialogTitle = computed(() =>
+  isEditingProject.value ? t('projects.editDialogTitle') : t('projects.dialogTitle'),
+)
 
-const goProjects = () => {
-  void router.push('/projects')
+const resetSessionState = () => {
+  threadId.value = ''
+  messages.value = []
+  versions.value = []
 }
 
 const toOutlineVersionItem = (version: OutlineVersion): OutlineVersionItem => ({
@@ -53,13 +74,14 @@ const toOutlineVersionItem = (version: OutlineVersion): OutlineVersionItem => ({
 })
 
 const loadOutlineSession = async () => {
-  if (projectId.value === null) {
+  if (selectedProjectId.value === null) {
+    resetSessionState()
     return
   }
 
   loading.value = true
   try {
-    const session = await resolveOutlineSession(projectId.value)
+    const session = await resolveOutlineSession(selectedProjectId.value)
     threadId.value = session.thread_id
     versions.value = session.outline_versions.map(toOutlineVersionItem)
     messages.value = session.messages.map((message) => ({
@@ -71,6 +93,95 @@ const loadOutlineSession = async () => {
     ElMessage.error(t('outline.errors.loadSession'))
   } finally {
     loading.value = false
+  }
+}
+
+const loadProjects = async (preferredProjectId?: number | null) => {
+  loadingProjects.value = true
+  try {
+    projects.value = await listProjects()
+    const routeProject = routeProjectId.value
+    const candidates = [
+      preferredProjectId,
+      routeProject,
+      selectedProjectId.value,
+      projects.value[0]?.id ?? null,
+    ]
+    selectedProjectId.value =
+      candidates.find((projectId) =>
+        projectId !== null && projects.value.some((project) => project.id === projectId),
+      ) ?? null
+  } catch {
+    projects.value = []
+    selectedProjectId.value = null
+    ElMessage.error(t('projects.loadError'))
+  } finally {
+    loadingProjects.value = false
+  }
+}
+
+const openCreateProjectDialog = () => {
+  editingProjectId.value = null
+  projectTitle.value = ''
+  projectDialogVisible.value = true
+}
+
+const openEditProjectDialog = (project: Project) => {
+  editingProjectId.value = project.id
+  projectTitle.value = project.title
+  projectDialogVisible.value = true
+}
+
+const saveProject = async () => {
+  const title = projectTitle.value.trim()
+  if (!title) {
+    ElMessage.error(t('projects.projectNamePlaceholder'))
+    return
+  }
+
+  savingProject.value = true
+  try {
+    const previousSelectedProjectId = selectedProjectId.value
+    const savedProject =
+      editingProjectId.value === null
+        ? await createProject({ title })
+        : await updateProject(editingProjectId.value, { title })
+    ElMessage.success(
+      editingProjectId.value === null ? t('projects.createSuccess') : t('projects.updateSuccess'),
+    )
+    projectDialogVisible.value = false
+    await loadProjects(editingProjectId.value === null ? savedProject.id : previousSelectedProjectId)
+  } catch {
+    ElMessage.error(t('projects.saveError'))
+  } finally {
+    savingProject.value = false
+  }
+}
+
+const confirmDeleteProject = async (project: Project) => {
+  try {
+    await ElMessageBox.confirm(
+      t('projects.deleteConfirm', { title: project.title }),
+      t('projects.deleteDialogTitle'),
+      {
+        confirmButtonText: t('projects.delete'),
+        cancelButtonText: t('projects.cancel'),
+        type: 'warning',
+      },
+    )
+    const wasSelected = project.id === selectedProjectId.value
+    await deleteProject(project.id)
+    ElMessage.success(t('projects.deleteSuccess'))
+    if (wasSelected) {
+      selectedProjectId.value = null
+      resetSessionState()
+    }
+    await loadProjects(wasSelected ? null : selectedProjectId.value)
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') {
+      return
+    }
+    ElMessage.error(t('projects.deleteError'))
   }
 }
 
@@ -174,32 +285,111 @@ const sendMessage = async (content: string) => {
 }
 
 onMounted(() => {
-  if (projectId.value === null) {
-    ElMessage.warning(t('outline.errors.missingProject'))
+  void loadProjects()
+})
+
+watch(selectedProjectId, (nextProjectId, previousProjectId) => {
+  if (nextProjectId === previousProjectId) {
     return
   }
+  resetSessionState()
+  if (nextProjectId === null) {
+    return
+  }
+  if (routeProjectId.value !== nextProjectId) {
+    void router.replace({
+      query: {
+        ...route.query,
+        project_id: String(nextProjectId),
+      },
+    })
+  }
   void loadOutlineSession()
+})
+
+watch(routeProjectId, (nextProjectId) => {
+  if (nextProjectId === selectedProjectId.value) {
+    return
+  }
+  const matchedProject = projects.value.find((project) => project.id === nextProjectId)
+  if (matchedProject !== undefined) {
+    selectedProjectId.value = matchedProject.id
+  }
 })
 </script>
 
 <template>
   <section>
     <div class="page-header">
-      <div>
-        <h1 class="page-title">{{ t('outline.title') }}</h1>
-        <p class="page-subtitle">{{ t('outline.subtitle') }}</p>
+      <div class="page-actions">
+        <el-select
+          v-model="selectedProjectId"
+          class="project-select"
+          :loading="loadingProjects"
+          :disabled="streaming"
+          filterable
+          :placeholder="t('outline.projectPlaceholder')"
+        >
+          <template #prefix>
+            <span class="project-select__prefix">{{ t('outline.manageProjects') }}</span>
+          </template>
+          <el-option
+            v-for="project in projects"
+            :key="project.id"
+            :label="project.title"
+            :value="project.id"
+          >
+            <div class="project-option">
+              <span class="project-option__title">{{ project.title }}</span>
+              <span class="project-option__actions">
+                <el-button
+                  link
+                  type="primary"
+                  :icon="EditPen"
+                  :disabled="streaming"
+                  :aria-label="t('projects.edit')"
+                  @mousedown.stop.prevent
+                  @click.stop="openEditProjectDialog(project)"
+                />
+                <el-button
+                  link
+                  type="danger"
+                  :icon="Delete"
+                  :disabled="streaming"
+                  :aria-label="t('projects.delete')"
+                  @mousedown.stop.prevent
+                  @click.stop="confirmDeleteProject(project)"
+                />
+              </span>
+            </div>
+          </el-option>
+          <template #footer>
+            <el-button
+              class="project-select__create"
+              text
+              :icon="Plus"
+              :disabled="streaming"
+              @click="openCreateProjectDialog"
+            >
+              {{ t('projects.create') }}
+            </el-button>
+          </template>
+        </el-select>
+        <el-button :icon="Plus" :disabled="streaming" @click="openCreateProjectDialog">
+          {{ t('projects.create') }}
+        </el-button>
       </div>
-      <el-button @click="goProjects">{{ t('outline.viewProject') }}</el-button>
     </div>
 
-    <el-alert
-      v-if="projectId === null"
-      class="outline-workspace__alert"
-      type="warning"
-      :title="t('outline.errors.missingProject')"
-      show-icon
-      :closable="false"
-    />
+    <el-empty
+      v-if="selectedProjectId === null"
+      class="outline-workspace__empty panel"
+      :description="projects.length === 0 ? t('outline.emptyProjects') : t('outline.errors.missingProject')"
+    >
+      <el-button type="primary" :icon="Plus" @click="openCreateProjectDialog">
+        {{ t('projects.create') }}
+      </el-button>
+    </el-empty>
 
     <div v-else class="outline-workspace">
       <ConversationPanel
@@ -217,6 +407,34 @@ onMounted(() => {
         @confirm="confirmCurrentOutline"
       />
     </div>
+
+    <el-dialog v-model="projectDialogVisible" :title="projectDialogTitle" width="420px">
+      <el-form label-position="top" @submit.prevent>
+        <el-form-item :label="t('projects.projectName')" required>
+          <el-input
+            v-model="projectTitle"
+            maxlength="255"
+            show-word-limit
+            :placeholder="t('projects.projectNamePlaceholder')"
+            @keyup.enter="saveProject"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button :disabled="savingProject" @click="projectDialogVisible = false">
+          {{ t('projects.cancel') }}
+        </el-button>
+        <el-button type="primary" :loading="savingProject" @click="saveProject">
+          {{
+            savingProject
+              ? t('projects.saving')
+              : isEditingProject
+                ? t('projects.save')
+                : t('projects.createPlaceholder')
+          }}
+        </el-button>
+      </template>
+    </el-dialog>
   </section>
 </template>
 
@@ -227,13 +445,64 @@ onMounted(() => {
   gap: 22px;
 }
 
-.outline-workspace__alert {
-  margin-bottom: 18px;
+.outline-workspace__empty {
+  padding: 56px 18px;
+}
+
+.page-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.project-select {
+  width: 360px;
+}
+
+.project-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+  gap: 12px;
+}
+
+.project-option__title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-option__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  opacity: 0.78;
+}
+
+.project-select__create {
+  width: 100%;
+  justify-content: flex-start;
+}
+
+.project-select__prefix {
+  color: var(--text-soft);
+  font-size: 12px;
 }
 
 @media (max-width: 1100px) {
   .outline-workspace {
     grid-template-columns: 1fr;
+  }
+
+  .page-header,
+  .page-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .project-select {
+    width: 100%;
   }
 }
 </style>

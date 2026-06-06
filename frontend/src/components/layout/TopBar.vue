@@ -22,7 +22,6 @@ const currentLocale = computed({
 <template>
   <header class="top-bar">
     <div>
-      <p class="top-bar__eyebrow">{{ t('app.preview') }}</p>
       <h2>{{ title }}</h2>
     </div>
 
@@ -53,20 +52,10 @@ const currentLocale = computed({
   padding: 0 28px;
 }
 
-.top-bar h2,
-.top-bar__eyebrow {
-  margin: 0;
-}
-
 .top-bar h2 {
-  margin-top: 4px;
+  margin: 0;
   font-size: 18px;
-}
-
-.top-bar__eyebrow {
-  color: var(--text-soft);
-  font-size: 12px;
-  font-weight: 700;
+  color: #101828;
 }
 
 .top-bar__actions {
@@ -77,5 +66,22 @@ const currentLocale = computed({
 
 .top-bar__locale {
   width: 112px;
+}
+
+.top-bar :deep(.el-button.is-circle) {
+  border-color: rgba(85, 120, 255, 0.18);
+  background: rgba(255, 255, 255, 0.72);
+  color: #475467;
+}
+
+.top-bar :deep(.el-button.is-circle:hover) {
+  border-color: rgba(23, 109, 255, 0.38);
+  color: var(--brand);
+  box-shadow: 0 8px 20px rgba(23, 109, 255, 0.12);
+}
+
+.top-bar :deep(.el-tag) {
+  border-color: rgba(25, 169, 116, 0.3);
+  background: rgba(25, 169, 116, 0.08);
 }
 </style>

@@ -10,7 +10,7 @@ const route = useRoute()
 const { t } = useI18n()
 
 // 路由 meta 中的标题用于顶部栏显示当前工作区名称。
-const pageTitle = computed(() => t(String(route.meta.titleKey ?? 'routeTitles.projects')))
+const pageTitle = computed(() => t(String(route.meta.titleKey ?? 'routeTitles.outline')))
 </script>
 
 <template>
@@ -39,11 +39,13 @@ const pageTitle = computed(() => t(String(route.meta.titleKey ?? 'routeTitles.pr
 <style scoped>
 .app-shell {
   min-height: 100vh;
+  background: transparent;
 }
 
 .app-shell__aside {
-  background: #111827;
+  background: #0d2336;
   color: #fff;
+  box-shadow: 18px 0 48px rgba(7, 17, 31, 0.18);
 }
 
 .app-shell__main {
@@ -54,7 +56,8 @@ const pageTitle = computed(() => t(String(route.meta.titleKey ?? 'routeTitles.pr
   height: 68px;
   padding: 0;
   border-bottom: 1px solid var(--panel-border);
-  background: #fff;
+  background: rgba(255, 255, 255, 0.82);
+  backdrop-filter: blur(14px);
 }
 
 .app-shell__content {

@@ -223,6 +223,50 @@ class ImagePromptService:
             items=sorted(items, key=lambda item: item.page_no),
         )
 
+    async def generate_for_page(
+        self,
+        *,
+        page_id: int,
+        system_prompt_preset_id: int,
+    ) -> ImagePromptGenerateItem:
+        """只为单页重新生成图片 Prompt，用于前端失败行重试。"""
+
+        self.ensure_default_presets()
+        page = self.repository.get_page(page_id)
+        if page is None:
+            raise ValueError(f"ComicPage not found: {page_id}")
+        if not page.summary:
+            raise ValueError(f"ComicPage script not found: {page_id}")
+        if page.section is None or page.section.task.status != ScriptGenerationTaskStatus.SUCCEEDED:
+            raise ValueError("ScriptGenerationTask must be succeeded before generating image prompts.")
+
+        system_preset = self._get_preset(
+            preset_id=system_prompt_preset_id,
+            expected_kind=ImagePromptPresetKind.SCRIPT_TO_IMAGE_SYSTEM_PROMPT,
+        )
+        source_page = self._source_page_from_page(
+            page,
+            scene_position=self._scene_positions(
+                self.repository.list_script_task_pages(page.section.task_id)
+            ).get(page.id, "standalone"),
+        )
+        prompt = await self._generate_prompt(
+            agent=ImagePromptAgent(),
+            system_prompt=system_preset.content,
+            page=source_page,
+        )
+        if not prompt:
+            raise ValueError("Generated image prompt cannot be empty.")
+        saved_page = self.repository.update_page_prompt(page.id, prompt)
+        return ImagePromptGenerateItem(
+            page_id=saved_page.id,
+            page_no=saved_page.page_no,
+            image_prompt=saved_page.image_prompt,
+            status=saved_page.status.value,
+            scene_key=source_page.scene_key,
+            character_keys=source_page.character_keys,
+        )
+
     async def stream_generate_for_script_task(
         self,
         *,
@@ -389,20 +433,28 @@ class ImagePromptService:
         return (
             system_preset,
             [
-                ImagePromptSourcePage(
-                    page_id=page.id,
-                    page_no=page.page_no,
-                    page_description=self._page_description(
-                        page,
-                        scene_position=scene_positions.get(page.id, "standalone"),
-                    ),
-                    scene_key=page.script_scene.scene_key if page.script_scene is not None else None,
-                    character_keys=[
-                        character.character_key
-                        for character in sorted(page.visual_characters, key=lambda item: item.character_key)
-                    ],
+                self._source_page_from_page(
+                    page,
+                    scene_position=scene_positions.get(page.id, "standalone"),
                 )
                 for page in pages
+            ],
+        )
+
+    def _source_page_from_page(self, page, *, scene_position: str) -> ImagePromptSourcePage:
+        """把 ORM 页面转换为并发安全的图片 Prompt 生成快照。"""
+
+        return ImagePromptSourcePage(
+            page_id=page.id,
+            page_no=page.page_no,
+            page_description=self._page_description(
+                page,
+                scene_position=scene_position,
+            ),
+            scene_key=page.script_scene.scene_key if page.script_scene is not None else None,
+            character_keys=[
+                character.character_key
+                for character in sorted(page.visual_characters, key=lambda item: item.character_key)
             ],
         )
 
