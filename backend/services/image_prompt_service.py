@@ -42,7 +42,6 @@ class ImagePromptSourcePage:
     page_id: int
     page_no: int
     page_description: str
-    consistency_context: str
     scene_key: str | None
     character_keys: list[str]
 
@@ -170,7 +169,7 @@ class ImagePromptService:
 
             async with semaphore:
                 try:
-                    prompt = await self._generate_with_consistency_review(
+                    prompt = await self._generate_prompt(
                         agent=agent,
                         system_prompt=system_preset.content,
                         page=page,
@@ -254,7 +253,7 @@ class ImagePromptService:
 
             async with semaphore:
                 try:
-                    prompt = await self._generate_with_consistency_review(
+                    prompt = await self._generate_prompt(
                         agent=agent,
                         system_prompt=system_preset.content,
                         page=page,
@@ -393,10 +392,6 @@ class ImagePromptService:
                 ImagePromptSourcePage(
                     page_id=page.id,
                     page_no=page.page_no,
-                    consistency_context=self._visual_consistency_context(
-                        page,
-                        scene_position=scene_positions.get(page.id, "standalone"),
-                    ),
                     page_description=self._page_description(
                         page,
                         scene_position=scene_positions.get(page.id, "standalone"),
@@ -411,41 +406,21 @@ class ImagePromptService:
             ],
         )
 
-    async def _generate_with_consistency_review(
+    async def _generate_prompt(
         self,
         *,
         agent: ImagePromptAgent,
         system_prompt: str,
         page: ImagePromptSourcePage,
     ) -> str:
-        """生成并审查单页 Prompt；只对缺失视觉锁定信息的页面做局部重试。"""
+        """生成单页 Prompt；中心化视觉设定只作为输入上下文，不拼入最终落库文本。"""
 
-        description = page.page_description
-        last_issues: list[str] = []
-        for attempt in range(3):
-            prompt = await agent.generate(
-                system_prompt=system_prompt,
-                page_no=page.page_no,
-                page_description=description,
-            )
-            reviewed_prompt = self._merge_consistency_context(page, prompt)
-            issues = self._prompt_consistency_issues(reviewed_prompt, page)
-            if not issues:
-                return reviewed_prompt
-            last_issues = issues
-            description = "\n\n".join(
-                [
-                    page.page_description,
-                    "【上一版 Prompt 一致性审查未通过】",
-                    "；".join(issues),
-                    "请重新生成，并显式保留中心化场景/角色视觉锚点。",
-                    f"Retry attempt: {attempt + 1}",
-                ]
-            )
-        raise ValueError(
-            f"Image prompt consistency review failed for page {page.page_no}: "
-            f"{'; '.join(last_issues)}"
+        prompt = await agent.generate(
+            system_prompt=system_prompt,
+            page_no=page.page_no,
+            page_description=page.page_description,
         )
+        return prompt.strip()
 
     @staticmethod
     def _scene_positions(pages: list) -> dict[int, str]:
@@ -581,33 +556,6 @@ class ImagePromptService:
                 f"对话：{page.dialogue or ''}",
             ]
         ).strip()
-
-    @staticmethod
-    def _merge_consistency_context(page: ImagePromptSourcePage, prompt: str) -> str:
-        """把中心化视觉锁定信息并入最终正向 Prompt，确保 ComfyUI 阶段拿到完整上下文。"""
-
-        if not page.consistency_context:
-            return prompt.strip()
-        return "\n".join(
-            [
-                page.consistency_context.strip(),
-                "PAGE-SPECIFIC IMAGE PROMPT",
-                prompt.strip(),
-            ]
-        ).strip()
-
-    @staticmethod
-    def _prompt_consistency_issues(prompt: str, page: ImagePromptSourcePage) -> list[str]:
-        """审查最终 Prompt 是否保留场景和角色 key；失败时只重试当前页。"""
-
-        issues: list[str] = []
-        if page.scene_key and page.scene_key not in prompt:
-            issues.append(f"missing scene_key {page.scene_key}")
-        for character_key in page.character_keys:
-            if character_key not in prompt:
-                issues.append(f"missing character_key {character_key}")
-        return issues
-
     @staticmethod
     def _item_payload(item: ImagePromptGenerateItem) -> dict:
         """把单页生成结果转成可 JSON 序列化的 SSE payload。"""

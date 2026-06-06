@@ -6,7 +6,7 @@ from backend.models.enums import LLMProvider
 
 
 class LLMConfigResponse(BaseModel):
-    """单组模型 API 配置响应；永远不返回明文 API Key。"""
+    """单组模型 API 配置响应；本地 MVP 设置页允许回显明文 API Key。"""
 
     id: int
     name: str
@@ -14,6 +14,7 @@ class LLMConfigResponse(BaseModel):
     base_url: str
     model_names: list[str]
     default_model: str
+    api_key: str | None
     api_key_set: bool
     is_active: bool
     updated_at: datetime
@@ -26,12 +27,21 @@ class LLMConfigListResponse(BaseModel):
     active_config_id: int | None
 
 
+class LLMProviderResponse(BaseModel):
+    """设置页可选 LangChain Provider。"""
+
+    value: LLMProvider
+    label: str
+    requires_base_url: bool
+    model_prefixes: list[str] = Field(default_factory=list)
+
+
 class CreateLLMConfigRequest(BaseModel):
     """新增模型 API 配置请求。"""
 
     name: str = Field(min_length=1, max_length=255)
     provider: LLMProvider = LLMProvider.OPENAI_COMPATIBLE
-    base_url: str = Field(min_length=1, max_length=1024)
+    base_url: str | None = Field(default=None, max_length=1024)
     model_names: list[str] = Field(min_length=1)
     default_model: str | None = None
     api_key: str | None = None
@@ -43,7 +53,7 @@ class UpdateLLMConfigRequest(BaseModel):
 
     name: str = Field(min_length=1, max_length=255)
     provider: LLMProvider = LLMProvider.OPENAI_COMPATIBLE
-    base_url: str = Field(min_length=1, max_length=1024)
+    base_url: str | None = Field(default=None, max_length=1024)
     model_names: list[str] = Field(min_length=1)
     default_model: str | None = None
     api_key: str | None = None

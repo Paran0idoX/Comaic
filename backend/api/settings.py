@@ -4,6 +4,7 @@ from backend.api.schemas.settings import (
     CreateLLMConfigRequest,
     LLMConfigListResponse,
     LLMConfigResponse,
+    LLMProviderResponse,
     TestLLMConfigRequest,
     TestLLMConfigResponse,
     UpdateLLMConfigRequest,
@@ -36,6 +37,7 @@ def llm_config_to_response(config: LLMConfig) -> LLMConfigResponse:
         base_url=config.base_url,
         model_names=SettingsService.model_names_from_config(config),
         default_model=config.default_model,
+        api_key=config.api_key,
         api_key_set=bool((config.api_key or "").strip()),
         is_active=config.is_active,
         updated_at=config.updated_at,
@@ -58,6 +60,16 @@ def list_llm_configs(http_request: Request) -> LLMConfigListResponse:
         raise http_exception(exc, request_locale(http_request)) from exc
     finally:
         db_session.close()
+
+
+@router.get("/llm/providers", response_model=list[LLMProviderResponse])
+def list_llm_providers() -> list[LLMProviderResponse]:
+    """返回设置页可选 LangChain Provider 元信息。"""
+
+    return [
+        LLMProviderResponse(**provider)
+        for provider in SettingsService.provider_options()
+    ]
 
 
 @router.post("/llm/configs", response_model=LLMConfigResponse, status_code=status.HTTP_201_CREATED)
