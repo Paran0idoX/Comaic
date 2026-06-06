@@ -55,7 +55,7 @@ MVP 核心表位于 `backend/models/comic.py`：
 - `comic_image`：页面生成图片、远程/本地路径、seed、workflow、prompt、评分、是否选中。
 - `generation_task`：ComfyUI prompt id、任务状态、批量大小、错误信息。
 - `comfy_workflow_preset`：页面维护的 ComfyUI API workflow JSON 和 Prompt 注入节点配置。
-- `llm_config`：OpenAI 兼容模型配置；单表保存多组 API 配置，每组用 `model_names` JSON 字段维护多个模型名，并用 `default_model` 指定该组默认模型。API Key 只保存在本地 SQLite，不通过 API 回显。
+- `llm_config`：LangChain Provider 模型配置；单表保存多组 API 配置，每组用 `model_names` JSON 字段维护多个模型名，并用 `default_model` 指定该组默认模型。API Key 只保存在本地 SQLite，设置页会按本地 MVP 需求明文回显。
 
 数据库初始化入口在 `backend/models/database.py` 的 `init_db()`。默认数据库地址是 `sqlite:///data/comaic.sqlite3`，从项目根目录运行后端时会写入根目录 `data/`。
 
@@ -79,8 +79,9 @@ MVP 核心表位于 `backend/models/comic.py`：
   - 新代码通过 `backend/llm_clients/factory.py` 创建模型实例，不直接读取 `.env` 或缓存模块级全局模型。
   - 模型配置优先来自 active `llm_config` 的 `default_model`；没有配置时才用 `.env` 初始化默认 API 组和模型名列表。
   - 设置页修改模型配置后，只影响后续新建的 Agent/LLM 调用，不强制切换正在运行的长任务。
-  - DeepSeek API Base URL 下，大纲阶段使用 thinking enabled，脚本/工具调用阶段使用 thinking disabled；其它 OpenAI 兼容服务不附加 DeepSeek thinking 参数。
-  - DeepAgents、`response_format` 或工具调用较多的 Agent 优先使用工具安全实例，避免 `tool_choice` 与 thinking 模式冲突。
+  - 默认按 Provider 显式创建对应 LangChain Chat 类，例如 `ChatDeepSeek`、`ChatAnthropic`；只有用户选择 `openai_compatible` 时才用 `ChatOpenAI(base_url=...)`。
+  - `create_chat_model()` 支持 `thinking_enabled` 入参；当前只对 `LLMProvider.DEEPSEEK` 下发思考模式开关。
+  - DeepSeek 不再有结构化输出 JSON object 特判，和其它 Provider 一样走标准 LangChain `response_format`。
 - 使用 `response_format` 的 Agent 必须优先复用 `backend/agents/structured_output.py` 中的 `ainvoke_structured_with_retries()`。
   - 只读取 `structured_response`，不要从自然语言、Markdown 代码块或文件输出中兜底解析 JSON。
   - Agent 自己通过 `validator` 传入业务级结构校验，例如页面列表非空、Prompt 非空。
@@ -109,7 +110,6 @@ MVP 核心表位于 `backend/models/comic.py`：
 
 ```env
 DEEPSEEK_MODEL=deepseek-v4-flash
-DEEPSEEK_API_KEY=
 DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
 
 DATABASE_URL=sqlite:///data/comaic.sqlite3
@@ -121,7 +121,7 @@ COMFYUI_BASE_URL=http://127.0.0.1:8188
 - 不要把真实 API key 写入代码、README、测试快照或日志。
 - 不要在回复中复述 `.env` 里的 key。
 - 示例配置只能使用占位符。
-- `.env` 中的模型配置只作为首次初始化设置页配置的默认值；运行时优先使用 SQLite 中 active `llm_config` 的 `default_model`。
+- `.env` 中的模型名配置只作为首次初始化设置页配置的默认值；API Key 不从环境变量读取，必须通过设置页保存到 SQLite。
 - 缺少模型 API Key 不应阻塞后端启动，但实际模型调用或测试连接要返回明确错误。
 
 ## Prompt 约定
@@ -158,7 +158,7 @@ pybabel compile -d backend/locales
 - 普通对话方法 `chat()` 使用异步流式输出，调用方用 `async for chunk in agent.chat(...)` 接收文本片段。
 - 大纲阶段采用主子 Agent：
   - 主 Agent 负责自然对话、引导用户、判断是否需要更新大纲。
-  - 大纲主 Agent 和大纲更新子 Agent 默认使用 `deepseek_thinking_chat_model`。
+  - 大纲主 Agent 和大纲更新子 Agent 默认使用当前 active 模型配置。
   - 当前大纲作为本轮临时 system context 传给主 Agent，不作为用户消息写入 checkpoint。
   - 主 Agent 可以通过本地 tool 调用子 Agent，但不直接落库。
   - 子 Agent 位于 `backend/agents/outline_update_agent.py`，只负责根据当前大纲和用户输入生成新的大纲文本。
@@ -166,23 +166,22 @@ pybabel compile -d backend/locales
 - 大纲版本保存逻辑放在 Service/Repository/API 层；只有主 Agent 调用子 Agent 并产出新大纲时，才保存为新的 `outline_version`。
 - Prompt 放在 `backend/prompts/outline_conversation_prompt.md`、`backend/prompts/outline_update_prompt.md`、`backend/prompts/outline_finalize_prompt.md` 和 `backend/prompts/outline_snapshot_prompt.md`，不要硬编码在 Python 中。
 
-## ScriptPlanningAgent / ScriptDeepAgent 约定
+## ScriptPlanningAgent / PageScriptWriterAgent / ScriptSupervisorAgent 约定
 
-`backend/agents/script_planning_agent.py` 负责分页脚本的故事节奏分段规划，不负责落库。
-`backend/agents/script_deep_agent.py` 负责基于已锁定分段生成分页漫画脚本，不负责落库。
+`backend/agents/script_planning_agent.py` 负责分页脚本的故事节奏分段规划、中心化场景设定和分段角色细化设定，不负责落库。
+`backend/agents/page_script_writer_agent.py` 负责基于已锁定分段和视觉设定生成分页漫画脚本，不负责落库。
+`backend/agents/script_supervisor_agent.py` 负责审查分页脚本并提供逐页修改意见，不负责落库。
 
-- 分段规划 Agent 独立于 ScriptDeepAgent，只输出 `section_plan`，不使用工具。
+- 分页脚本不再使用 `ScriptDeepAgent` 或 DeepAgents 主子 Agent 编排；Service 显式编排 Planning、Writer 和 Supervisor。
+- 分段规划 Agent 输出 `section_plan`，并且每个 section 必须包含该段涉及的 `scenes` 和 `characters`。
 - 分段计划必须由 Service 校验并落库锁定后，才能进入页面脚本生成阶段。
-- 分页脚本使用 `deepagents.create_deep_agent` 实现主 Agent + 子 Agent 编排。
-- 分页脚本 Agent 默认使用 `deepseek_tool_chat_model`，即关闭 thinking 的 DeepSeek 实例。
-- DeepAgents 默认会注入文件系统、执行、todo 和 task 等内置工具；脚本生成阶段通过 `backend/agents/deepagent_profiles.py` 只保留 `write_todos` 和 `task`。
-- 不要重新启用 `ls`、`read_file`、`write_file`、`edit_file`、`glob`、`grep`、`execute`，除非有明确业务需求和安全边界。
-- `task` 必须保留，因为主 Agent 需要用它调用分页脚本编写和监督审查子 Agent。
-- ScriptDeepAgent 调用 DeepAgents 时默认设置 `recursion_limit=80`，并写入 LangSmith metadata；如需调整，优先参考正常成功 trace 的 `langgraph_step`。
-- ScriptDeepAgent 的子 Agent 只包含分页脚本编写、监督审查；不包含故事节奏划分。
-- ScriptDeepAgent 不允许注册或修改分段计划，不暴露 `register_section_plan` 类工具。
-- 批量脚本生成由 Service 遍历已锁定分段，逐段调用 ScriptDeepAgent；Agent 每次只生成当前分段，不能自行选择或回退到其他分段。
-- 当前分段脚本必须先由 Service 校验页码完整性、连续性和字段完整性，校验通过后才按 section 粒度批量落库。
+- 分页脚本 Agent 默认使用当前 active 模型配置。
+- PageScriptWriterAgent 只能引用当前 section 已锁定的 `scene_key` 和 `character_key`，不能新增或改写视觉设定。
+- ScriptSupervisorAgent 只输出 `passed/reviews`，reviews 必须按单页给出修改意见。
+- 批量脚本生成由 Service 遍历已锁定分段，逐段调用 Writer 和 Supervisor；Agent 不能自行选择或回退到其他分段。
+- 当前分段脚本必须先由 Service 校验页码完整性、连续性、字段完整性和视觉设定引用，再通过 Supervisor 审查。
+- Supervisor 给出修改意见时，Service 通过 SSE 发送 `review` 事件，并把意见反馈给 Writer 重试当前 section。
+- 当前 section 校验和审查通过后，Service 逐页落库并逐页发送 `page` SSE，最后发送 `section_pages` 兜底同步。
 - 单页生成可以跳过整体节奏划分，但仍要经过监督审查。
 - 批量生成通过 SSE 暴露长任务进度，脚本任务状态保存到 `script_generation_task`。
 - 前端分页脚本页依赖 Vue `KeepAlive` 保持长 SSE 连接和内存进度；不要随意移除 `ScriptWorkspaceView` 的缓存，否则路由切换会中断前端对生成进度的消费。
@@ -196,7 +195,7 @@ pybabel compile -d backend/locales
   - `script_character` 归属于 `script_section`，`character_key` 在同一分段内唯一，并通过 `outline_character_id` 回溯到大纲角色基准。
   - `comic_page.scene_id` 和 `comic_page_character` 负责把页面绑定到具体场景和角色。
   - 页面自己的 `scene`、`characters`、`clothing` 只描述本页局部变化，不承担全局一致性职责。
-- 脚本 Agent prompt 放在 `backend/prompts/script_planning_prompt.md`、`script_deep_main_prompt.md`、`script_writer_prompt.md` 和 `script_supervisor_prompt.md`。
+- 脚本 Agent prompt 放在 `backend/prompts/script_planning_prompt.md`、`script_writer_prompt.md` 和 `script_supervisor_prompt.md`。
 
 ## ImagePromptAgent 约定
 
@@ -274,7 +273,7 @@ npm run dev
 
 - `.env` 属于本地敏感配置，不应提交真实内容。
 - 避免在异常、print、日志中输出完整 API key。
-- 需要展示 key 状态时，只展示是否存在，或最多展示脱敏后的前后几位。
+- 设置页会按本地 MVP 需求回显明文 API Key；不要在日志、README、测试快照或回复中额外复述 key。
 - `data/` 中的真实数据库、`outputs/` 中的生成图片不要提交，除非明确是小型 fixture。
 - 网络调用可能产生费用，默认测试应避免实际调用 DeepSeek。
 

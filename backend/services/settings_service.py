@@ -28,13 +28,13 @@ class SettingsService:
         *,
         name: str,
         provider: LLMProvider,
-        base_url: str,
+        base_url: str | None,
         model_names: list[str],
         default_model: str | None = None,
         api_key: str | None = None,
         is_active: bool = False,
     ) -> LLMConfig:
-        """新增一组 OpenAI 兼容 API 配置，并保存该组可用模型名列表。"""
+        """新增一组 LLM Provider 配置，并保存该组可用模型名列表。"""
 
         normalized_models, normalized_default = self._normalize_models(
             model_names=model_names,
@@ -43,7 +43,7 @@ class SettingsService:
         return self.repository.create_llm_config(
             name=self._required_text(name, "LLM config name"),
             provider=provider,
-            base_url=self._required_text(base_url, "LLM API Base URL"),
+            base_url=self._normalize_base_url(provider=provider, base_url=base_url),
             model_names=json.dumps(normalized_models, ensure_ascii=False),
             default_model=normalized_default,
             api_key=self._optional_text(api_key),
@@ -56,7 +56,7 @@ class SettingsService:
         config_id: int,
         name: str,
         provider: LLMProvider,
-        base_url: str,
+        base_url: str | None,
         model_names: list[str],
         default_model: str | None = None,
         api_key: str | None = None,
@@ -74,7 +74,7 @@ class SettingsService:
             config_id=config_id,
             name=self._required_text(name, "LLM config name"),
             provider=provider,
-            base_url=self._required_text(base_url, "LLM API Base URL"),
+            base_url=self._normalize_base_url(provider=provider, base_url=base_url),
             model_names=json.dumps(normalized_models, ensure_ascii=False),
             default_model=normalized_default,
             api_key=normalized_api_key if normalized_api_key is not None else KEEP_EXISTING_VALUE,
@@ -106,9 +106,11 @@ class SettingsService:
         """用已保存或临时表单配置创建模型并发送一次极短请求。"""
 
         saved_config = self._get_llm_config(config_id) if config_id is not None else None
-        effective_provider = provider or saved_config.provider if saved_config is not None else provider
-        effective_base_url = base_url or saved_config.base_url if saved_config is not None else base_url
-        effective_model = model or saved_config.default_model if saved_config is not None else model
+        effective_provider = provider or (saved_config.provider if saved_config is not None else None)
+        effective_base_url = base_url if base_url is not None else (
+            saved_config.base_url if saved_config is not None else None
+        )
+        effective_model = model or (saved_config.default_model if saved_config is not None else None)
         normalized_api_key = self._optional_text(api_key)
         effective_api_key = (
             None
@@ -117,12 +119,15 @@ class SettingsService:
         )
         config = LLMConfigInput(
             provider=effective_provider or LLMProvider.OPENAI_COMPATIBLE,
-            base_url=self._required_text(effective_base_url or "", "LLM API Base URL"),
+            base_url=self._normalize_base_url(
+                provider=effective_provider or LLMProvider.OPENAI_COMPATIBLE,
+                base_url=effective_base_url,
+            ),
             model=self._required_text(effective_model or "", "LLM model"),
             api_key=effective_api_key,
         )
         try:
-            model_instance = create_chat_model(config, thinking_type="disabled")
+            model_instance = create_chat_model(config)
             await model_instance.ainvoke([HumanMessage(content="Reply with OK.")])
         except ValueError:
             raise
@@ -186,6 +191,15 @@ class SettingsService:
         return normalized
 
     @staticmethod
+    def _normalize_base_url(*, provider: LLMProvider, base_url: str | None) -> str:
+        """只有 OpenAI 兼容接口要求 API Base URL，其它 Provider 可为空。"""
+
+        normalized = (base_url or "").strip()
+        if provider == LLMProvider.OPENAI_COMPATIBLE and not normalized:
+            raise ValueError("LLM API Base URL cannot be empty.")
+        return normalized
+
+    @staticmethod
     def _optional_text(value: str | None) -> str | None:
         """清理可选文本，空字符串按 None 处理。"""
 
@@ -193,3 +207,70 @@ class SettingsService:
             return None
         normalized = value.strip()
         return normalized or None
+
+    @staticmethod
+    def provider_options() -> list[dict]:
+        """返回前端用于选择和自动匹配的 Provider 元信息。"""
+
+        return [
+            {
+                "value": LLMProvider.OPENAI_COMPATIBLE,
+                "label": "OpenAI（兼容）",
+                "requires_base_url": True,
+                "model_prefixes": ["gpt", "o1", "o3", "o4"],
+            },
+            {
+                "value": LLMProvider.DEEPSEEK,
+                "label": "DeepSeek",
+                "requires_base_url": False,
+                "model_prefixes": ["deepseek"],
+            },
+            {
+                "value": LLMProvider.ANTHROPIC,
+                "label": "Anthropic",
+                "requires_base_url": False,
+                "model_prefixes": ["claude"],
+            },
+            {
+                "value": LLMProvider.GOOGLE_GENAI,
+                "label": "Google GenAI",
+                "requires_base_url": False,
+                "model_prefixes": ["gemini"],
+            },
+            {
+                "value": LLMProvider.MISTRALAI,
+                "label": "MistralAI",
+                "requires_base_url": False,
+                "model_prefixes": ["mistral", "codestral"],
+            },
+            {
+                "value": LLMProvider.GROQ,
+                "label": "Groq",
+                "requires_base_url": False,
+                "model_prefixes": ["groq", "llama-3", "llama3", "mixtral"],
+            },
+            {
+                "value": LLMProvider.COHERE,
+                "label": "Cohere",
+                "requires_base_url": False,
+                "model_prefixes": ["command"],
+            },
+            {
+                "value": LLMProvider.OLLAMA,
+                "label": "Ollama",
+                "requires_base_url": False,
+                "model_prefixes": ["llama", "qwen", "phi", "mistral"],
+            },
+            {
+                "value": LLMProvider.AWS_BEDROCK,
+                "label": "AWS Bedrock",
+                "requires_base_url": False,
+                "model_prefixes": ["bedrock", "anthropic.claude", "amazon."],
+            },
+            {
+                "value": LLMProvider.XAI,
+                "label": "xAI",
+                "requires_base_url": False,
+                "model_prefixes": ["grok"],
+            },
+        ]
