@@ -1072,6 +1072,11 @@ class ComicRepository:
         self.session.refresh(page)
         return page
 
+    def get_page(self, page_id: int) -> ComicPage | None:
+        """按主键读取页面，供页面级 Prompt/图片生成操作使用。"""
+
+        return self.session.get(ComicPage, page_id)
+
     @staticmethod
     def _fill_empty_fields(target, payload: dict, field_names: list[str]) -> None:
         """只填充空字段，避免后续分段改写已建立的视觉锚点。"""
