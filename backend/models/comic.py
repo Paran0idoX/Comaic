@@ -132,7 +132,7 @@ class ComfyWorkflowPreset(TimestampMixin, Base):
 
 
 class LLMConfig(TimestampMixin, Base):
-    """全局 LLM 配置表：一组 OpenAI 兼容 API Key 下维护多个模型名。"""
+    """全局 LLM 配置表：一组 LangChain Provider/API Key 下维护多个模型名。"""
 
     __tablename__ = "llm_config"
 
@@ -146,7 +146,7 @@ class LLMConfig(TimestampMixin, Base):
     # JSON 字符串数组，例如 ["deepseek-v4-flash", "deepseek-chat"]。
     model_names: Mapped[str] = mapped_column(Text, default="[]")
     default_model: Mapped[str] = mapped_column(String(255))
-    # 本地 MVP 直接保存在 SQLite；API 响应永远不返回明文。
+    # 本地 MVP 直接保存在 SQLite；设置页允许回显明文，data/ 不能提交。
     api_key: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
 

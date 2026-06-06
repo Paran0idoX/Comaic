@@ -10,10 +10,12 @@ import {
   createLLMConfig,
   deleteLLMConfig,
   listLLMConfigs,
+  listLLMProviders,
   testLLMConfig,
   updateLLMConfig,
   type LLMConfig,
   type LLMProvider,
+  type LLMProviderOption,
 } from '@/api/settings'
 import { formatLocalDateTime } from '@/utils/datetime'
 
@@ -25,10 +27,12 @@ const testing = ref(false)
 const activating = ref(false)
 const deleting = ref(false)
 const configs = ref<LLMConfig[]>([])
+const providerOptions = ref<LLMProviderOption[]>([])
 const activeConfigId = ref<number | null>(null)
 const selectedConfigId = ref<number | null>(null)
 const isCreating = ref(false)
 const modelDraft = ref('')
+const providerManuallySelected = ref(false)
 
 const form = reactive({
   name: '',
@@ -43,6 +47,16 @@ const form = reactive({
 const selectedConfig = computed(
   () => configs.value.find((config) => config.id === selectedConfigId.value) ?? null,
 )
+const selectedProviderOption = computed(
+  () => providerOptions.value.find((option) => option.value === form.provider) ?? null,
+)
+const selectedProviderRequiresBaseUrl = computed(
+  () => selectedProviderOption.value?.requires_base_url ?? form.provider === 'openai_compatible',
+)
+
+const providerLabel = (provider: LLMProvider) => {
+  return providerOptions.value.find((option) => option.value === provider)?.label ?? provider
+}
 
 const resetForm = () => {
   form.name = ''
@@ -53,23 +67,26 @@ const resetForm = () => {
   form.model_names = []
   form.default_model = ''
   modelDraft.value = ''
+  providerManuallySelected.value = false
 }
 
 const fillForm = (config: LLMConfig) => {
   form.name = config.name
   form.provider = config.provider
   form.base_url = config.base_url
-  form.api_key = ''
+  form.api_key = config.api_key ?? ''
   form.clear_api_key = false
   form.model_names = [...config.model_names]
   form.default_model = config.default_model
   modelDraft.value = ''
+  providerManuallySelected.value = true
 }
 
 const loadConfigs = async () => {
   loading.value = true
   try {
-    const result = await listLLMConfigs()
+    const [result, providers] = await Promise.all([listLLMConfigs(), listLLMProviders()])
+    providerOptions.value = providers
     configs.value = result.items
     activeConfigId.value = result.active_config_id
     const nextSelected =
@@ -104,7 +121,31 @@ const createNewConfig = () => {
   isCreating.value = true
   resetForm()
   form.name = t('settings.llm.newConfigName')
-  form.base_url = 'https://api.deepseek.com/v1'
+}
+
+const onProviderChange = () => {
+  providerManuallySelected.value = true
+  if (!selectedProviderRequiresBaseUrl.value) {
+    form.base_url = ''
+  }
+}
+
+const maybeRecommendProvider = (modelName: string) => {
+  if (!isCreating.value || providerManuallySelected.value) {
+    return
+  }
+  const lowerModelName = modelName.toLowerCase()
+  const matchedProvider = providerOptions.value.find((option) =>
+    option.model_prefixes.some((prefix) => lowerModelName.startsWith(prefix.toLowerCase())),
+  )
+  if (matchedProvider === undefined || matchedProvider.value === form.provider) {
+    return
+  }
+  form.provider = matchedProvider.value
+  if (!matchedProvider.requires_base_url) {
+    form.base_url = ''
+  }
+  ElMessage.info(t('settings.messages.providerRecommended', { provider: matchedProvider.label }))
 }
 
 const normalizedModels = () => {
@@ -128,6 +169,7 @@ const addModelName = () => {
   if (!form.model_names.includes(normalized)) {
     form.model_names.push(normalized)
   }
+  maybeRecommendProvider(normalized)
   if (!form.default_model) {
     form.default_model = normalized
   }
@@ -148,7 +190,7 @@ const saveConfig = async () => {
     const payload = {
       name: form.name.trim(),
       provider: form.provider,
-      base_url: form.base_url.trim(),
+      base_url: selectedProviderRequiresBaseUrl.value ? form.base_url.trim() : form.base_url.trim() || null,
       model_names: models,
       default_model: form.default_model || models[0] || null,
       api_key: form.api_key.trim() || null,
@@ -215,7 +257,7 @@ const testConfig = async () => {
     await testLLMConfig({
       config_id: isCreating.value ? null : selectedConfigId.value,
       provider: form.provider,
-      base_url: form.base_url.trim(),
+      base_url: selectedProviderRequiresBaseUrl.value ? form.base_url.trim() : form.base_url.trim() || null,
       model,
       api_key: form.api_key.trim() || null,
       clear_api_key: form.clear_api_key,
@@ -279,6 +321,8 @@ onMounted(() => {
             </div>
             <p>{{ config.base_url }}</p>
             <small>
+              {{ t('settings.llm.provider') }}: {{ providerLabel(config.provider) }}
+              ·
               {{ t('settings.llm.modelCount', { count: config.model_names.length }) }}
               · {{ t('settings.llm.defaultModel') }}: {{ config.default_model }}
             </small>
@@ -318,10 +362,21 @@ onMounted(() => {
             <el-input v-model="form.name" />
           </el-form-item>
           <el-form-item :label="t('settings.llm.provider')">
-            <el-input :model-value="t('settings.llm.openaiCompatible')" disabled />
+            <el-select v-model="form.provider" @change="onProviderChange">
+              <el-option
+                v-for="provider in providerOptions"
+                :key="provider.value"
+                :label="provider.label"
+                :value="provider.value"
+              />
+            </el-select>
           </el-form-item>
-          <el-form-item :label="t('settings.llm.baseUrl')">
-            <el-input v-model="form.base_url" placeholder="https://api.deepseek.com/v1" />
+          <el-form-item
+            v-if="selectedProviderRequiresBaseUrl"
+            :label="t('settings.llm.baseUrl')"
+          >
+            <el-input v-model="form.base_url" placeholder="https://api.openai.com/v1" />
+            <p class="form-hint">{{ t('settings.llm.baseUrlRequiredHint') }}</p>
           </el-form-item>
           <el-form-item :label="t('settings.llm.apiKey')">
             <el-input
@@ -329,19 +384,9 @@ onMounted(() => {
               type="password"
               show-password
               :disabled="form.clear_api_key"
-              :placeholder="
-                selectedConfig?.api_key_set
-                  ? t('settings.llm.keepKeyPlaceholder')
-                  : t('settings.llm.newKeyPlaceholder')
-              "
+              :placeholder="t('settings.llm.newKeyPlaceholder')"
             />
-            <p class="form-hint">
-              {{
-                selectedConfig?.api_key_set
-                  ? t('settings.llm.keepKeyHint')
-                  : t('settings.llm.noKeyHint')
-              }}
-            </p>
+            <p class="form-hint">{{ t('settings.llm.apiKeyVisibleHint') }}</p>
           </el-form-item>
           <el-form-item>
             <el-checkbox v-model="form.clear_api_key">

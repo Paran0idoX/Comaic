@@ -19,7 +19,7 @@ The current version is not designed to automate every creative decision. Instead
 ## Tech Stack
 
 - Backend: Python, FastAPI, LangChain, DeepAgents, SQLAlchemy, SQLite, SSE
-- LLM: DeepSeek OpenAI-compatible API
+- LLM: LangChain Providers or OpenAI-compatible API
 - Frontend: Vue 3, Vite, Element Plus, vue-i18n
 - Image generation: local ComfyUI HTTP API
 
@@ -46,7 +46,7 @@ comaic/
 - npm
 - Conda, with the recommended environment name `lang_graph`
 - Local ComfyUI, default URL: `http://127.0.0.1:8188`
-- DeepSeek API key
+- A model provider API key configured in the Settings page
 
 ## Quick Start
 
@@ -90,14 +90,13 @@ Edit `.env`:
 
 ```env
 DEEPSEEK_MODEL=deepseek-v4-flash
-DEEPSEEK_API_KEY=your_deepseek_api_key
 DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
 
 DATABASE_URL=sqlite:///data/comaic.sqlite3
 COMFYUI_BASE_URL=http://127.0.0.1:8188
 ```
 
-Do not commit your real `.env` file. On first startup, comaic uses `.env` to initialize the default model configuration. After startup, you can also use the top-right “Settings” page to maintain multiple OpenAI-compatible APIs, API keys, and multiple model names under each API. New Agent calls use the active SQLite configuration and its default model first.
+Do not commit your real `.env` file. On first startup, comaic uses `.env` only to initialize the default model name/config shell. API keys are not read from environment variables; configure them in the top-right “Settings” page. New Agent calls use the active SQLite configuration and its default model.
 
 ### 6. Start ComfyUI
 
@@ -144,14 +143,14 @@ A project is the creative container. Outlines, scripts, image prompts, and image
 
 Click the top-right “Settings” button:
 
-1. Enter a configuration name and the OpenAI-compatible API Base URL.
+1. Choose a LangChain Provider, or choose OpenAI Compatible and enter its API Base URL.
 2. Enter one or more model names.
 3. Enter the API key.
 4. Optionally click “Test Connection”.
 5. Choose the default model and click “Save Settings”.
 6. If you have multiple API configurations, click “Use This Config” to switch the active one.
 
-For security, the backend never returns the saved API key to the frontend. The key is stored in the local SQLite database, so do not commit the `data/` directory.
+This local MVP echoes saved API keys in the Settings page. Keys are stored in the local SQLite database, so do not commit the `data/` directory.
 
 ### 2. Generate an outline
 
@@ -325,11 +324,7 @@ No. Pause only stops later pages from being submitted to ComfyUI. The current su
 
 ### DeepSeek reports an API key error. What should I check?
 
-Check that the root `.env` file contains:
-
-```env
-DEEPSEEK_API_KEY=your_deepseek_api_key
-```
+Open the Settings page and confirm the active DeepSeek configuration has an API key saved.
 
 Do not write a real key into source code or commit it to Git.
 
