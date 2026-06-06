@@ -2,7 +2,7 @@
 
 [English](./README.md) | 简体中文
 
-comaic 是一个本地优先的 AI 漫画生成工作台。它把“故事大纲 -> 分页脚本 -> 文生图 Prompt -> ComfyUI 图片生成 -> 人工选图”串成一条可操作的 MVP 链路，适合用来实验 AI 辅助漫画创作流程。
+Comaic 是一个本地优先的 AI 漫画生成工作台。它把“故事大纲 -> 分页脚本 -> 文生图 Prompt -> ComfyUI 图片生成 -> 人工选图”串成一条可操作的 MVP 链路，适合用来实验 AI 辅助漫画创作流程。
 
 当前版本重点不是自动完成所有创作判断，而是让每个关键产物都能被用户确认和调整：大纲可以多轮对话生成，分页脚本可以人工编辑，图片 Prompt 可以重新生成，ComfyUI 候选图可以逐页选择最终版本。
 
@@ -26,7 +26,7 @@ comaic 是一个本地优先的 AI 漫画生成工作台。它把“故事大纲
 ## 项目结构
 
 ```text
-comaic/
+Comaic/
 ├── backend/      # FastAPI + LangChain + SQLAlchemy
 ├── frontend/     # Vue 3 + Vite + Element Plus
 ├── data/         # SQLite，本地开发数据
@@ -53,8 +53,8 @@ comaic/
 ### 1. 克隆项目
 
 ```bash
-git clone <your-repo-url> comaic
-cd comaic
+git clone <your-repo-url> Comaic
+cd Comaic
 ```
 
 ### 2. 创建并激活 Python 环境
@@ -92,7 +92,7 @@ cp backend/.env.example .env
 DEEPSEEK_MODEL=deepseek-v4-flash
 DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
 
-DATABASE_URL=sqlite:///data/comaic.sqlite3
+DATABASE_URL=sqlite:///data/Comaic.sqlite3
 COMFYUI_BASE_URL=http://127.0.0.1:8188
 ```
 
@@ -106,7 +106,7 @@ COMFYUI_BASE_URL=http://127.0.0.1:8188
 http://127.0.0.1:8188
 ```
 
-### 7. 启动 comaic
+### 7. 启动 Comaic
 
 推荐使用根目录脚本同时启动前后端：
 
@@ -238,13 +238,13 @@ Seed 节点可选；如果不配置，系统不会强行注入 seed，而是使�
 
 ## ComfyUI Workflow 说明
 
-comaic 不内置固定 ComfyUI 工作流。你需要在页面中维护自己的 Workflow preset。
+Comaic 不内置固定 ComfyUI 工作流。你需要在页面中维护自己的 Workflow preset。
 
 推荐做法：
 
 1. 在 ComfyUI 中搭好文生图 workflow。
 2. 导出 API workflow JSON。
-3. 在 comaic 的“图片生成”页面新增 Workflow preset。
+3. 在 Comaic 的“图片生成”页面新增 Workflow preset。
 4. 拖入 JSON 文件或粘贴 JSON。
 5. 确认正向 Prompt 节点 ID 和输入名。
 6. 保存 preset 后用于图片生成。
@@ -285,14 +285,14 @@ pybabel compile -d backend/locales
 
 ## 本地数据
 
-- SQLite 默认保存到 `data/comaic.sqlite3`
+- SQLite 默认保存到 `data/Comaic.sqlite3`
 - 生成图片默认保存到 `outputs/`
 - `.env`、`data/`、`outputs/`、`frontend/node_modules/`、`frontend/dist/` 不应提交到 Git
 
 当前项目仍是 MVP，本地 SQLite 没有引入正式迁移工具。如果开发期间 ORM 表结构变化导致旧库不兼容，可以删除本地数据库后重启：
 
 ```bash
-rm data/comaic.sqlite3
+rm data/Comaic.sqlite3
 ./start.sh
 ```
 
@@ -330,7 +330,7 @@ rm data/comaic.sqlite3
 
 ## 开发状态
 
-comaic 目前是 MVP 版本，核心链路已经跑通，但仍适合继续扩展：
+Comaic 目前是 MVP 版本，核心链路已经跑通，但仍适合继续扩展：
 
 - 更稳定的任务恢复与进度重连
 - 更完整的数据库迁移
