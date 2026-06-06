@@ -130,6 +130,19 @@ a {
   border-radius: 6px;
 }
 
+.el-progress-bar__outer {
+  background-color: rgba(23, 109, 255, 0.12);
+}
+
+.el-progress-bar__inner {
+  background: linear-gradient(90deg, var(--brand-cyan), var(--brand), var(--brand-violet)) !important;
+}
+
+.el-progress__text {
+  color: var(--brand);
+  font-weight: 700;
+}
+
 .el-dialog {
   border: 1px solid var(--panel-border);
   border-radius: 8px;

@@ -4,7 +4,7 @@
 
 English | [简体中文](./README.zh-CN.md)
 
-comaic is a local-first AI comic generation workspace. It turns the workflow “story outline -> page scripts -> text-to-image prompts -> ComfyUI image generation -> manual image selection” into an operable MVP pipeline for experimenting with AI-assisted comic creation.
+Comaic is a local-first AI comic generation workspace. It turns the workflow “story outline -> page scripts -> text-to-image prompts -> ComfyUI image generation -> manual image selection” into an operable MVP pipeline for experimenting with AI-assisted comic creation.
 
 The current version is not designed to automate every creative decision. Instead, each key artifact remains reviewable and editable: outlines are shaped through multi-turn conversations, page scripts can be edited manually, image prompts can be regenerated, and ComfyUI candidate images can be selected page by page.
 
@@ -28,7 +28,7 @@ The current version is not designed to automate every creative decision. Instead
 ## Project Structure
 
 ```text
-comaic/
+Comaic/
 ├── backend/      # FastAPI + LangChain + SQLAlchemy
 ├── frontend/     # Vue 3 + Vite + Element Plus
 ├── data/         # Local SQLite development data
@@ -55,8 +55,8 @@ comaic/
 ### 1. Clone the repository
 
 ```bash
-git clone <your-repo-url> comaic
-cd comaic
+git clone <your-repo-url> Comaic
+cd Comaic
 ```
 
 ### 2. Create and activate the Python environment
@@ -94,11 +94,11 @@ Edit `.env`:
 DEEPSEEK_MODEL=deepseek-v4-flash
 DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
 
-DATABASE_URL=sqlite:///data/comaic.sqlite3
+DATABASE_URL=sqlite:///data/Comaic.sqlite3
 COMFYUI_BASE_URL=http://127.0.0.1:8188
 ```
 
-Do not commit your real `.env` file. On first startup, comaic uses `.env` only to initialize the default model name/config shell. API keys are not read from environment variables; configure them in the top-right “Settings” page. New Agent calls use the active SQLite configuration and its default model.
+Do not commit your real `.env` file. On first startup, Comaic uses `.env` only to initialize the default model name/config shell. API keys are not read from environment variables; configure them in the top-right “Settings” page. New Agent calls use the active SQLite configuration and its default model.
 
 ### 6. Start ComfyUI
 
@@ -108,7 +108,7 @@ Start your local ComfyUI server using the official ComfyUI workflow and make sur
 http://127.0.0.1:8188
 ```
 
-### 7. Start comaic
+### 7. Start Comaic
 
 The recommended local command starts both backend and frontend:
 
@@ -218,7 +218,7 @@ At minimum, configure:
 - Positive prompt node ID
 - Positive prompt input name, commonly `text`
 
-Seed node configuration is optional. If no seed node is configured, comaic does not force-inject a seed and uses the workflow’s own configuration.
+Seed node configuration is optional. If no seed node is configured, Comaic does not force-inject a seed and uses the workflow’s own configuration.
 
 ### 6. Generate images
 
@@ -240,13 +240,13 @@ After candidate images are generated, inspect thumbnails in the “Image Generat
 
 ## ComfyUI Workflow Notes
 
-comaic does not ship with a fixed ComfyUI workflow. You maintain your own workflow presets in the UI.
+Comaic does not ship with a fixed ComfyUI workflow. You maintain your own workflow presets in the UI.
 
 Recommended workflow:
 
 1. Build a text-to-image workflow in ComfyUI.
 2. Export the API workflow JSON.
-3. Add a workflow preset in comaic’s “Image Generation” page.
+3. Add a workflow preset in Comaic’s “Image Generation” page.
 4. Drag in the JSON file or paste the JSON content.
 5. Confirm the positive prompt node ID and input name.
 6. Save the preset and use it for image generation.
@@ -287,14 +287,14 @@ Frontend UI text and progress timeline text are managed by `vue-i18n`. Backend b
 
 ## Local Data
 
-- SQLite defaults to `data/comaic.sqlite3`
+- SQLite defaults to `data/Comaic.sqlite3`
 - Generated images default to `outputs/`
 - `.env`, `data/`, `outputs/`, `frontend/node_modules/`, and `frontend/dist/` should not be committed to Git
 
-comaic is still an MVP and does not use a formal migration tool for the local SQLite database. If ORM schema changes make your old local database incompatible, delete it and restart:
+Comaic is still an MVP and does not use a formal migration tool for the local SQLite database. If ORM schema changes make your old local database incompatible, delete it and restart:
 
 ```bash
-rm data/comaic.sqlite3
+rm data/Comaic.sqlite3
 ./start.sh
 ```
 
@@ -332,7 +332,7 @@ Do not write a real key into source code or commit it to Git.
 
 ## Development Status
 
-comaic is currently an MVP. The core pipeline works, and there is plenty of room to extend it:
+Comaic is currently an MVP. The core pipeline works, and there is plenty of room to extend it:
 
 - More reliable task recovery and progress reconnection
 - Formal database migrations
