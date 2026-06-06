@@ -123,6 +123,40 @@ const completionPercentage = computed(() => {
   }
   return Math.min(100, Math.round((completedPageCount.value / taskTotalPages.value) * 100))
 })
+const expandedCharacterGroups = ref<string[]>([])
+const groupedVisualCharacters = computed(() => {
+  const groups = new Map<
+    string,
+    {
+      character_key: string
+      name: string
+      items: ScriptCharacter[]
+    }
+  >()
+
+  const sortedCharacters = [...visualCharacters.value].sort((left, right) => {
+    const keyOrder = left.character_key.localeCompare(right.character_key)
+    if (keyOrder !== 0) {
+      return keyOrder
+    }
+    return (left.section_no ?? 0) - (right.section_no ?? 0)
+  })
+
+  for (const character of sortedCharacters) {
+    const group = groups.get(character.character_key) ?? {
+      character_key: character.character_key,
+      name: character.name,
+      items: [],
+    }
+    if (!group.name && character.name) {
+      group.name = character.name
+    }
+    group.items.push(character)
+    groups.set(character.character_key, group)
+  }
+
+  return [...groups.values()]
+})
 
 const canGenerate = computed(
   () =>
@@ -754,14 +788,6 @@ const suspendBatch = async () => {
   }
 }
 
-const refreshCurrentProject = async () => {
-  await loadScriptTasks(selectedTaskId.value)
-  await loadSections()
-  await loadVisualSettings()
-  await loadPages()
-  addProgressEvent('refreshed', { message: t('scripts.events.refreshed') })
-}
-
 const openDetail = (page: ScriptPage) => {
   selectedPage.value = page
   detailVisible.value = true
@@ -974,6 +1000,14 @@ watch(selectedTaskId, async (taskId) => {
   syncProjectQuery()
 })
 
+watch(groupedVisualCharacters, (groups) => {
+  const validKeys = new Set(groups.map((group) => group.character_key))
+  expandedCharacterGroups.value = expandedCharacterGroups.value.filter((key) => validKeys.has(key))
+  if (expandedCharacterGroups.value.length === 0 && groups[0] !== undefined) {
+    expandedCharacterGroups.value = [groups[0].character_key]
+  }
+})
+
 watch(progressEvents, async () => {
   await nextTick()
 })
@@ -993,16 +1027,6 @@ onActivated(async () => {
 
 <template>
   <section class="script-page">
-    <div class="page-header">
-      <div>
-        <h1 class="page-title">{{ t('scripts.title') }}</h1>
-        <p class="page-subtitle">{{ t('scripts.subtitle') }}</p>
-      </div>
-      <el-button :icon="Refresh" :loading="loadingPages" @click="refreshCurrentProject">
-        {{ t('scripts.refresh') }}
-      </el-button>
-    </div>
-
     <el-alert
       v-if="needsOutline"
       class="script-page__alert"
@@ -1130,6 +1154,7 @@ onActivated(async () => {
 
           <div class="script-config__actions">
             <el-button
+              class="ai-gradient-button"
               type="success"
               :icon="Tickets"
               :loading="generatingBatch"
@@ -1164,6 +1189,35 @@ onActivated(async () => {
             :description="t('scripts.config.emptyProjects')"
             :image-size="90"
           />
+        </section>
+
+        <section class="panel script-progress">
+          <div class="panel__heading">
+            <el-icon><Tickets /></el-icon>
+            <div>
+              <h2>{{ t('scripts.progress.title') }}</h2>
+              <p>{{ t('scripts.progress.description') }}</p>
+            </div>
+          </div>
+
+          <el-scrollbar class="script-progress__scroll">
+            <el-empty
+              v-if="progressEvents.length === 0"
+              :description="t('scripts.progress.empty')"
+              :image-size="96"
+            />
+            <el-timeline v-else>
+              <el-timeline-item
+                v-for="event in progressEvents"
+                :key="event.id"
+                :timestamp="event.timestamp"
+                :type="event.type"
+              >
+                <strong>{{ event.title }}</strong>
+                <p>{{ event.content }}</p>
+              </el-timeline-item>
+            </el-timeline>
+          </el-scrollbar>
         </section>
       </div>
 
@@ -1224,49 +1278,6 @@ onActivated(async () => {
           </div>
         </section>
 
-        <section class="panel visual-settings">
-          <div class="panel__heading">
-            <div class="panel__heading-main">
-              <el-icon><View /></el-icon>
-              <div>
-                <h2>{{ t('scripts.visual.title') }}</h2>
-                <p>{{ t('scripts.visual.description') }}</p>
-              </div>
-            </div>
-          </div>
-          <div v-loading="loadingVisualSettings" class="visual-settings__grid">
-            <div class="visual-settings__column">
-              <h3>{{ t('scripts.visual.scenes') }}</h3>
-              <el-empty v-if="scenes.length === 0" :description="t('scripts.visual.emptyScenes')" :image-size="72" />
-              <template v-else>
-                <article v-for="scene in scenes" :key="scene.id" class="visual-card">
-                  <strong>{{ scene.scene_key }} · {{ scene.name }}</strong>
-                  <p>{{ scene.environment_details }}</p>
-                  <small>{{ scene.visual_anchors }}</small>
-                </article>
-              </template>
-            </div>
-            <div class="visual-settings__column">
-              <h3>{{ t('scripts.visual.characters') }}</h3>
-              <el-empty
-                v-if="visualCharacters.length === 0"
-                :description="t('scripts.visual.emptyCharacters')"
-                :image-size="72"
-              />
-              <template v-else>
-                <article v-for="character in visualCharacters" :key="character.id" class="visual-card">
-                  <strong>
-                    {{ character.character_key }} · {{ character.name }}
-                    <span v-if="character.section_no">· S{{ character.section_no }}</span>
-                  </strong>
-                  <p>{{ character.current_clothing || character.current_state || character.section_role }}</p>
-                  <small>{{ character.visual_anchors }}</small>
-                </article>
-              </template>
-            </div>
-          </div>
-        </section>
-
         <section class="panel script-results">
           <div class="panel__heading script-results__heading">
             <div class="panel__heading-main">
@@ -1278,9 +1289,6 @@ onActivated(async () => {
                 </p>
               </div>
             </div>
-            <el-button text :icon="Refresh" :loading="loadingPages" @click="loadPages">
-              {{ t('scripts.refresh') }}
-            </el-button>
             <el-button type="primary" :icon="Plus" :disabled="!canEditScripts" @click="openCreateScript">
               {{ t('scripts.actions.addScript') }}
             </el-button>
@@ -1334,33 +1342,65 @@ onActivated(async () => {
         </section>
       </div>
 
-      <section class="panel script-progress">
+      <section class="panel visual-settings">
         <div class="panel__heading">
-          <el-icon><Tickets /></el-icon>
-          <div>
-            <h2>{{ t('scripts.progress.title') }}</h2>
-            <p>{{ t('scripts.progress.description') }}</p>
+          <div class="panel__heading-main">
+            <el-icon><View /></el-icon>
+            <div>
+              <h2>{{ t('scripts.visual.title') }}</h2>
+              <p>{{ t('scripts.visual.description') }}</p>
+            </div>
           </div>
         </div>
-
-        <el-scrollbar class="script-progress__scroll">
-          <el-empty
-            v-if="progressEvents.length === 0"
-            :description="t('scripts.progress.empty')"
-            :image-size="96"
-          />
-          <el-timeline v-else>
-            <el-timeline-item
-              v-for="event in progressEvents"
-              :key="event.id"
-              :timestamp="event.timestamp"
-              :type="event.type"
-            >
-              <strong>{{ event.title }}</strong>
-              <p>{{ event.content }}</p>
-            </el-timeline-item>
-          </el-timeline>
-        </el-scrollbar>
+        <div v-loading="loadingVisualSettings" class="visual-settings__grid">
+          <div class="visual-settings__column">
+            <h3>{{ t('scripts.visual.characters') }}</h3>
+            <el-empty
+              v-if="groupedVisualCharacters.length === 0"
+              :description="t('scripts.visual.emptyCharacters')"
+              :image-size="72"
+            />
+            <el-collapse v-else v-model="expandedCharacterGroups" class="visual-character-groups">
+              <el-collapse-item
+                v-for="group in groupedVisualCharacters"
+                :key="group.character_key"
+                :name="group.character_key"
+              >
+                <template #title>
+                  <span class="visual-character-group__title">
+                    <span>{{ group.character_key }} · {{ group.name || t('imageGeneration.emptyText') }}</span>
+                    <el-tag size="small" effect="plain">
+                      {{ group.items.length }}
+                    </el-tag>
+                  </span>
+                </template>
+                <article
+                  v-for="character in group.items"
+                  :key="character.id"
+                  class="visual-card visual-card--compact"
+                >
+                  <strong>
+                    <span v-if="character.section_no">S{{ character.section_no }} · </span>
+                    {{ character.section_role || character.current_state || t('imageGeneration.emptyText') }}
+                  </strong>
+                  <p>{{ character.current_clothing || character.current_state || character.section_role }}</p>
+                  <small>{{ character.visual_anchors }}</small>
+                </article>
+              </el-collapse-item>
+            </el-collapse>
+          </div>
+          <div class="visual-settings__column">
+            <h3>{{ t('scripts.visual.scenes') }}</h3>
+            <el-empty v-if="scenes.length === 0" :description="t('scripts.visual.emptyScenes')" :image-size="72" />
+            <template v-else>
+              <article v-for="scene in scenes" :key="scene.id" class="visual-card">
+                <strong>{{ scene.scene_key }} · {{ scene.name }}</strong>
+                <p>{{ scene.environment_details }}</p>
+                <small>{{ scene.visual_anchors }}</small>
+              </article>
+            </template>
+          </div>
+        </div>
       </section>
     </div>
 
@@ -1486,7 +1526,7 @@ onActivated(async () => {
 
 .script-workspace {
   display: grid;
-  grid-template-columns: minmax(280px, 0.72fr) minmax(520px, 1.55fr) minmax(260px, 0.58fr);
+  grid-template-columns: minmax(280px, 0.72fr) minmax(520px, 1.55fr) minmax(300px, 0.72fr);
   gap: 18px;
   align-items: start;
 }
@@ -1502,6 +1542,10 @@ onActivated(async () => {
   min-width: 0;
   gap: 18px;
   order: 2;
+}
+
+.visual-settings {
+  order: 3;
 }
 
 .panel {
@@ -1572,7 +1616,7 @@ onActivated(async () => {
 
 .visual-settings__grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: 1fr;
   gap: 16px;
   padding: 18px 22px 22px;
 }
@@ -1603,6 +1647,57 @@ onActivated(async () => {
   margin: 0;
   color: var(--color-muted);
   line-height: 1.45;
+}
+
+.visual-card--compact {
+  margin-bottom: 8px;
+}
+
+.visual-card--compact:last-child {
+  margin-bottom: 0;
+}
+
+.visual-character-groups {
+  display: grid;
+  gap: 10px;
+  border: 0;
+}
+
+.visual-character-groups :deep(.el-collapse-item) {
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.visual-character-groups :deep(.el-collapse-item__header) {
+  min-height: 44px;
+  padding: 0 12px;
+  border-bottom: 0;
+  font-weight: 700;
+}
+
+.visual-character-groups :deep(.el-collapse-item__wrap) {
+  border-bottom: 0;
+}
+
+.visual-character-groups :deep(.el-collapse-item__content) {
+  display: grid;
+  gap: 8px;
+  padding: 0 12px 12px;
+}
+
+.visual-character-group__title {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 8px;
+}
+
+.visual-character-group__title > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .script-task-progress {
@@ -1695,12 +1790,8 @@ onActivated(async () => {
 }
 
 .script-progress__scroll {
-  height: 420px;
+  height: 360px;
   padding: 14px 18px 8px;
-}
-
-.script-progress {
-  order: 3;
 }
 
 .script-progress :deep(.el-timeline) {
@@ -1771,8 +1862,12 @@ onActivated(async () => {
     grid-template-columns: minmax(300px, 0.8fr) minmax(420px, 1.2fr);
   }
 
-  .script-progress {
+  .visual-settings {
     grid-column: 1 / -1;
+  }
+
+  .visual-settings__grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
@@ -1792,6 +1887,10 @@ onActivated(async () => {
 
   .script-progress__scroll {
     height: 420px;
+  }
+
+  .visual-settings__grid {
+    grid-template-columns: 1fr;
   }
 }
 </style>

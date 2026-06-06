@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Connection, Delete, Plus, Refresh, Select, Star } from '@element-plus/icons-vue'
+import { Connection, Delete, Plus, Select, Star } from '@element-plus/icons-vue'
 import { useI18n } from 'vue-i18n'
 
 import { apiErrorMessage } from '@/api/errors'
@@ -282,17 +282,9 @@ onMounted(() => {
 <template>
   <section v-loading="loading" class="settings-page">
     <div class="page-header">
-      <div>
-        <p class="eyebrow">{{ t('app.preview') }}</p>
-        <h1 class="page-title">{{ t('settings.title') }}</h1>
-        <p class="page-subtitle">{{ t('settings.subtitle') }}</p>
-      </div>
       <div class="page-actions">
         <el-button :icon="Plus" @click="createNewConfig">
           {{ t('settings.actions.addConfig') }}
-        </el-button>
-        <el-button :icon="Refresh" @click="loadConfigs">
-          {{ t('settings.actions.refresh') }}
         </el-button>
       </div>
     </div>
@@ -486,8 +478,17 @@ onMounted(() => {
 .panel-header,
 .settings-footer,
 .config-item__title {
-  justify-content: space-between;
   gap: 18px;
+}
+
+.page-header {
+  justify-content: flex-end;
+}
+
+.panel-header,
+.settings-footer,
+.config-item__title {
+  justify-content: space-between;
 }
 
 .page-header,
@@ -511,37 +512,18 @@ onMounted(() => {
   align-items: start;
 }
 
-.eyebrow,
-.page-title,
-.page-subtitle,
 .panel-header h2,
 .panel-header p,
 .config-item p {
   margin: 0;
 }
 
-.eyebrow {
-  color: var(--text-soft);
-  font-size: 13px;
-  font-weight: 700;
-}
-
-.page-title {
-  margin-top: 6px;
-  font-size: 30px;
-}
-
-.page-subtitle,
 .panel-header p,
 .form-hint,
 .updated-at,
 .config-item p,
 .config-item small {
   color: var(--text-soft);
-}
-
-.page-subtitle {
-  margin-top: 10px;
 }
 
 .panel {

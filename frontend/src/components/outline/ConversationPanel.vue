@@ -154,6 +154,7 @@ onBeforeUnmount(() => {
           {{ streaming ? t('outline.conversation.streamingHint') : t('outline.conversation.readyHint') }}
         </el-text>
         <el-button
+          class="ai-gradient-button"
           type="primary"
           :icon="Promotion"
           :loading="streaming"
