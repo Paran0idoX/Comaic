@@ -59,6 +59,15 @@ class ImagePromptPresetKind(str, Enum):
 
 
 class LLMProvider(str, Enum):
-    """LLM 服务商类型；MVP 先统一按 OpenAI 兼容接口处理。"""
+    """LLM 服务商类型；设置页可选择 LangChain Provider 或 OpenAI 兼容接口。"""
 
     OPENAI_COMPATIBLE = "openai_compatible"
+    DEEPSEEK = "deepseek"
+    ANTHROPIC = "anthropic"
+    GOOGLE_GENAI = "google_genai"
+    MISTRALAI = "mistralai"
+    GROQ = "groq"
+    COHERE = "cohere"
+    OLLAMA = "ollama"
+    AWS_BEDROCK = "aws_bedrock"
+    XAI = "xai"

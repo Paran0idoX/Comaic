@@ -1,4 +1,5 @@
 import logging
+import asyncio
 from collections.abc import Callable, Sequence
 from typing import Any, TypeVar
 
@@ -25,6 +26,7 @@ async def ainvoke_structured_with_retries(
     max_retries: int = 3,
     config: RunnableConfig | None = None,
     validator: Callable[[ResponseT], None] | None = None,
+    input_mode: str = "agent_state",
 ) -> ResponseT:
     """调用使用 response_format 的 Agent，并在结构化结果不可用时自动重试。
 
@@ -48,11 +50,14 @@ async def ainvoke_structured_with_retries(
             max_retries,
         )
 
-        result_state = await agent.ainvoke(
-            {"messages": attempt_messages},
-            config=config,
-        )
         try:
+            if input_mode == "messages":
+                result_state = await agent.ainvoke(attempt_messages, config=config)
+            else:
+                result_state = await agent.ainvoke(
+                    {"messages": attempt_messages},
+                    config=config,
+                )
             response = _parse_structured_response(
                 result_state=result_state,
                 response_model=response_model,
@@ -67,10 +72,22 @@ async def ainvoke_structured_with_retries(
                 max_retries,
             )
             return response
+        except asyncio.CancelledError:
+            raise
         except (StructuredOutputError, ValidationError, ValueError, TypeError) as exc:
             last_error = exc
             logger.warning(
                 "Structured output failed operation=%s model=%s attempt=%s/%s error=%s",
+                operation,
+                response_model.__name__,
+                attempt,
+                max_retries,
+                exc,
+            )
+        except Exception as exc:
+            last_error = exc
+            logger.warning(
+                "Structured output invocation failed operation=%s model=%s attempt=%s/%s error=%s",
                 operation,
                 response_model.__name__,
                 attempt,
@@ -86,10 +103,19 @@ async def ainvoke_structured_with_retries(
 
 def _parse_structured_response(
     *,
-    result_state: dict[str, Any],
+    result_state: Any,
     response_model: type[ResponseT],
 ) -> ResponseT:
     """把不同形态的 structured_response 统一校验成目标 Pydantic 模型。"""
+
+    if isinstance(result_state, response_model):
+        return result_state
+    if isinstance(result_state, dict) and "structured_response" not in result_state:
+        return response_model.model_validate(result_state)
+    if hasattr(result_state, "model_dump") and not isinstance(result_state, dict):
+        return response_model.model_validate(result_state.model_dump())
+    if not isinstance(result_state, dict):
+        raise StructuredOutputError(f"Unsupported structured result type: {type(result_state)!r}")
 
     structured_response = result_state.get("structured_response")
     if structured_response is None:
@@ -125,8 +151,9 @@ def _messages_for_attempt(
             content="\n\n".join(
                 [
                     "结构化输出重试要求：",
-                    f"上一次调用没有返回可用的 structured_response，或 structured_response 不符合 {response_model.__name__}。",
-                    "请不要输出 Markdown、代码块、解释性文字或把结果写入文件；必须通过 response_format 返回结构化结果。",
+                    f"上一次调用没有返回可用的 structured_response，或者结构化输出无法解析为 {response_model.__name__}。",
+                    "请只通过 response_format 返回合法 JSON 对象，不要输出 Markdown、代码块、解释性文字或把结果写入文件。",
+                    "如果字段文本中包含对白、引号或特殊符号，必须正确转义，不能生成会破坏 JSON 的未转义双引号。",
                     f"上一次失败原因：{last_error}",
                 ]
             )

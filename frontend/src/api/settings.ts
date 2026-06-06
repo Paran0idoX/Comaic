@@ -1,6 +1,16 @@
 import { apiHeaders, parseApiErrorResponse } from './errors'
 
-export type LLMProvider = 'openai_compatible'
+export type LLMProvider =
+  | 'openai_compatible'
+  | 'deepseek'
+  | 'anthropic'
+  | 'google_genai'
+  | 'mistralai'
+  | 'groq'
+  | 'cohere'
+  | 'ollama'
+  | 'aws_bedrock'
+  | 'xai'
 
 export type LLMConfig = {
   id: number
@@ -9,9 +19,17 @@ export type LLMConfig = {
   base_url: string
   model_names: string[]
   default_model: string
+  api_key: string | null
   api_key_set: boolean
   is_active: boolean
   updated_at: string
+}
+
+export type LLMProviderOption = {
+  value: LLMProvider
+  label: string
+  requires_base_url: boolean
+  model_prefixes: string[]
 }
 
 export type LLMConfigListResponse = {
@@ -22,7 +40,7 @@ export type LLMConfigListResponse = {
 export type CreateLLMConfigPayload = {
   name: string
   provider: LLMProvider
-  base_url: string
+  base_url?: string | null
   model_names: string[]
   default_model?: string | null
   api_key?: string | null
@@ -32,7 +50,7 @@ export type CreateLLMConfigPayload = {
 export type UpdateLLMConfigPayload = {
   name: string
   provider: LLMProvider
-  base_url: string
+  base_url?: string | null
   model_names: string[]
   default_model?: string | null
   api_key?: string | null
@@ -64,6 +82,9 @@ const requestJson = async <T>(url: string, options: RequestInit = {}): Promise<T
 
 export const listLLMConfigs = (): Promise<LLMConfigListResponse> =>
   requestJson<LLMConfigListResponse>('/api/settings/llm')
+
+export const listLLMProviders = (): Promise<LLMProviderOption[]> =>
+  requestJson<LLMProviderOption[]>('/api/settings/llm/providers')
 
 export const createLLMConfig = (payload: CreateLLMConfigPayload): Promise<LLMConfig> =>
   requestJson<LLMConfig>('/api/settings/llm/configs', {

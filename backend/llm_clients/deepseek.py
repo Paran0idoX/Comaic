@@ -9,9 +9,8 @@ from backend.llm_clients.factory import get_thinking_chat_model, get_tool_chat_m
 
 load_dotenv()
 
-# 兼容旧代码里读取的模块变量；真实运行配置优先使用 SQLite 中的 llm_config。
+# 兼容旧代码里读取的模型名变量；API Key 只能来自 SQLite 设置页配置。
 deepseek_model = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash").strip()
-deepseek_api_key = (os.getenv("DEEPSEEK_API_KEY") or "").strip()
 
 
 class LazyChatModel:

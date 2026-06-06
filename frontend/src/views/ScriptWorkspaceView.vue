@@ -290,6 +290,7 @@ const describePayload = (event: string, payload: Record<string, unknown>) => {
     const translated = t(key, {
       attempt: String(payload.attempt ?? '-'),
       sectionNo: String(payload.section_no ?? '-'),
+      pageNo: String(payload.page_no ?? '-'),
       pageStart: String(payload.page_start ?? '-'),
       pageEnd: String(payload.page_end ?? '-'),
       count: String(payload.count ?? '-'),
@@ -345,7 +346,17 @@ const describePayload = (event: string, payload: Record<string, unknown>) => {
     }
   }
   if (event === 'review') {
-    return String(payload.message ?? payload.result ?? payload.comment ?? t('scripts.events.reviewDone'))
+    const pageNo = payload.page_no
+    const suggestions = Array.isArray(payload.revision_suggestions)
+      ? payload.revision_suggestions.map((item) => String(item)).filter(Boolean).join('；')
+      : ''
+    if (pageNo !== undefined && suggestions) {
+      return `${t('scripts.pages.pageNoPrefix')}${String(pageNo)}${t('scripts.pages.pageNoSuffix')}：${suggestions}`
+    }
+    if (pageNo !== undefined) {
+      return `${t('scripts.pages.pageNoPrefix')}${String(pageNo)}${t('scripts.pages.pageNoSuffix')}：${String(payload.summary ?? t('scripts.events.reviewDone'))}`
+    }
+    return String(payload.message ?? payload.result ?? payload.comment ?? payload.summary ?? t('scripts.events.reviewDone'))
   }
   if (event === 'error') {
     return String(payload.message ?? t('scripts.errors.batchFailed'))
@@ -385,7 +396,8 @@ const addProgressEvent = (event: string, payload: Record<string, unknown> = {}) 
 }
 
 const upsertPageInList = (page: ScriptPage) => {
-  const index = pages.value.findIndex((item) => item.id === page.id || item.page_no === page.page_no)
+  // 同一项目的不同脚本任务可以拥有相同页码，前端合并时必须以页面主键为准。
+  const index = pages.value.findIndex((item) => item.id === page.id)
   if (index === -1) {
     pages.value = [...pages.value, page]
   } else {
@@ -600,6 +612,16 @@ const generateBatch = async () => {
 
   generatingBatch.value = true
   needsOutline.value = false
+  // 批量生成永远创建新任务；先清空旧任务视图，避免已有任务的页面/分段被误认为本轮结果。
+  currentTaskId.value = null
+  selectedTaskId.value = null
+  selectedSectionNo.value = null
+  pages.value = []
+  sections.value = []
+  scenes.value = []
+  visualCharacters.value = []
+  selectedPage.value = null
+  detailVisible.value = false
   addProgressEvent('phase', { message: t('scripts.events.batchStarted') })
 
   try {
