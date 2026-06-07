@@ -46,6 +46,12 @@ type PromptNodeCandidate = {
   text: string
 }
 
+type SeedNodeCandidate = {
+  nodeId: string
+  inputName: string
+  classType: string
+}
+
 const { locale, t } = useI18n()
 
 const projects = ref<Project[]>([])
@@ -90,6 +96,9 @@ const workflowForm = reactive({
 
 const selectedProject = computed(
   () => projects.value.find((project) => project.id === selectedProjectId.value) ?? null,
+)
+const selectedWorkflow = computed(
+  () => workflows.value.find((workflow) => workflow.id === selectedWorkflowId.value) ?? null,
 )
 const sortedPages = computed(() => [...pages.value].sort((left, right) => left.page_no - right.page_no))
 const canGenerate = computed(
@@ -256,6 +265,45 @@ const findPositivePromptCandidate = (workflow: Record<string, WorkflowNode>) => 
   }
 }
 
+const isSeedNode = (node: WorkflowNode) => {
+  const classType = String(node.class_type ?? '')
+  const inputs = node.inputs
+  return inputs !== undefined && ('seed' in inputs || 'noise_seed' in inputs) && (
+    classType === 'KSampler' ||
+    classType === 'KSamplerAdvanced' ||
+    classType.includes('Sampler')
+  )
+}
+
+const findSeedCandidate = (workflow: Record<string, WorkflowNode>) => {
+  const candidates: SeedNodeCandidate[] = Object.entries(workflow)
+    .filter(([, node]) => isSeedNode(node))
+    .map(([nodeId, node]) => ({
+      nodeId,
+      inputName:
+        String(node.class_type ?? '') === 'KSamplerAdvanced' && 'noise_seed' in (node.inputs ?? {})
+          ? 'noise_seed'
+          : 'seed' in (node.inputs ?? {})
+            ? 'seed'
+            : 'noise_seed',
+      classType: String(node.class_type ?? ''),
+    }))
+
+  if (candidates.length === 0) {
+    return { candidate: null, multiple: false }
+  }
+
+  const candidate =
+    candidates.find((item) => item.classType === 'KSampler') ??
+    candidates.find((item) => item.classType === 'KSamplerAdvanced') ??
+    candidates[0] ??
+    null
+  return {
+    candidate,
+    multiple: candidates.length > 1,
+  }
+}
+
 const applyPositivePromptCandidate = (workflow: Record<string, WorkflowNode>) => {
   const { candidate, multiple } = findPositivePromptCandidate(workflow)
   if (candidate === null) {
@@ -272,10 +320,31 @@ const applyPositivePromptCandidate = (workflow: Record<string, WorkflowNode>) =>
   )
 }
 
-const parsePositiveNodeFromTextarea = () => {
+const applySeedCandidate = (workflow: Record<string, WorkflowNode>) => {
+  const { candidate, multiple } = findSeedCandidate(workflow)
+  if (candidate === null) {
+    ElMessage.warning(t('imageGeneration.messages.workflowSeedNotFound'))
+    return
+  }
+
+  workflowForm.seed_node_id = candidate.nodeId
+  workflowForm.seed_input_name = candidate.inputName
+  ElMessage.success(
+    multiple
+      ? t('imageGeneration.messages.workflowSeedMultiple')
+      : t('imageGeneration.messages.workflowSeedParsed'),
+  )
+}
+
+const applyWorkflowCandidates = (workflow: Record<string, WorkflowNode>) => {
+  applyPositivePromptCandidate(workflow)
+  applySeedCandidate(workflow)
+}
+
+const parseWorkflowNodesFromTextarea = () => {
   const workflow = parseWorkflowJson(workflowForm.workflow_json)
   if (workflow !== null) {
-    applyPositivePromptCandidate(workflow)
+    applyWorkflowCandidates(workflow)
   }
 }
 
@@ -288,7 +357,7 @@ const handleWorkflowFile = (file: File) => {
       return
     }
     workflowForm.workflow_json = JSON.stringify(workflow, null, 2)
-    applyPositivePromptCandidate(workflow)
+    applyWorkflowCandidates(workflow)
   }
   reader.onerror = () => {
     ElMessage.error(t('imageGeneration.errors.workflowJsonInvalid'))
@@ -324,6 +393,19 @@ const streamPayload = () => ({
   candidates_per_page: generationForm.candidates_per_page,
   negative_prompt: generationForm.negative_prompt.trim() || null,
 })
+
+const ensureWorkflowSeedConfigured = () => {
+  const workflow = selectedWorkflow.value
+  if (workflow === null) {
+    ElMessage.warning(t('imageGeneration.errors.selectWorkflow'))
+    return false
+  }
+  if (!workflow.seed_node_id || !workflow.seed_input_name) {
+    ElMessage.warning(t('imageGeneration.errors.workflowSeedRequired'))
+    return false
+  }
+  return true
+}
 
 const loadProjects = async () => {
   projects.value = await listProjects()
@@ -467,6 +549,9 @@ const generateBatch = async () => {
     ElMessage.warning(t('imageGeneration.errors.selectTaskAndWorkflow'))
     return
   }
+  if (!ensureWorkflowSeedConfigured()) {
+    return
+  }
   generating.value = true
   try {
     await streamGenerateImagesForTask(selectedTaskId.value, streamPayload(), {
@@ -510,6 +595,9 @@ const generateBatch = async () => {
 const generatePage = async (page: ImageGenerationPage) => {
   if (selectedWorkflowId.value === null) {
     ElMessage.warning(t('imageGeneration.errors.selectWorkflow'))
+    return
+  }
+  if (!ensureWorkflowSeedConfigured()) {
     return
   }
   generating.value = true
@@ -801,8 +889,8 @@ onMounted(() => {
               <el-icon class="workflow-upload__icon"><UploadFilled /></el-icon>
               <div class="workflow-upload__text">{{ t('imageGeneration.workflows.uploadHint') }}</div>
             </el-upload>
-            <el-button :icon="Search" @click="parsePositiveNodeFromTextarea">
-              {{ t('imageGeneration.actions.parsePositiveNode') }}
+            <el-button :icon="Search" @click="parseWorkflowNodesFromTextarea">
+              {{ t('imageGeneration.actions.parseWorkflowNodes') }}
             </el-button>
           </div>
           <el-input v-model="workflowForm.workflow_json" type="textarea" :rows="18" resize="none" />
@@ -814,7 +902,13 @@ onMounted(() => {
       </template>
     </el-dialog>
 
-    <el-dialog v-model="detailVisible" :title="t('imageGeneration.detail.title')" width="760px">
+    <el-dialog
+      v-model="detailVisible"
+      :title="t('imageGeneration.detail.title')"
+      width="min(920px, 92vw)"
+      top="4vh"
+      class="image-detail-dialog"
+    >
       <el-image v-if="detailImage?.image_url" :src="detailImage.image_url" fit="contain" class="detail-image" />
       <pre class="image-meta">{{ detailImage }}</pre>
     </el-dialog>
@@ -954,13 +1048,32 @@ onMounted(() => {
 }
 
 .detail-image {
+  display: flex;
+  justify-content: center;
   width: 100%;
-  max-height: 520px;
+  max-height: 76vh;
+  overflow: hidden;
+  background: #0b1220;
+  border-radius: 8px;
+}
+
+.detail-image :deep(.el-image__inner) {
+  width: auto;
+  max-width: 100%;
+  max-height: 76vh;
+  object-fit: contain;
 }
 
 .image-meta {
+  max-height: 160px;
+  overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+:deep(.image-detail-dialog .el-dialog__body) {
+  max-height: calc(100vh - 140px);
+  overflow: auto;
 }
 
 @media (max-width: 1180px) {
