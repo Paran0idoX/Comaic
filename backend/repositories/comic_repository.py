@@ -4,6 +4,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session as SqlAlchemySession
 
 from backend.models.comic import (
+    AppSettings,
     ComicImage,
     ComicPage,
     ComicProject,
@@ -217,6 +218,26 @@ class ComicRepository:
             select(LLMConfig).where(LLMConfig.is_active.is_(True))
         ):
             config.is_active = False
+
+    def get_app_settings(self) -> AppSettings:
+        """读取应用全局设置；首次访问时创建默认配置行。"""
+
+        settings = self.session.get(AppSettings, 1)
+        if settings is None:
+            settings = AppSettings(id=1, script_section_max_concurrency=3)
+            self.session.add(settings)
+            self.session.commit()
+            self.session.refresh(settings)
+        return settings
+
+    def update_app_settings(self, *, script_section_max_concurrency: int) -> AppSettings:
+        """更新应用全局设置。"""
+
+        settings = self.get_app_settings()
+        settings.script_section_max_concurrency = script_section_max_concurrency
+        self.session.commit()
+        self.session.refresh(settings)
+        return settings
 
     def create_session(
         self,
