@@ -141,12 +141,14 @@ class ImageGenerationService:
         if script_task is None:
             raise ValueError(f"ScriptGenerationTask not found: {task_id}")
         preset = self._get_workflow_preset(workflow_preset_id)
+        self._ensure_seed_configured(preset)
         pages = [
             page for page in self.repository.list_script_task_pages(task_id)
             if page.image_prompt
         ]
         if not pages:
             raise ValueError(f"Image prompts not found for script task: {task_id}")
+        candidate_seeds = self._candidate_seeds(candidates_per_page)
 
         batch_task = self.repository.create_generation_task(
             project_id=script_task.project_id,
@@ -198,6 +200,7 @@ class ImageGenerationService:
                         page_task_id=page_task.id,
                         preset=preset,
                         candidates_per_page=candidates_per_page,
+                        candidate_seeds=candidate_seeds,
                         poll_interval_seconds=poll_interval_seconds,
                         negative_prompt=negative_prompt,
                         batch_task_id=batch_task.id,
@@ -288,6 +291,8 @@ class ImageGenerationService:
         if not page.image_prompt:
             raise ValueError(f"Image prompt not found for page: {page_id}")
         preset = self._get_workflow_preset(workflow_preset_id)
+        self._ensure_seed_configured(preset)
+        candidate_seeds = self._candidate_seeds(candidates_per_page)
         task = self.repository.create_generation_task(
             project_id=page.project_id,
             page_id=page.id,
@@ -306,6 +311,7 @@ class ImageGenerationService:
                 page_task_id=task.id,
                 preset=preset,
                 candidates_per_page=candidates_per_page,
+                candidate_seeds=candidate_seeds,
                 poll_interval_seconds=poll_interval_seconds,
                 negative_prompt=negative_prompt,
                 batch_task_id=task.id,
@@ -359,6 +365,7 @@ class ImageGenerationService:
         page_task_id: int,
         preset: ComfyWorkflowPreset,
         candidates_per_page: int,
+        candidate_seeds: list[int],
         poll_interval_seconds: float,
         negative_prompt: str | None,
         batch_task_id: int,
@@ -366,11 +373,12 @@ class ImageGenerationService:
         """提交单页 workflow，等待 ComfyUI 完成后下载并落库图片。"""
 
         saved_images: list[ComicImage] = []
-        for _ in range(candidates_per_page):
+        for candidate_index, seed in enumerate(candidate_seeds[:candidates_per_page], start=1):
             workflow, seed = self._build_workflow(
                 preset=preset,
                 positive_prompt=page.image_prompt or "",
                 negative_prompt=negative_prompt,
+                seed=seed,
             )
             prompt_id = await asyncio.to_thread(self.comfy_client.queue_prompt, workflow)
             self.repository.update_generation_task(
@@ -419,17 +427,19 @@ class ImageGenerationService:
         page_task_id: int,
         preset: ComfyWorkflowPreset,
         candidates_per_page: int,
+        candidate_seeds: list[int],
         poll_interval_seconds: float,
         negative_prompt: str | None,
         batch_task_id: int,
     ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
         """提交并保存单页图片，同时实时产出 queued/polling/image 事件。"""
 
-        for _ in range(candidates_per_page):
+        for candidate_index, seed in enumerate(candidate_seeds[:candidates_per_page], start=1):
             workflow, seed = self._build_workflow(
                 preset=preset,
                 positive_prompt=page.image_prompt or "",
                 negative_prompt=negative_prompt,
+                seed=seed,
             )
             prompt_id = await asyncio.to_thread(self.comfy_client.queue_prompt, workflow)
             self.repository.update_generation_task(
@@ -442,6 +452,8 @@ class ImageGenerationService:
                 "page_id": page.id,
                 "page_no": page.page_no,
                 "comfy_prompt_id": prompt_id,
+                "candidate_index": candidate_index,
+                "seed": seed,
             }
 
             poll_count = 0
@@ -458,6 +470,8 @@ class ImageGenerationService:
                     "page_no": page.page_no,
                     "comfy_prompt_id": prompt_id,
                     "poll_count": poll_count,
+                    "candidate_index": candidate_index,
+                    "seed": seed,
                 }
                 await asyncio.sleep(poll_interval_seconds)
 
@@ -510,8 +524,9 @@ class ImageGenerationService:
         preset: ComfyWorkflowPreset,
         positive_prompt: str,
         negative_prompt: str | None,
-    ) -> tuple[dict[str, Any], int | None]:
-        """复制 workflow preset 并注入正向 Prompt、可选负向 Prompt 和随机 seed。"""
+        seed: int,
+    ) -> tuple[dict[str, Any], int]:
+        """复制 workflow preset，并注入正向 Prompt、可选负向 Prompt 和后端指定 seed。"""
 
         workflow = json.loads(preset.workflow_json)
         workflow = deepcopy(workflow)
@@ -528,16 +543,35 @@ class ImageGenerationService:
                 input_name=preset.negative_input_name,
                 value=negative_prompt,
             )
-        seed: int | None = None
-        if preset.seed_node_id and preset.seed_input_name:
-            seed = random.randint(1, 2_147_483_647)
-            self._set_workflow_input(
-                workflow,
-                node_id=preset.seed_node_id,
-                input_name=preset.seed_input_name,
-                value=seed,
-            )
+        self._ensure_seed_configured(preset)
+        self._set_workflow_input(
+            workflow,
+            node_id=preset.seed_node_id or "",
+            input_name=preset.seed_input_name or "",
+            value=seed,
+        )
         return workflow, seed
+
+    @staticmethod
+    def _candidate_seeds(candidates_per_page: int) -> list[int]:
+        """为候选序号生成稳定 seed；批量生成时跨页复用同一候选序号 seed。"""
+
+        seeds: list[int] = []
+        seen: set[int] = set()
+        while len(seeds) < candidates_per_page:
+            seed = random.randint(1, 2_147_483_647)
+            if seed in seen:
+                continue
+            seen.add(seed)
+            seeds.append(seed)
+        return seeds
+
+    @staticmethod
+    def _ensure_seed_configured(preset: ComfyWorkflowPreset) -> None:
+        """图片生成必须由后端注入 seed，因此 workflow preset 需要配置 seed 输入位置。"""
+
+        if not preset.seed_node_id or not preset.seed_input_name:
+            raise ValueError("Workflow seed node id and seed input name are required for image generation.")
 
     def _save_image_file(
         self,
