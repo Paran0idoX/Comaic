@@ -9,9 +9,11 @@ import {
   activateLLMConfig,
   createLLMConfig,
   deleteLLMConfig,
+  getAppSettings,
   listLLMConfigs,
   listLLMProviders,
   testLLMConfig,
+  updateAppSettings,
   updateLLMConfig,
   type LLMConfig,
   type LLMProvider,
@@ -23,6 +25,7 @@ const { locale, t } = useI18n()
 
 const loading = ref(false)
 const saving = ref(false)
+const savingAppSettings = ref(false)
 const testing = ref(false)
 const activating = ref(false)
 const deleting = ref(false)
@@ -33,6 +36,10 @@ const selectedConfigId = ref<number | null>(null)
 const isCreating = ref(false)
 const modelDraft = ref('')
 const providerManuallySelected = ref(false)
+const activeSettingsTab = ref<'general' | 'api'>('general')
+const appSettings = reactive({
+  script_section_max_concurrency: 3,
+})
 
 const form = reactive({
   name: '',
@@ -85,8 +92,13 @@ const fillForm = (config: LLMConfig) => {
 const loadConfigs = async () => {
   loading.value = true
   try {
-    const [result, providers] = await Promise.all([listLLMConfigs(), listLLMProviders()])
+    const [result, providers, appResult] = await Promise.all([
+      listLLMConfigs(),
+      listLLMProviders(),
+      getAppSettings(),
+    ])
     providerOptions.value = providers
+    appSettings.script_section_max_concurrency = appResult.script_section_max_concurrency
     configs.value = result.items
     activeConfigId.value = result.active_config_id
     const nextSelected =
@@ -107,6 +119,21 @@ const loadConfigs = async () => {
     ElMessage.error(apiErrorMessage(error, t, t('settings.errors.loadFailed')))
   } finally {
     loading.value = false
+  }
+}
+
+const saveAppSettings = async () => {
+  savingAppSettings.value = true
+  try {
+    const result = await updateAppSettings({
+      script_section_max_concurrency: appSettings.script_section_max_concurrency,
+    })
+    appSettings.script_section_max_concurrency = result.script_section_max_concurrency
+    ElMessage.success(t('settings.messages.appSaved'))
+  } catch (error) {
+    ElMessage.error(apiErrorMessage(error, t, t('settings.errors.appSaveFailed')))
+  } finally {
+    savingAppSettings.value = false
   }
 }
 
@@ -281,179 +308,237 @@ onMounted(() => {
 
 <template>
   <section v-loading="loading" class="settings-page">
-    <div class="page-header">
-      <div class="page-actions">
-        <el-button :icon="Plus" @click="createNewConfig">
-          {{ t('settings.actions.addConfig') }}
-        </el-button>
-      </div>
-    </div>
+    <div class="settings-shell">
+      <aside class="panel settings-nav" :aria-label="t('settings.title')">
+        <button
+          type="button"
+          class="settings-nav__item"
+          :class="{ 'settings-nav__item--active': activeSettingsTab === 'general' }"
+          @click="activeSettingsTab = 'general'"
+        >
+          {{ t('settings.tabs.general') }}
+        </button>
+        <button
+          type="button"
+          class="settings-nav__item"
+          :class="{ 'settings-nav__item--active': activeSettingsTab === 'api' }"
+          @click="activeSettingsTab = 'api'"
+        >
+          {{ t('settings.tabs.api') }}
+        </button>
+      </aside>
 
-    <div class="settings-layout">
-      <section class="panel config-list">
-        <header class="panel-header">
-          <div>
-            <h2>{{ t('settings.llm.configs') }}</h2>
-            <p>{{ t('settings.llm.configsDescription') }}</p>
-          </div>
-        </header>
-        <div class="config-items">
-          <article
-            v-for="config in configs"
-            :key="config.id"
-            class="config-item"
-            :class="{ 'config-item--selected': config.id === selectedConfigId }"
-            @click="selectConfig(config)"
-          >
-            <div class="config-item__title">
-              <strong>{{ config.name }}</strong>
-              <el-tag v-if="config.is_active" type="success" effect="plain">
-                {{ t('settings.llm.active') }}
-              </el-tag>
+      <main class="settings-content">
+        <section v-if="activeSettingsTab === 'general'" class="panel settings-card">
+          <header class="panel-header">
+            <div>
+              <h2>{{ t('settings.generation.title') }}</h2>
+              <p>{{ t('settings.generation.description') }}</p>
             </div>
-            <p>{{ config.base_url }}</p>
-            <small>
-              {{ t('settings.llm.provider') }}: {{ providerLabel(config.provider) }}
-              ·
-              {{ t('settings.llm.modelCount', { count: config.model_names.length }) }}
-              · {{ t('settings.llm.defaultModel') }}: {{ config.default_model }}
-            </small>
-            <el-tag :type="config.api_key_set ? 'success' : 'warning'" effect="plain">
-              {{
-                config.api_key_set
-                  ? t('settings.llm.keyConfigured')
-                  : t('settings.llm.keyMissing')
-              }}
-            </el-tag>
-          </article>
-          <el-empty v-if="configs.length === 0" :description="t('settings.llm.emptyConfigs')" />
-        </div>
-      </section>
-
-      <section class="panel settings-card">
-        <header class="panel-header">
-          <div>
-            <h2>{{ isCreating ? t('settings.llm.createTitle') : t('settings.llm.editTitle') }}</h2>
-            <p>{{ t('settings.llm.description') }}</p>
-          </div>
-          <el-tag
-            v-if="!isCreating && selectedConfig"
-            :type="selectedConfig.api_key_set ? 'success' : 'warning'"
-            effect="plain"
-          >
-            {{
-              selectedConfig.api_key_set
-                ? t('settings.llm.keyConfigured')
-                : t('settings.llm.keyMissing')
-            }}
-          </el-tag>
-        </header>
-
-        <el-form label-position="top" class="settings-form">
-          <el-form-item :label="t('settings.llm.name')">
-            <el-input v-model="form.name" />
-          </el-form-item>
-          <el-form-item :label="t('settings.llm.provider')">
-            <el-select v-model="form.provider" @change="onProviderChange">
-              <el-option
-                v-for="provider in providerOptions"
-                :key="provider.value"
-                :label="provider.label"
-                :value="provider.value"
-              />
-            </el-select>
-          </el-form-item>
-          <el-form-item
-            v-if="selectedProviderRequiresBaseUrl"
-            :label="t('settings.llm.baseUrl')"
-          >
-            <el-input v-model="form.base_url" placeholder="https://api.openai.com/v1" />
-            <p class="form-hint">{{ t('settings.llm.baseUrlRequiredHint') }}</p>
-          </el-form-item>
-          <el-form-item :label="t('settings.llm.apiKey')">
-            <el-input
-              v-model="form.api_key"
-              type="password"
-              show-password
-              :disabled="form.clear_api_key"
-              :placeholder="t('settings.llm.newKeyPlaceholder')"
-            />
-            <p class="form-hint">{{ t('settings.llm.apiKeyVisibleHint') }}</p>
-          </el-form-item>
-          <el-form-item>
-            <el-checkbox v-model="form.clear_api_key">
-              {{ t('settings.llm.clearKey') }}
-            </el-checkbox>
-          </el-form-item>
-          <el-form-item :label="t('settings.llm.modelNames')">
-            <div class="model-editor">
-              <div class="model-tags">
-                <el-tag
-                  v-for="modelName in form.model_names"
-                  :key="modelName"
-                  closable
-                  @close="removeModelName(modelName)"
-                >
-                  {{ modelName }}
-                </el-tag>
-              </div>
-              <div class="model-input">
-                <el-input
-                  v-model="modelDraft"
-                  :placeholder="t('settings.llm.modelPlaceholder')"
-                  @keyup.enter="addModelName"
+          </header>
+          <div class="settings-form settings-form--compact">
+            <el-form label-position="top" class="settings-form-grid">
+              <el-form-item :label="t('settings.generation.scriptSectionMaxConcurrency')">
+                <el-input-number
+                  v-model="appSettings.script_section_max_concurrency"
+                  :min="1"
+                  :max="20"
                 />
-                <el-button :icon="Plus" @click="addModelName">
-                  {{ t('settings.actions.addModel') }}
-                </el-button>
-              </div>
-            </div>
-          </el-form-item>
-          <el-form-item :label="t('settings.llm.defaultModel')">
-            <el-select v-model="form.default_model">
-              <el-option
-                v-for="modelName in form.model_names"
-                :key="modelName"
-                :label="modelName"
-                :value="modelName"
-              />
-            </el-select>
-          </el-form-item>
-        </el-form>
-
-        <footer class="settings-footer">
-          <span class="updated-at">
-            {{ t('settings.llm.updatedAt') }}:
-            {{ isCreating ? '-' : formatDate(selectedConfig?.updated_at) }}
-          </span>
-          <div class="settings-actions">
-            <el-button :icon="Connection" :loading="testing" @click="testConfig">
-              {{ t('settings.actions.test') }}
-            </el-button>
-            <el-button
-              v-if="!isCreating && selectedConfig && !selectedConfig.is_active"
-              :icon="Star"
-              :loading="activating"
-              @click="activateSelectedConfig"
-            >
-              {{ t('settings.actions.activate') }}
-            </el-button>
-            <el-button
-              v-if="!isCreating"
-              type="danger"
-              plain
-              :icon="Delete"
-              :loading="deleting"
-              @click="deleteSelectedConfig"
-            >
-              {{ t('settings.actions.delete') }}
-            </el-button>
-            <el-button type="primary" :icon="Select" :loading="saving" @click="saveConfig">
-              {{ t('settings.actions.save') }}
-            </el-button>
+                <p class="form-hint">{{ t('settings.generation.scriptSectionMaxConcurrencyHint') }}</p>
+              </el-form-item>
+            </el-form>
           </div>
-        </footer>
-      </section>
+          <footer class="settings-footer">
+            <span class="updated-at">{{ t('settings.generation.appliesToNewTasks') }}</span>
+            <div class="settings-actions">
+              <el-button
+                type="primary"
+                :icon="Select"
+                :loading="savingAppSettings"
+                @click="saveAppSettings"
+              >
+                {{ t('settings.actions.saveGeneration') }}
+              </el-button>
+            </div>
+          </footer>
+        </section>
+
+        <template v-else>
+          <div class="page-header">
+            <div class="page-actions">
+              <el-button :icon="Plus" @click="createNewConfig">
+                {{ t('settings.actions.addConfig') }}
+              </el-button>
+            </div>
+          </div>
+          <div class="settings-layout">
+            <section class="panel config-list">
+              <header class="panel-header">
+                <div>
+                  <h2>{{ t('settings.llm.configs') }}</h2>
+                  <p>{{ t('settings.llm.configsDescription') }}</p>
+                </div>
+              </header>
+              <div class="config-items">
+                <article
+                  v-for="config in configs"
+                  :key="config.id"
+                  class="config-item"
+                  :class="{ 'config-item--selected': config.id === selectedConfigId }"
+                  @click="selectConfig(config)"
+                >
+                  <div class="config-item__title">
+                    <strong>{{ config.name }}</strong>
+                    <el-tag v-if="config.is_active" type="success" effect="plain">
+                      {{ t('settings.llm.active') }}
+                    </el-tag>
+                  </div>
+                  <p>{{ config.base_url }}</p>
+                  <small>
+                    {{ t('settings.llm.provider') }}: {{ providerLabel(config.provider) }}
+                    ·
+                    {{ t('settings.llm.modelCount', { count: config.model_names.length }) }}
+                    · {{ t('settings.llm.defaultModel') }}: {{ config.default_model }}
+                  </small>
+                  <el-tag :type="config.api_key_set ? 'success' : 'warning'" effect="plain">
+                    {{
+                      config.api_key_set
+                        ? t('settings.llm.keyConfigured')
+                        : t('settings.llm.keyMissing')
+                    }}
+                  </el-tag>
+                </article>
+                <el-empty v-if="configs.length === 0" :description="t('settings.llm.emptyConfigs')" />
+              </div>
+            </section>
+
+            <section class="panel settings-card">
+              <header class="panel-header">
+                <div>
+                  <h2>{{ isCreating ? t('settings.llm.createTitle') : t('settings.llm.editTitle') }}</h2>
+                  <p>{{ t('settings.llm.description') }}</p>
+                </div>
+                <el-tag
+                  v-if="!isCreating && selectedConfig"
+                  :type="selectedConfig.api_key_set ? 'success' : 'warning'"
+                  effect="plain"
+                >
+                  {{
+                    selectedConfig.api_key_set
+                      ? t('settings.llm.keyConfigured')
+                      : t('settings.llm.keyMissing')
+                  }}
+                </el-tag>
+              </header>
+
+              <el-form label-position="top" class="settings-form">
+                <el-form-item :label="t('settings.llm.name')">
+                  <el-input v-model="form.name" />
+                </el-form-item>
+                <el-form-item :label="t('settings.llm.provider')">
+                  <el-select v-model="form.provider" @change="onProviderChange">
+                    <el-option
+                      v-for="provider in providerOptions"
+                      :key="provider.value"
+                      :label="provider.label"
+                      :value="provider.value"
+                    />
+                  </el-select>
+                </el-form-item>
+                <el-form-item
+                  v-if="selectedProviderRequiresBaseUrl"
+                  :label="t('settings.llm.baseUrl')"
+                >
+                  <el-input v-model="form.base_url" placeholder="https://api.openai.com/v1" />
+                  <p class="form-hint">{{ t('settings.llm.baseUrlRequiredHint') }}</p>
+                </el-form-item>
+                <el-form-item :label="t('settings.llm.apiKey')">
+                  <el-input
+                    v-model="form.api_key"
+                    type="password"
+                    show-password
+                    :disabled="form.clear_api_key"
+                    :placeholder="t('settings.llm.newKeyPlaceholder')"
+                  />
+                  <p class="form-hint">{{ t('settings.llm.apiKeyVisibleHint') }}</p>
+                </el-form-item>
+                <el-form-item>
+                  <el-checkbox v-model="form.clear_api_key">
+                    {{ t('settings.llm.clearKey') }}
+                  </el-checkbox>
+                </el-form-item>
+                <el-form-item :label="t('settings.llm.modelNames')">
+                  <div class="model-editor">
+                    <div class="model-tags">
+                      <el-tag
+                        v-for="modelName in form.model_names"
+                        :key="modelName"
+                        closable
+                        @close="removeModelName(modelName)"
+                      >
+                        {{ modelName }}
+                      </el-tag>
+                    </div>
+                    <div class="model-input">
+                      <el-input
+                        v-model="modelDraft"
+                        :placeholder="t('settings.llm.modelPlaceholder')"
+                        @keyup.enter="addModelName"
+                      />
+                      <el-button :icon="Plus" @click="addModelName">
+                        {{ t('settings.actions.addModel') }}
+                      </el-button>
+                    </div>
+                  </div>
+                </el-form-item>
+                <el-form-item :label="t('settings.llm.defaultModel')">
+                  <el-select v-model="form.default_model">
+                    <el-option
+                      v-for="modelName in form.model_names"
+                      :key="modelName"
+                      :label="modelName"
+                      :value="modelName"
+                    />
+                  </el-select>
+                </el-form-item>
+              </el-form>
+
+              <footer class="settings-footer">
+                <span class="updated-at">
+                  {{ t('settings.llm.updatedAt') }}:
+                  {{ isCreating ? '-' : formatDate(selectedConfig?.updated_at) }}
+                </span>
+                <div class="settings-actions">
+                  <el-button :icon="Connection" :loading="testing" @click="testConfig">
+                    {{ t('settings.actions.test') }}
+                  </el-button>
+                  <el-button
+                    v-if="!isCreating && selectedConfig && !selectedConfig.is_active"
+                    :icon="Star"
+                    :loading="activating"
+                    @click="activateSelectedConfig"
+                  >
+                    {{ t('settings.actions.activate') }}
+                  </el-button>
+                  <el-button
+                    v-if="!isCreating"
+                    type="danger"
+                    plain
+                    :icon="Delete"
+                    :loading="deleting"
+                    @click="deleteSelectedConfig"
+                  >
+                    {{ t('settings.actions.delete') }}
+                  </el-button>
+                  <el-button type="primary" :icon="Select" :loading="saving" @click="saveConfig">
+                    {{ t('settings.actions.save') }}
+                  </el-button>
+                </div>
+              </footer>
+            </section>
+          </div>
+        </template>
+      </main>
     </div>
   </section>
 </template>
@@ -462,6 +547,53 @@ onMounted(() => {
 .settings-page {
   display: grid;
   gap: 24px;
+}
+
+.settings-shell {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.settings-content {
+  display: grid;
+  gap: 18px;
+  min-width: 0;
+}
+
+.settings-nav {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+}
+
+.settings-nav__item {
+  width: 100%;
+  border: 0;
+  border-radius: 8px;
+  padding: 13px 14px;
+  background: transparent;
+  color: var(--text-soft);
+  font: inherit;
+  font-weight: 700;
+  text-align: left;
+  cursor: pointer;
+}
+
+.settings-nav__item:hover {
+  color: var(--text-main);
+  background: #eff6ff;
+}
+
+.settings-nav__item--active {
+  color: #ffffff;
+  background: linear-gradient(135deg, #1da8f2 0%, #7a2cff 100%);
+  box-shadow: 0 14px 28px rgba(45, 111, 255, 0.22);
+}
+
+.settings-nav__item--active:hover {
+  color: #ffffff;
 }
 
 .page-header,
@@ -561,6 +693,15 @@ onMounted(() => {
   padding: 22px 24px 8px;
 }
 
+.settings-form--compact {
+  padding-bottom: 0;
+}
+
+.settings-form-grid {
+  display: grid;
+  grid-template-columns: minmax(260px, 360px);
+}
+
 .form-hint {
   margin: 8px 0 0;
   font-size: 13px;
@@ -585,6 +726,22 @@ onMounted(() => {
 }
 
 @media (max-width: 1080px) {
+  .settings-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-nav {
+    display: flex;
+    overflow-x: auto;
+  }
+
+  .settings-nav__item {
+    flex: 0 0 auto;
+    width: auto;
+    min-width: 132px;
+    text-align: center;
+  }
+
   .settings-layout {
     grid-template-columns: 1fr;
   }

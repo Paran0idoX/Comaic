@@ -151,6 +151,16 @@ class LLMConfig(TimestampMixin, Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
 
 
+class AppSettings(TimestampMixin, Base):
+    """应用级配置表：保存不属于单个模型 API 组的全局运行参数。"""
+
+    __tablename__ = "app_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    # 分页脚本生成按 section 并发执行时的最高 worker 数。
+    script_section_max_concurrency: Mapped[int] = mapped_column(Integer, default=3)
+
+
 class Session(TimestampMixin, Base):
     """通用会话表：用 purpose 区分大纲、脚本等不同业务场景。"""
 

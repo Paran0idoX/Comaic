@@ -66,6 +66,10 @@ export type TestLLMConfigPayload = {
   clear_api_key?: boolean
 }
 
+export type AppSettings = {
+  script_section_max_concurrency: number
+}
+
 const requestJson = async <T>(url: string, options: RequestInit = {}): Promise<T> => {
   const response = await fetch(url, {
     ...options,
@@ -82,6 +86,15 @@ const requestJson = async <T>(url: string, options: RequestInit = {}): Promise<T
 
 export const listLLMConfigs = (): Promise<LLMConfigListResponse> =>
   requestJson<LLMConfigListResponse>('/api/settings/llm')
+
+export const getAppSettings = (): Promise<AppSettings> =>
+  requestJson<AppSettings>('/api/settings/app')
+
+export const updateAppSettings = (payload: AppSettings): Promise<AppSettings> =>
+  requestJson<AppSettings>('/api/settings/app', {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  })
 
 export const listLLMProviders = (): Promise<LLMProviderOption[]> =>
   requestJson<LLMProviderOption[]>('/api/settings/llm/providers')

@@ -519,6 +519,28 @@ const loadVisualSettings = async () => {
   }
 }
 
+let refreshingTaskStructure = false
+let pendingTaskStructureRefresh = false
+
+const refreshTaskStructure = () => {
+  if (selectedTaskId.value === null) {
+    return
+  }
+  if (refreshingTaskStructure) {
+    pendingTaskStructureRefresh = true
+    return
+  }
+
+  refreshingTaskStructure = true
+  void Promise.all([loadSections(), loadVisualSettings()]).finally(() => {
+    refreshingTaskStructure = false
+    if (pendingTaskStructureRefresh) {
+      pendingTaskStructureRefresh = false
+      refreshTaskStructure()
+    }
+  })
+}
+
 const loadScriptTasks = async (preferredTaskId?: number | null) => {
   if (selectedProjectId.value === null || selectedOutlineVersionId.value === null) {
     scriptTasks.value = []
@@ -683,18 +705,22 @@ const generateBatch = async () => {
               upsertPageInList(page)
             }
           }
+          if (event === 'section_plan') {
+            refreshTaskStructure()
+          }
+          if (event === 'section' && (sections.value.length === 0 || scenes.value.length === 0)) {
+            refreshTaskStructure()
+          }
           if (event === 'section_pages' && Array.isArray(payload.pages)) {
             for (const page of payload.pages as ScriptPage[]) {
               upsertPageInList(page)
             }
-            void loadSections()
-            void loadVisualSettings()
+            refreshTaskStructure()
           }
           if (event === 'done') {
             void loadScriptTasks(currentTaskId.value)
             void loadPages()
-            void loadSections()
-            void loadVisualSettings()
+            refreshTaskStructure()
             ElMessage.success(t('scripts.messages.batchSuccess'))
           }
           if (event === 'suspended') {
@@ -736,18 +762,22 @@ const continueBatch = async () => {
       {
         onEvent: (event, payload) => {
           addProgressEvent(event, payload)
+          if (event === 'section_plan') {
+            refreshTaskStructure()
+          }
+          if (event === 'section' && (sections.value.length === 0 || scenes.value.length === 0)) {
+            refreshTaskStructure()
+          }
           if (event === 'section_pages' && Array.isArray(payload.pages)) {
             for (const page of payload.pages as ScriptPage[]) {
               upsertPageInList(page)
             }
-            void loadSections()
-            void loadVisualSettings()
+            refreshTaskStructure()
           }
           if (event === 'done') {
             void loadScriptTasks(selectedTaskId.value)
             void loadPages()
-            void loadSections()
-            void loadVisualSettings()
+            refreshTaskStructure()
             ElMessage.success(t('scripts.messages.continueSuccess'))
           }
           if (event === 'suspended') {
