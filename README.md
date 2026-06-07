@@ -210,15 +210,17 @@ The workflow preset must use ComfyUI API workflow JSON, not the regular visual w
 
 - Paste workflow API JSON directly.
 - Drag and drop or choose a `.json` file.
-- Use “Parse Positive Node” to automatically detect the positive prompt node ID and input name.
+- Use “Parse Nodes” to automatically detect the positive prompt node and seed node.
 
 At minimum, configure:
 
 - Workflow JSON
 - Positive prompt node ID
 - Positive prompt input name, commonly `text`
+- Seed node ID
+- Seed input name, commonly `seed` for `KSampler` or `noise_seed` for `KSamplerAdvanced`
 
-Seed node configuration is optional. If no seed node is configured, Comaic does not force-inject a seed and uses the workflow’s own configuration.
+Seed node configuration is required for image generation. Comaic injects backend-generated seeds and does not rely on the workflow’s built-in seed value.
 
 ### 6. Generate images
 
@@ -230,7 +232,7 @@ Open the “Image Generation” page:
 4. Set candidate count per page and polling interval.
 5. Start generation.
 
-Batch image generation currently submits one ComfyUI `/prompt` request per page. The backend polls `/history/{prompt_id}`, downloads generated images through `/view`, and stores them under `outputs/`.
+Batch image generation currently submits one ComfyUI `/prompt` request per page candidate. Before a batch starts, the backend creates one seed per candidate index and reuses it across all pages. For example, every page’s first candidate uses the same seed, while different candidates within the same page use different seeds. The backend polls `/history/{prompt_id}`, downloads generated images through `/view`, and stores them under `outputs/`.
 
 Regeneration does not delete old images. It appends new candidate images so that you can compare and choose manually. Pausing image generation only stops submitting subsequent pages; it does not interrupt the currently submitted ComfyUI task.
 
@@ -248,10 +250,10 @@ Recommended workflow:
 2. Export the API workflow JSON.
 3. Add a workflow preset in Comaic’s “Image Generation” page.
 4. Drag in the JSON file or paste the JSON content.
-5. Confirm the positive prompt node ID and input name.
+5. Confirm the positive prompt node ID/input name and seed node ID/input name.
 6. Save the preset and use it for image generation.
 
-If the workflow contains multiple `CLIPTextEncode` nodes, the frontend tries to avoid nodes that look like negative prompts, but you should still check the selected node manually.
+If the workflow contains multiple `CLIPTextEncode` or sampler nodes, the frontend tries to choose the most likely positive prompt and seed nodes, but you should still check the selected nodes manually.
 
 ## Common Commands
 

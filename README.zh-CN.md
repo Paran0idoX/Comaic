@@ -208,15 +208,17 @@ Workflow preset 需要使用 ComfyUI 的 API workflow JSON，而不是普通界�
 
 - 直接粘贴 workflow API JSON。
 - 拖拽或选择 `.json` 文件。
-- 使用“自动解析正向节点”自动识别正向 Prompt 节点 ID 和输入名。
+- 使用“自动解析节点”自动识别正向 Prompt 节点和 Seed 节点。
 
 至少需要配置：
 
 - Workflow JSON
 - 正向 Prompt 节点 ID
 - 正向 Prompt 输入名，常见为 `text`
+- Seed 节点 ID
+- Seed 输入名，`KSampler` 常见为 `seed`，`KSamplerAdvanced` 常见为 `noise_seed`
 
-Seed 节点可选；如果不配置，系统不会强行注入 seed，而是使用 workflow 自身配置。
+Seed 节点是图片生成必需配置。Comaic 会由后端注入 seed，不再依赖 workflow 内置 seed。
 
 ### 6. 生成图片
 
@@ -228,7 +230,7 @@ Seed 节点可选；如果不配置，系统不会强行注入 seed，而是使�
 4. 设置每页候选图数量和轮询间隔。
 5. 点击生成。
 
-当前批量图片生成策略是：每一页单独提交一次 ComfyUI `/prompt` 请求。后端会轮询 `/history/{prompt_id}`，通过 `/view` 下载生成图片，并保存到 `outputs/`。
+当前批量图片生成策略是：每个页面候选图单独提交一次 ComfyUI `/prompt` 请求。批量开始前，后端会为每个候选序号生成一个 seed，并在所有页面中复用同一候选序号的 seed。例如所有页面的第 1 个候选图使用同一个 seed，而同一页内部不同候选图使用不同 seed。后端会轮询 `/history/{prompt_id}`，通过 `/view` 下载生成图片，并保存到 `outputs/`。
 
 再次生成不会删除旧图，而是追加新的候选图，方便人工比较。生成过程中可以点击暂停；暂停只会停止提交后续页面，不会中断已经提交给 ComfyUI 的当前任务。
 
@@ -246,10 +248,10 @@ Comaic 不内置固定 ComfyUI 工作流。你需要在页面中维护自己的 
 2. 导出 API workflow JSON。
 3. 在 Comaic 的“图片生成”页面新增 Workflow preset。
 4. 拖入 JSON 文件或粘贴 JSON。
-5. 确认正向 Prompt 节点 ID 和输入名。
+5. 确认正向 Prompt 节点 ID/输入名，以及 Seed 节点 ID/输入名。
 6. 保存 preset 后用于图片生成。
 
-如果 workflow 里有多个 `CLIPTextEncode` 节点，前端会尝试避开明显的 negative prompt 节点，但仍建议你手动检查一次。
+如果 workflow 里有多个 `CLIPTextEncode` 或采样器节点，前端会尝试选择最可能的正向 Prompt 和 Seed 节点，但仍建议你手动检查一次。
 
 ## 常用命令
 

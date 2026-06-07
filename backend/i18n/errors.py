@@ -51,6 +51,7 @@ ERROR_MESSAGES: dict[str, dict[str, str]] = {
         "image_generation.workflow_node_inputs_missing": "Workflow 节点没有 inputs。",
         "image_generation.workflow_input_name_empty": "Workflow 输入名不能为空。",
         "image_generation.workflow_input_not_found": "Workflow 节点输入不存在。",
+        "image_generation.workflow_seed_required": "Workflow 需要配置 Seed 节点 ID 和 Seed 输入名。",
         "llm.config_not_found": "模型配置不存在。",
         "llm.config_missing": "请先配置模型 API Key。",
         "llm.provider_unsupported": "当前模型服务商暂不支持。",
@@ -98,6 +99,7 @@ ERROR_MESSAGES: dict[str, dict[str, str]] = {
         "image_generation.workflow_node_inputs_missing": "Workflow node has no inputs.",
         "image_generation.workflow_input_name_empty": "Workflow input name cannot be empty.",
         "image_generation.workflow_input_not_found": "Workflow node input not found.",
+        "image_generation.workflow_seed_required": "Workflow seed node ID and seed input name are required.",
         "llm.config_not_found": "LLM configuration not found.",
         "llm.config_missing": "Please configure the model API key first.",
         "llm.provider_unsupported": "This model provider is not supported yet.",
@@ -254,6 +256,8 @@ def code_from_message(message: str) -> tuple[str, int]:
         return "image_generation.workflow_input_name_empty", 400
     if "workflow node input not found" in lowered:
         return "image_generation.workflow_input_not_found", 400
+    if "workflow seed node id" in lowered:
+        return "image_generation.workflow_seed_required", 400
     if "llmconfig not found" in lowered:
         return "llm.config_not_found", 404
     if "llmconfig api key is missing" in lowered:
