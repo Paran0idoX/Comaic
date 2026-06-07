@@ -1,12 +1,14 @@
 from fastapi import APIRouter, Request, Response, status
 
 from backend.api.schemas.settings import (
+    AppSettingsResponse,
     CreateLLMConfigRequest,
     LLMConfigListResponse,
     LLMConfigResponse,
     LLMProviderResponse,
     TestLLMConfigRequest,
     TestLLMConfigResponse,
+    UpdateAppSettingsRequest,
     UpdateLLMConfigRequest,
 )
 from backend.i18n.errors import http_exception
@@ -42,6 +44,41 @@ def llm_config_to_response(config: LLMConfig) -> LLMConfigResponse:
         is_active=config.is_active,
         updated_at=config.updated_at,
     )
+
+
+@router.get("/app", response_model=AppSettingsResponse)
+def get_app_settings(http_request: Request) -> AppSettingsResponse:
+    """读取应用级运行设置。"""
+
+    db_session, service = create_service()
+    try:
+        settings = service.get_app_settings()
+        return AppSettingsResponse(
+            script_section_max_concurrency=settings.script_section_max_concurrency,
+        )
+    except Exception as exc:
+        raise http_exception(exc, request_locale(http_request)) from exc
+    finally:
+        db_session.close()
+
+
+@router.put("/app", response_model=AppSettingsResponse)
+def update_app_settings(
+    request: UpdateAppSettingsRequest,
+    http_request: Request,
+) -> AppSettingsResponse:
+    """更新应用级运行设置。"""
+
+    db_session, service = create_service()
+    try:
+        settings = service.update_app_settings(**request.model_dump())
+        return AppSettingsResponse(
+            script_section_max_concurrency=settings.script_section_max_concurrency,
+        )
+    except Exception as exc:
+        raise http_exception(exc, request_locale(http_request)) from exc
+    finally:
+        db_session.close()
 
 
 @router.get("/llm", response_model=LLMConfigListResponse)

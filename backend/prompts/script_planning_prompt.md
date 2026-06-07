@@ -14,6 +14,7 @@
 - 每段必须包含 scenes：该分段会用到的中心化场景设定列表。
 - 每个 scene 必须包含：scene_key、name、location_type、time_of_day、lighting、weather、environment_details、color_palette、visual_anchors、negative_constraints。
 - scene_key 是同一脚本任务内稳定复用的场景标识；同一地点、同一时间段、同一视觉锚点的场景跨分段出现时必须复用同一个 scene_key。
+- 如果剧情需要在两个空间之间切换，分段计划只说明切换顺序，不要要求同一页同时展示两个空间；空间切换应交给相邻页面分别承接。
 - 每段必须包含 characters：该分段会用到的角色细化设定列表。
 - 每个 character 必须包含：character_key、name、section_role、current_hairstyle、current_clothing、current_accessories、current_state、emotion、temporary_changes、visual_anchors、negative_constraints。
 - character_key 必须优先复用“大纲阶段已确认的角色基准设定”中的 key。

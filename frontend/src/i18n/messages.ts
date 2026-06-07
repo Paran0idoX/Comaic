@@ -335,6 +335,11 @@ export const messages = {
         test: '测试连接',
         activate: '设为当前使用',
         delete: '删除配置',
+        saveGeneration: '保存生成设置',
+      },
+      tabs: {
+        general: '通用设置',
+        api: 'API 设置',
       },
       llm: {
         configs: 'API 配置',
@@ -362,8 +367,17 @@ export const messages = {
         clearKey: '清空已保存的 API Key',
         updatedAt: '更新时间',
       },
+      generation: {
+        title: '生成设置',
+        description: '配置长任务运行参数，影响后续新建或继续生成的任务。',
+        scriptSectionMaxConcurrency: '分页脚本分段最高并发度',
+        scriptSectionMaxConcurrencyHint:
+          '实际并发数为未完成分段数和最高并发度中的较小值。每个分段内部仍按页码顺序生成。',
+        appliesToNewTasks: '保存后对后续脚本生成任务生效。',
+      },
       messages: {
         saved: '模型配置已保存',
+        appSaved: '生成设置已保存',
         activated: '已切换当前模型配置',
         deleted: '模型配置已删除',
         deleteConfirm: '确定删除模型配置“{name}”吗？',
@@ -373,6 +387,7 @@ export const messages = {
       errors: {
         loadFailed: '模型配置加载失败',
         saveFailed: '模型配置保存失败',
+        appSaveFailed: '生成设置保存失败',
         activateFailed: '模型配置切换失败',
         deleteFailed: '模型配置删除失败',
         testFailed: '模型连接测试失败',
@@ -586,6 +601,9 @@ export const messages = {
           retry: '分段计划校验失败，正在第 {attempt} 次重试',
           locked: '分段计划已锁定，正在生成页面脚本',
         },
+        sections: {
+          concurrent_started: '正在并发生成 {count} 个未完成分段',
+        },
         section: {
           generating: '正在生成第 {sectionNo} 段（第 {pageStart}-{pageEnd} 页）',
           retry: '第 {sectionNo} 段脚本校验失败，正在第 {attempt} 次重试',
@@ -597,6 +615,8 @@ export const messages = {
           review_started: '第 {sectionNo} 段已进入监督审查',
           review_passed: '第 {sectionNo} 段监督审查通过',
           review_revision_started: '第 {sectionNo} 段监督审查发现问题，正在局部修订',
+          worker_started: '第 {sectionNo} 段开始并发生成',
+          worker_completed: '第 {sectionNo} 段并发生成完成',
         },
         page: {
           generating: '正在生成第 {pageNo} 页脚本',
@@ -1019,6 +1039,11 @@ export const messages = {
         test: 'Test Connection',
         activate: 'Use This Config',
         delete: 'Delete Config',
+        saveGeneration: 'Save Generation Settings',
+      },
+      tabs: {
+        general: 'General Settings',
+        api: 'API Settings',
       },
       llm: {
         configs: 'API Configurations',
@@ -1048,8 +1073,17 @@ export const messages = {
         clearKey: 'Clear saved API key',
         updatedAt: 'Updated At',
       },
+      generation: {
+        title: 'Generation Settings',
+        description: 'Configure long-running task behavior for new or continued jobs.',
+        scriptSectionMaxConcurrency: 'Max page-script section concurrency',
+        scriptSectionMaxConcurrencyHint:
+          'Actual concurrency is the smaller value between unfinished section count and this limit. Each section still generates pages sequentially.',
+        appliesToNewTasks: 'Changes apply to future script generation tasks.',
+      },
       messages: {
         saved: 'Model settings saved',
+        appSaved: 'Generation settings saved',
         activated: 'Active model configuration switched',
         deleted: 'Model configuration deleted',
         deleteConfirm: 'Delete model configuration "{name}"?',
@@ -1059,6 +1093,7 @@ export const messages = {
       errors: {
         loadFailed: 'Failed to load model settings',
         saveFailed: 'Failed to save model settings',
+        appSaveFailed: 'Failed to save generation settings',
         activateFailed: 'Failed to switch model configuration',
         deleteFailed: 'Failed to delete model configuration',
         testFailed: 'Model connection test failed',
@@ -1277,6 +1312,9 @@ export const messages = {
           retry: 'Section plan validation failed. Retry {attempt}',
           locked: 'Section plan locked. Generating page scripts',
         },
+        sections: {
+          concurrent_started: 'Generating {count} unfinished sections concurrently',
+        },
         section: {
           generating: 'Generating section {sectionNo} (pages {pageStart}-{pageEnd})',
           retry: 'Section {sectionNo} validation failed. Retry {attempt}',
@@ -1288,6 +1326,8 @@ export const messages = {
           review_started: 'Section {sectionNo} entered supervisor review',
           review_passed: 'Section {sectionNo} passed supervisor review',
           review_revision_started: 'Section {sectionNo} needs revisions. Revising selected pages',
+          worker_started: 'Section {sectionNo} started in a concurrent worker',
+          worker_completed: 'Section {sectionNo} completed in a concurrent worker',
         },
         page: {
           generating: 'Generating page {pageNo}',
