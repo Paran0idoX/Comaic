@@ -1,17 +1,24 @@
 import asyncio
+import base64
 from copy import deepcopy
 import json
 import os
 from pathlib import Path
 import random
 from typing import Any, AsyncIterator
+from uuid import uuid4
 
-from backend.models.comic import ComicImage, ComicPage, ComfyWorkflowPreset, GenerationTask
-from backend.models.enums import ComicPageStatus, GenerationTaskStatus
+import requests
+
+from backend.models.comic import ComicImage, ComicPage, GenerationTask, ImageGenerationToolPreset, ScriptGenerationTask
+from backend.models.enums import ComicPageStatus, GenerationTaskStatus, ImageGenerationToolKind
 from backend.repositories.comic_repository import ComicRepository
 from backend.services.task_runtime import RuntimeTaskType, running_task_registry
 from backend.tools.comfyui_client import ComfyUIClient
 from backend.i18n.errors import app_error_from_exception
+
+
+CandidateSeedPair = tuple[int, int]
 
 
 class ImageGenerationService:
@@ -32,81 +39,147 @@ class ImageGenerationService:
         )
         self.output_dir = Path(output_dir)
 
-    def list_workflow_presets(self) -> list[ComfyWorkflowPreset]:
-        """读取页面维护的 ComfyUI workflow 配置。"""
+    def list_tool_presets(self) -> list[ImageGenerationToolPreset]:
+        """读取页面维护的生图工具配置。"""
+
+        return self.repository.list_image_generation_tool_presets()
+
+    def list_workflow_presets(self) -> list[ImageGenerationToolPreset]:
+        """旧接口别名：读取 ComfyUI 类型生图工具配置。"""
 
         return self.repository.list_comfy_workflow_presets()
 
-    def create_workflow_preset(
+    def create_tool_preset(
         self,
         *,
         name: str,
-        workflow_json: str,
-        positive_node_id: str,
-        positive_input_name: str,
+        kind: ImageGenerationToolKind,
         description: str | None = None,
         is_default: bool = False,
+        comfy_base_url: str | None = None,
+        workflow_json: str | None = None,
+        positive_node_id: str | None = None,
+        positive_input_name: str | None = "text",
         negative_node_id: str | None = None,
         negative_input_name: str | None = None,
         seed_node_id: str | None = None,
         seed_input_name: str | None = None,
-    ) -> ComfyWorkflowPreset:
-        """创建 workflow 配置，并校验 JSON 与正向 Prompt 节点是否可注入。"""
+        api_base_url: str | None = None,
+        endpoint_path: str | None = "/images/generations",
+        api_key: str | None = None,
+        model: str | None = None,
+        size: str | None = "1024x1024",
+        response_format: str | None = "b64_json",
+        seed_field_name: str | None = None,
+        negative_prompt_field_name: str | None = None,
+        extra_body_json: str | None = None,
+    ) -> ImageGenerationToolPreset:
+        """创建生图工具配置，并按工具类型校验关键字段。"""
 
-        normalized_workflow = self._normalize_workflow_json(workflow_json)
-        positive_node_id = self._required_text(positive_node_id, "Positive node id")
-        positive_input_name = self._required_text(positive_input_name, "Positive input name")
-        self._validate_workflow_input(normalized_workflow, positive_node_id, positive_input_name)
-        return self.repository.create_comfy_workflow_preset(
-            name=self._required_text(name, "Workflow name"),
-            description=self._optional_text(description),
-            workflow_json=json.dumps(normalized_workflow, ensure_ascii=False),
-            is_default=is_default,
+        payload = self._normalize_tool_payload(
+            kind=kind,
+            comfy_base_url=comfy_base_url,
+            workflow_json=workflow_json,
             positive_node_id=positive_node_id,
             positive_input_name=positive_input_name,
-            negative_node_id=self._optional_text(negative_node_id),
-            negative_input_name=self._optional_text(negative_input_name),
-            seed_node_id=self._optional_text(seed_node_id),
-            seed_input_name=self._optional_text(seed_input_name),
+            negative_node_id=negative_node_id,
+            negative_input_name=negative_input_name,
+            seed_node_id=seed_node_id,
+            seed_input_name=seed_input_name,
+            api_base_url=api_base_url,
+            endpoint_path=endpoint_path,
+            api_key=api_key,
+            model=model,
+            size=size,
+            response_format=response_format,
+            seed_field_name=seed_field_name,
+            negative_prompt_field_name=negative_prompt_field_name,
+            extra_body_json=extra_body_json,
+        )
+        return self.repository.create_image_generation_tool_preset(
+            name=self._required_text(name, "Workflow name"),
+            description=self._optional_text(description),
+            kind=kind,
+            is_default=is_default,
+            **payload,
         )
 
-    def update_workflow_preset(
+    def update_tool_preset(
         self,
         *,
         preset_id: int,
         name: str,
-        workflow_json: str,
-        positive_node_id: str,
-        positive_input_name: str,
+        kind: ImageGenerationToolKind,
         description: str | None = None,
         is_default: bool = False,
+        comfy_base_url: str | None = None,
+        workflow_json: str | None = None,
+        positive_node_id: str | None = None,
+        positive_input_name: str | None = "text",
         negative_node_id: str | None = None,
         negative_input_name: str | None = None,
         seed_node_id: str | None = None,
         seed_input_name: str | None = None,
-    ) -> ComfyWorkflowPreset:
-        """更新 workflow 配置；校验逻辑与创建保持一致。"""
+        api_base_url: str | None = None,
+        endpoint_path: str | None = "/images/generations",
+        api_key: str | None = None,
+        model: str | None = None,
+        size: str | None = "1024x1024",
+        response_format: str | None = "b64_json",
+        seed_field_name: str | None = None,
+        negative_prompt_field_name: str | None = None,
+        extra_body_json: str | None = None,
+    ) -> ImageGenerationToolPreset:
+        """更新生图工具配置；校验逻辑与创建保持一致。"""
 
-        normalized_workflow = self._normalize_workflow_json(workflow_json)
-        positive_node_id = self._required_text(positive_node_id, "Positive node id")
-        positive_input_name = self._required_text(positive_input_name, "Positive input name")
-        self._validate_workflow_input(normalized_workflow, positive_node_id, positive_input_name)
-        return self.repository.update_comfy_workflow_preset(
+        payload = self._normalize_tool_payload(
+            kind=kind,
+            comfy_base_url=comfy_base_url,
+            workflow_json=workflow_json,
+            positive_node_id=positive_node_id,
+            positive_input_name=positive_input_name,
+            negative_node_id=negative_node_id,
+            negative_input_name=negative_input_name,
+            seed_node_id=seed_node_id,
+            seed_input_name=seed_input_name,
+            api_base_url=api_base_url,
+            endpoint_path=endpoint_path,
+            api_key=api_key,
+            model=model,
+            size=size,
+            response_format=response_format,
+            seed_field_name=seed_field_name,
+            negative_prompt_field_name=negative_prompt_field_name,
+            extra_body_json=extra_body_json,
+        )
+        return self.repository.update_image_generation_tool_preset(
             preset_id=preset_id,
             name=self._required_text(name, "Workflow name"),
             description=self._optional_text(description),
-            workflow_json=json.dumps(normalized_workflow, ensure_ascii=False),
+            kind=kind,
             is_default=is_default,
-            positive_node_id=positive_node_id,
-            positive_input_name=positive_input_name,
-            negative_node_id=self._optional_text(negative_node_id),
-            negative_input_name=self._optional_text(negative_input_name),
-            seed_node_id=self._optional_text(seed_node_id),
-            seed_input_name=self._optional_text(seed_input_name),
+            **payload,
         )
 
+    def delete_tool_preset(self, preset_id: int) -> None:
+        """删除生图工具配置，不影响已生成图片。"""
+
+        self.repository.delete_image_generation_tool_preset(preset_id)
+
+    def create_workflow_preset(self, **kwargs) -> ImageGenerationToolPreset:
+        """旧接口别名：创建 ComfyUI 类型工具配置。"""
+
+        kwargs.pop("kind", None)
+        return self.create_tool_preset(kind=ImageGenerationToolKind.COMFYUI, **kwargs)
+
+    def update_workflow_preset(self, *, preset_id: int, **kwargs) -> ImageGenerationToolPreset:
+        """旧接口别名：更新 ComfyUI 类型工具配置。"""
+
+        kwargs.pop("kind", None)
+        return self.update_tool_preset(preset_id=preset_id, kind=ImageGenerationToolKind.COMFYUI, **kwargs)
+
     def delete_workflow_preset(self, preset_id: int) -> None:
-        """删除 workflow 配置，不影响已生成图片。"""
+        """旧接口别名：删除 ComfyUI 类型工具配置。"""
 
         self.repository.delete_comfy_workflow_preset(preset_id)
 
@@ -130,7 +203,7 @@ class ImageGenerationService:
         self,
         *,
         task_id: int,
-        workflow_preset_id: int,
+        tool_preset_id: int,
         poll_interval_seconds: float = 2.0,
         candidates_per_page: int = 1,
         negative_prompt: str | None = None,
@@ -140,20 +213,396 @@ class ImageGenerationService:
         script_task = self.repository.get_script_task(task_id)
         if script_task is None:
             raise ValueError(f"ScriptGenerationTask not found: {task_id}")
-        preset = self._get_workflow_preset(workflow_preset_id)
-        self._ensure_seed_configured(preset)
+        preset = self._get_tool_preset(tool_preset_id)
+        self._ensure_generation_tool_ready(preset)
         pages = [
             page for page in self.repository.list_script_task_pages(task_id)
             if page.image_prompt
         ]
         if not pages:
             raise ValueError(f"Image prompts not found for script task: {task_id}")
-        candidate_seeds = self._candidate_seeds(candidates_per_page)
+        candidate_seed_pairs = self._candidate_seed_pairs(candidates_per_page)
+        page_seed_pairs = {page.id: candidate_seed_pairs for page in pages}
+        async for event, payload in self._stream_generate_pages(
+            script_task=script_task,
+            pages=pages,
+            page_seed_pairs=page_seed_pairs,
+            preset=preset,
+            poll_interval_seconds=poll_interval_seconds,
+            negative_prompt=negative_prompt,
+        ):
+            yield event, payload
 
+    async def stream_continue_for_script_task(
+        self,
+        *,
+        task_id: int,
+        tool_preset_id: int,
+        poll_interval_seconds: float = 2.0,
+        candidates_per_page: int = 1,
+        negative_prompt: str | None = None,
+    ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
+        """继续批量图片生成，只为候选图数量不足的页面追加缺失候选。"""
+
+        script_task = self.repository.get_script_task(task_id)
+        if script_task is None:
+            raise ValueError(f"ScriptGenerationTask not found: {task_id}")
+        preset = self._get_tool_preset(tool_preset_id)
+        self._ensure_generation_tool_ready(preset)
+        pages = [
+            page for page in self.repository.list_script_task_pages(task_id)
+            if page.image_prompt
+        ]
+        if not pages:
+            raise ValueError(f"Image prompts not found for script task: {task_id}")
+        page_seed_pairs = self._missing_candidate_seed_pairs_by_page(
+            pages=pages,
+            candidates_per_page=candidates_per_page,
+        )
+        pages_to_generate = [page for page in pages if page_seed_pairs.get(page.id)]
+        async for event, payload in self._stream_generate_pages(
+            script_task=script_task,
+            pages=pages_to_generate,
+            page_seed_pairs=page_seed_pairs,
+            preset=preset,
+            poll_interval_seconds=poll_interval_seconds,
+            negative_prompt=negative_prompt,
+        ):
+            yield event, payload
+
+    async def stream_generate_for_page(
+        self,
+        *,
+        page_id: int,
+        tool_preset_id: int,
+        poll_interval_seconds: float = 2.0,
+        candidates_per_page: int = 1,
+        negative_prompt: str | None = None,
+    ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
+        """单页生成图片，供失败页面补跑或追加候选图。"""
+
+        page = self._get_page(page_id)
+        if not page.image_prompt:
+            raise ValueError(f"Image prompt not found for page: {page_id}")
+        preset = self._get_tool_preset(tool_preset_id)
+        self._ensure_generation_tool_ready(preset)
+        candidate_seed_pairs = self._candidate_seed_pairs(candidates_per_page)
+        task = self.repository.create_generation_task(
+            project_id=page.project_id,
+            page_id=page.id,
+            batch_size=candidates_per_page,
+        )
+        task = self.repository.update_generation_task(
+            task_id=task.id,
+            status=GenerationTaskStatus.RUNNING,
+        )
+        running_task_registry.register(RuntimeTaskType.GENERATION_TASK, task.id)
+        try:
+            yield "start", {"task_id": task.id, "total": 1, "status": task.status.value}
+            image_count = 0
+            async for event, payload in self._stream_page_images(
+                page=page,
+                page_task_id=task.id,
+                preset=preset,
+                candidate_seed_pairs=candidate_seed_pairs,
+                poll_interval_seconds=poll_interval_seconds,
+                negative_prompt=negative_prompt,
+                batch_task_id=task.id,
+            ):
+                if event == "image":
+                    image_count += 1
+                yield event, payload
+            if image_count == 0:
+                raise ValueError(f"ComfyUI generated no images for page: {page.page_no}")
+            task = self.repository.update_generation_task(
+                task_id=task.id,
+                status=GenerationTaskStatus.SUCCEEDED,
+            )
+            self.repository.mark_page_image_ready(page.id)
+            yield "done", {"task_id": task.id, "status": task.status.value, "total": 1, "succeeded": 1, "failed": 0}
+        except Exception as exc:
+            self.repository.update_generation_task(
+                task_id=task.id,
+                status=GenerationTaskStatus.FAILED,
+                error_message=str(exc),
+            )
+            raise
+        finally:
+            running_task_registry.unregister(RuntimeTaskType.GENERATION_TASK, task.id)
+
+    def select_image(self, *, page_id: int, image_id: int) -> ComicPage:
+        """人工选择某页最终图片。"""
+
+        return self.repository.select_image(page_id=page_id, image_id=image_id)
+
+    def _get_tool_preset(self, preset_id: int) -> ImageGenerationToolPreset:
+        """读取生图工具 preset，不存在时给出明确错误。"""
+
+        preset = self.repository.get_image_generation_tool_preset(preset_id)
+        if preset is None:
+            raise ValueError(f"ImageGenerationToolPreset not found: {preset_id}")
+        return preset
+
+    def _get_page(self, page_id: int) -> ComicPage:
+        """按 id 读取页面。"""
+
+        page = self.repository.session.get(ComicPage, page_id)
+        if page is None:
+            raise ValueError(f"ComicPage not found: {page_id}")
+        return page
+
+    async def _generate_page_images(
+        self,
+        *,
+        page: ComicPage,
+        page_task_id: int,
+        preset: ImageGenerationToolPreset,
+        candidate_seed_pairs: list[CandidateSeedPair],
+        poll_interval_seconds: float,
+        negative_prompt: str | None,
+        batch_task_id: int,
+    ) -> list[ComicImage]:
+        """提交单页 workflow，等待 ComfyUI 完成后下载并落库图片。"""
+
+        saved_images: list[ComicImage] = []
+        for _candidate_index, seed in candidate_seed_pairs:
+            workflow, seed = self._build_workflow(
+                preset=preset,
+                positive_prompt=page.image_prompt or "",
+                negative_prompt=negative_prompt,
+                seed=seed,
+            )
+            prompt_id = await asyncio.to_thread(self.comfy_client.queue_prompt, workflow)
+            self.repository.update_generation_task(
+                task_id=page_task_id,
+                comfy_prompt_id=prompt_id,
+            )
+            history = await self._wait_for_history(
+                prompt_id=prompt_id,
+                poll_interval_seconds=poll_interval_seconds,
+                batch_task_id=batch_task_id,
+            )
+            output_images = self.comfy_client.extract_output_images(history, prompt_id)
+            if not output_images:
+                raise ValueError(f"ComfyUI history contains no images for prompt_id: {prompt_id}")
+            for index, image_info in enumerate(output_images, start=1):
+                content = await asyncio.to_thread(
+                    self.comfy_client.download_view_image,
+                    filename=image_info["filename"],
+                    subfolder=image_info["subfolder"],
+                    image_type=image_info["type"],
+                )
+                local_path = self._save_image_file(
+                    project_id=page.project_id,
+                    page_no=page.page_no,
+                    prompt_id=prompt_id,
+                    index=index,
+                    filename=image_info["filename"],
+                    content=content,
+                )
+                saved_images.append(
+                    self.repository.add_image(
+                        page_id=page.id,
+                        prompt=page.image_prompt or "",
+                        negative_prompt=negative_prompt,
+                        local_path=str(local_path),
+                        seed=seed,
+                        workflow_name=preset.name,
+                    )
+                )
+        return saved_images
+
+    async def _stream_page_images(
+        self,
+        *,
+        page: ComicPage,
+        page_task_id: int,
+        preset: ImageGenerationToolPreset,
+        candidate_seed_pairs: list[CandidateSeedPair],
+        poll_interval_seconds: float,
+        negative_prompt: str | None,
+        batch_task_id: int,
+    ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
+        """提交并保存单页图片，同时实时产出 queued/polling/image 事件。"""
+
+        if preset.kind == ImageGenerationToolKind.OPENAI_IMAGES_COMPATIBLE:
+            async for event, payload in self._stream_openai_images_compatible_page_images(
+                page=page,
+                page_task_id=page_task_id,
+                preset=preset,
+                candidate_seed_pairs=candidate_seed_pairs,
+                negative_prompt=negative_prompt,
+                batch_task_id=batch_task_id,
+            ):
+                yield event, payload
+            return
+
+        async for event, payload in self._stream_comfy_page_images(
+            page=page,
+            page_task_id=page_task_id,
+            preset=preset,
+            candidate_seed_pairs=candidate_seed_pairs,
+            poll_interval_seconds=poll_interval_seconds,
+            negative_prompt=negative_prompt,
+            batch_task_id=batch_task_id,
+        ):
+            yield event, payload
+
+    async def _stream_comfy_page_images(
+        self,
+        *,
+        page: ComicPage,
+        page_task_id: int,
+        preset: ImageGenerationToolPreset,
+        candidate_seed_pairs: list[CandidateSeedPair],
+        poll_interval_seconds: float,
+        negative_prompt: str | None,
+        batch_task_id: int,
+    ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
+        """使用 ComfyUI workflow 生成并保存单页图片。"""
+
+        for candidate_index, seed in candidate_seed_pairs:
+            workflow, seed = self._build_workflow(
+                preset=preset,
+                positive_prompt=page.image_prompt or "",
+                negative_prompt=negative_prompt,
+                seed=seed,
+            )
+            comfy_client = self._comfy_client_for_preset(preset)
+            prompt_id = await asyncio.to_thread(comfy_client.queue_prompt, workflow)
+            self.repository.update_generation_task(
+                task_id=page_task_id,
+                comfy_prompt_id=prompt_id,
+            )
+            yield "queued", {
+                "task_id": batch_task_id,
+                "page_task_id": page_task_id,
+                "page_id": page.id,
+                "page_no": page.page_no,
+                "comfy_prompt_id": prompt_id,
+                "candidate_index": candidate_index,
+                "seed": seed,
+            }
+
+            poll_count = 0
+            while True:
+                poll_count += 1
+                history = await asyncio.to_thread(comfy_client.get_history, prompt_id)
+                output_images = comfy_client.extract_output_images(history, prompt_id)
+                if output_images:
+                    break
+                yield "polling", {
+                    "task_id": batch_task_id,
+                    "page_task_id": page_task_id,
+                    "page_id": page.id,
+                    "page_no": page.page_no,
+                    "comfy_prompt_id": prompt_id,
+                    "poll_count": poll_count,
+                    "candidate_index": candidate_index,
+                    "seed": seed,
+                }
+                await asyncio.sleep(poll_interval_seconds)
+
+            for index, image_info in enumerate(output_images, start=1):
+                content = await asyncio.to_thread(
+                    comfy_client.download_view_image,
+                    filename=image_info["filename"],
+                    subfolder=image_info["subfolder"],
+                    image_type=image_info["type"],
+                )
+                local_path = self._save_image_file(
+                    project_id=page.project_id,
+                    page_no=page.page_no,
+                    prompt_id=prompt_id,
+                    index=index,
+                    filename=image_info["filename"],
+                    content=content,
+                )
+                image = self.repository.add_image(
+                    page_id=page.id,
+                    prompt=page.image_prompt or "",
+                    negative_prompt=negative_prompt,
+                    local_path=str(local_path),
+                    seed=seed,
+                    workflow_name=preset.name,
+                )
+                yield "image", self._image_payload(image, page)
+
+    async def _stream_openai_images_compatible_page_images(
+        self,
+        *,
+        page: ComicPage,
+        page_task_id: int,
+        preset: ImageGenerationToolPreset,
+        candidate_seed_pairs: list[CandidateSeedPair],
+        negative_prompt: str | None,
+        batch_task_id: int,
+    ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
+        """使用 OpenAI Images 兼容 API 生成并保存单页图片。"""
+
+        for candidate_index, seed in candidate_seed_pairs:
+            request_id = f"image-api-{uuid4().hex}"
+            yield "queued", {
+                "task_id": batch_task_id,
+                "page_task_id": page_task_id,
+                "page_id": page.id,
+                "page_no": page.page_no,
+                "comfy_prompt_id": request_id,
+                "candidate_index": candidate_index,
+                "seed": seed,
+            }
+            response_payload = await asyncio.to_thread(
+                self._request_openai_images_compatible,
+                preset=preset,
+                prompt=page.image_prompt or "",
+                negative_prompt=negative_prompt,
+                seed=seed,
+            )
+            external_id = str(response_payload.get("id") or request_id)
+            self.repository.update_generation_task(
+                task_id=page_task_id,
+                comfy_prompt_id=external_id,
+            )
+            image_items = response_payload.get("data")
+            if not isinstance(image_items, list) or not image_items:
+                raise ValueError("Image generation API returned no images.")
+            for index, item in enumerate(image_items, start=1):
+                content = await asyncio.to_thread(self._image_content_from_api_item, item)
+                local_path = self._save_image_file(
+                    project_id=page.project_id,
+                    page_no=page.page_no,
+                    prompt_id=external_id,
+                    index=index,
+                    filename=f"{external_id}_{index}.png",
+                    content=content,
+                )
+                image = self.repository.add_image(
+                    page_id=page.id,
+                    prompt=page.image_prompt or "",
+                    negative_prompt=negative_prompt,
+                    local_path=str(local_path),
+                    seed=seed,
+                    workflow_name=preset.name,
+                )
+                yield "image", self._image_payload(image, page)
+
+    async def _stream_generate_pages(
+        self,
+        *,
+        script_task: ScriptGenerationTask,
+        pages: list[ComicPage],
+        page_seed_pairs: dict[int, list[CandidateSeedPair]],
+        preset: ImageGenerationToolPreset,
+        poll_interval_seconds: float,
+        negative_prompt: str | None,
+    ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
+        """批量图片生成公共执行器；主流程统一落库任务状态并产出 SSE。"""
+
+        batch_size = sum(len(page_seed_pairs.get(page.id, [])) for page in pages)
         batch_task = self.repository.create_generation_task(
             project_id=script_task.project_id,
             page_id=None,
-            batch_size=len(pages) * candidates_per_page,
+            batch_size=batch_size,
         )
         batch_task = self.repository.update_generation_task(
             task_id=batch_task.id,
@@ -165,8 +614,23 @@ class ImageGenerationService:
                 "task_id": batch_task.id,
                 "script_task_id": script_task.id,
                 "total": len(pages),
+                "batch_size": batch_size,
                 "status": batch_task.status.value,
             }
+
+            if not pages:
+                batch_task = self.repository.update_generation_task(
+                    task_id=batch_task.id,
+                    status=GenerationTaskStatus.SUCCEEDED,
+                )
+                yield "done", {
+                    "task_id": batch_task.id,
+                    "status": batch_task.status.value,
+                    "total": 0,
+                    "succeeded": 0,
+                    "failed": 0,
+                }
+                return
 
             completed = 0
             succeeded = 0
@@ -176,10 +640,13 @@ class ImageGenerationService:
                     yield "suspended", {"task_id": batch_task.id, "status": GenerationTaskStatus.SUSPENDED.value}
                     return
 
+                candidate_seed_pairs = page_seed_pairs.get(page.id, [])
+                if not candidate_seed_pairs:
+                    continue
                 page_task = self.repository.create_generation_task(
                     project_id=script_task.project_id,
                     page_id=page.id,
-                    batch_size=candidates_per_page,
+                    batch_size=len(candidate_seed_pairs),
                 )
                 page_task = self.repository.update_generation_task(
                     task_id=page_task.id,
@@ -192,6 +659,7 @@ class ImageGenerationService:
                         "page_task_id": page_task.id,
                         "page_id": page.id,
                         "page_no": page.page_no,
+                        "candidate_count": len(candidate_seed_pairs),
                         "status": page_task.status.value,
                     }
                     image_count = 0
@@ -199,8 +667,7 @@ class ImageGenerationService:
                         page=page,
                         page_task_id=page_task.id,
                         preset=preset,
-                        candidates_per_page=candidates_per_page,
-                        candidate_seeds=candidate_seeds,
+                        candidate_seed_pairs=candidate_seed_pairs,
                         poll_interval_seconds=poll_interval_seconds,
                         negative_prompt=negative_prompt,
                         batch_task_id=batch_task.id,
@@ -276,230 +743,6 @@ class ImageGenerationService:
         finally:
             running_task_registry.unregister(RuntimeTaskType.GENERATION_TASK, batch_task.id)
 
-    async def stream_generate_for_page(
-        self,
-        *,
-        page_id: int,
-        workflow_preset_id: int,
-        poll_interval_seconds: float = 2.0,
-        candidates_per_page: int = 1,
-        negative_prompt: str | None = None,
-    ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
-        """单页生成图片，供失败页面补跑或追加候选图。"""
-
-        page = self._get_page(page_id)
-        if not page.image_prompt:
-            raise ValueError(f"Image prompt not found for page: {page_id}")
-        preset = self._get_workflow_preset(workflow_preset_id)
-        self._ensure_seed_configured(preset)
-        candidate_seeds = self._candidate_seeds(candidates_per_page)
-        task = self.repository.create_generation_task(
-            project_id=page.project_id,
-            page_id=page.id,
-            batch_size=candidates_per_page,
-        )
-        task = self.repository.update_generation_task(
-            task_id=task.id,
-            status=GenerationTaskStatus.RUNNING,
-        )
-        running_task_registry.register(RuntimeTaskType.GENERATION_TASK, task.id)
-        try:
-            yield "start", {"task_id": task.id, "total": 1, "status": task.status.value}
-            image_count = 0
-            async for event, payload in self._stream_page_images(
-                page=page,
-                page_task_id=task.id,
-                preset=preset,
-                candidates_per_page=candidates_per_page,
-                candidate_seeds=candidate_seeds,
-                poll_interval_seconds=poll_interval_seconds,
-                negative_prompt=negative_prompt,
-                batch_task_id=task.id,
-            ):
-                if event == "image":
-                    image_count += 1
-                yield event, payload
-            if image_count == 0:
-                raise ValueError(f"ComfyUI generated no images for page: {page.page_no}")
-            task = self.repository.update_generation_task(
-                task_id=task.id,
-                status=GenerationTaskStatus.SUCCEEDED,
-            )
-            self.repository.mark_page_image_ready(page.id)
-            yield "done", {"task_id": task.id, "status": task.status.value, "total": 1, "succeeded": 1, "failed": 0}
-        except Exception as exc:
-            self.repository.update_generation_task(
-                task_id=task.id,
-                status=GenerationTaskStatus.FAILED,
-                error_message=str(exc),
-            )
-            raise
-        finally:
-            running_task_registry.unregister(RuntimeTaskType.GENERATION_TASK, task.id)
-
-    def select_image(self, *, page_id: int, image_id: int) -> ComicPage:
-        """人工选择某页最终图片。"""
-
-        return self.repository.select_image(page_id=page_id, image_id=image_id)
-
-    def _get_workflow_preset(self, preset_id: int) -> ComfyWorkflowPreset:
-        """读取 workflow preset，不存在时给出明确错误。"""
-
-        preset = self.repository.get_comfy_workflow_preset(preset_id)
-        if preset is None:
-            raise ValueError(f"ComfyWorkflowPreset not found: {preset_id}")
-        return preset
-
-    def _get_page(self, page_id: int) -> ComicPage:
-        """按 id 读取页面。"""
-
-        page = self.repository.session.get(ComicPage, page_id)
-        if page is None:
-            raise ValueError(f"ComicPage not found: {page_id}")
-        return page
-
-    async def _generate_page_images(
-        self,
-        *,
-        page: ComicPage,
-        page_task_id: int,
-        preset: ComfyWorkflowPreset,
-        candidates_per_page: int,
-        candidate_seeds: list[int],
-        poll_interval_seconds: float,
-        negative_prompt: str | None,
-        batch_task_id: int,
-    ) -> list[ComicImage]:
-        """提交单页 workflow，等待 ComfyUI 完成后下载并落库图片。"""
-
-        saved_images: list[ComicImage] = []
-        for candidate_index, seed in enumerate(candidate_seeds[:candidates_per_page], start=1):
-            workflow, seed = self._build_workflow(
-                preset=preset,
-                positive_prompt=page.image_prompt or "",
-                negative_prompt=negative_prompt,
-                seed=seed,
-            )
-            prompt_id = await asyncio.to_thread(self.comfy_client.queue_prompt, workflow)
-            self.repository.update_generation_task(
-                task_id=page_task_id,
-                comfy_prompt_id=prompt_id,
-            )
-            history = await self._wait_for_history(
-                prompt_id=prompt_id,
-                poll_interval_seconds=poll_interval_seconds,
-                batch_task_id=batch_task_id,
-            )
-            output_images = self.comfy_client.extract_output_images(history, prompt_id)
-            if not output_images:
-                raise ValueError(f"ComfyUI history contains no images for prompt_id: {prompt_id}")
-            for index, image_info in enumerate(output_images, start=1):
-                content = await asyncio.to_thread(
-                    self.comfy_client.download_view_image,
-                    filename=image_info["filename"],
-                    subfolder=image_info["subfolder"],
-                    image_type=image_info["type"],
-                )
-                local_path = self._save_image_file(
-                    project_id=page.project_id,
-                    page_no=page.page_no,
-                    prompt_id=prompt_id,
-                    index=index,
-                    filename=image_info["filename"],
-                    content=content,
-                )
-                saved_images.append(
-                    self.repository.add_image(
-                        page_id=page.id,
-                        prompt=page.image_prompt or "",
-                        negative_prompt=negative_prompt,
-                        local_path=str(local_path),
-                        seed=seed,
-                        workflow_name=preset.name,
-                    )
-                )
-        return saved_images
-
-    async def _stream_page_images(
-        self,
-        *,
-        page: ComicPage,
-        page_task_id: int,
-        preset: ComfyWorkflowPreset,
-        candidates_per_page: int,
-        candidate_seeds: list[int],
-        poll_interval_seconds: float,
-        negative_prompt: str | None,
-        batch_task_id: int,
-    ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
-        """提交并保存单页图片，同时实时产出 queued/polling/image 事件。"""
-
-        for candidate_index, seed in enumerate(candidate_seeds[:candidates_per_page], start=1):
-            workflow, seed = self._build_workflow(
-                preset=preset,
-                positive_prompt=page.image_prompt or "",
-                negative_prompt=negative_prompt,
-                seed=seed,
-            )
-            prompt_id = await asyncio.to_thread(self.comfy_client.queue_prompt, workflow)
-            self.repository.update_generation_task(
-                task_id=page_task_id,
-                comfy_prompt_id=prompt_id,
-            )
-            yield "queued", {
-                "task_id": batch_task_id,
-                "page_task_id": page_task_id,
-                "page_id": page.id,
-                "page_no": page.page_no,
-                "comfy_prompt_id": prompt_id,
-                "candidate_index": candidate_index,
-                "seed": seed,
-            }
-
-            poll_count = 0
-            while True:
-                poll_count += 1
-                history = await asyncio.to_thread(self.comfy_client.get_history, prompt_id)
-                output_images = self.comfy_client.extract_output_images(history, prompt_id)
-                if output_images:
-                    break
-                yield "polling", {
-                    "task_id": batch_task_id,
-                    "page_task_id": page_task_id,
-                    "page_id": page.id,
-                    "page_no": page.page_no,
-                    "comfy_prompt_id": prompt_id,
-                    "poll_count": poll_count,
-                    "candidate_index": candidate_index,
-                    "seed": seed,
-                }
-                await asyncio.sleep(poll_interval_seconds)
-
-            for index, image_info in enumerate(output_images, start=1):
-                content = await asyncio.to_thread(
-                    self.comfy_client.download_view_image,
-                    filename=image_info["filename"],
-                    subfolder=image_info["subfolder"],
-                    image_type=image_info["type"],
-                )
-                local_path = self._save_image_file(
-                    project_id=page.project_id,
-                    page_no=page.page_no,
-                    prompt_id=prompt_id,
-                    index=index,
-                    filename=image_info["filename"],
-                    content=content,
-                )
-                image = self.repository.add_image(
-                    page_id=page.id,
-                    prompt=page.image_prompt or "",
-                    negative_prompt=negative_prompt,
-                    local_path=str(local_path),
-                    seed=seed,
-                    workflow_name=preset.name,
-                )
-                yield "image", self._image_payload(image, page)
-
     async def _wait_for_history(
         self,
         *,
@@ -521,7 +764,7 @@ class ImageGenerationService:
     def _build_workflow(
         self,
         *,
-        preset: ComfyWorkflowPreset,
+        preset: ImageGenerationToolPreset,
         positive_prompt: str,
         negative_prompt: str | None,
         seed: int,
@@ -552,6 +795,263 @@ class ImageGenerationService:
         )
         return workflow, seed
 
+    def _request_openai_images_compatible(
+        self,
+        *,
+        preset: ImageGenerationToolPreset,
+        prompt: str,
+        negative_prompt: str | None,
+        seed: int,
+    ) -> dict[str, Any]:
+        """调用 OpenAI Images 兼容 API，并返回 JSON 响应。"""
+
+        api_base_url = self._required_text(preset.api_base_url, "Image API base URL").rstrip("/")
+        endpoint_path = (preset.endpoint_path or "/images/generations").strip() or "/images/generations"
+        body: dict[str, Any] = {
+            "model": self._required_text(preset.model, "Image API model"),
+            "prompt": prompt,
+            "n": 1,
+        }
+        if preset.size:
+            body["size"] = preset.size
+        if preset.response_format:
+            body["response_format"] = preset.response_format
+        if preset.extra_body_json:
+            body.update(self._normalize_extra_body_json(preset.extra_body_json))
+        if preset.seed_field_name:
+            body[preset.seed_field_name] = seed
+        if negative_prompt and preset.negative_prompt_field_name:
+            body[preset.negative_prompt_field_name] = negative_prompt
+
+        headers = {"Content-Type": "application/json"}
+        if preset.api_key:
+            headers["Authorization"] = f"Bearer {preset.api_key}"
+        response = requests.post(
+            f"{api_base_url}/{endpoint_path.lstrip('/')}",
+            json=body,
+            headers=headers,
+            timeout=180,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("Image generation API response must be a JSON object.")
+        return payload
+
+    def _image_content_from_api_item(self, item: Any) -> bytes:
+        """从 OpenAI Images 兼容响应项提取图片二进制，支持 b64_json 和 url。"""
+
+        if not isinstance(item, dict):
+            raise ValueError("Image generation API image item must be an object.")
+        b64_json = item.get("b64_json")
+        if isinstance(b64_json, str) and b64_json.strip():
+            return base64.b64decode(b64_json)
+        image_url = item.get("url")
+        if isinstance(image_url, str) and image_url.strip():
+            response = requests.get(image_url, timeout=180)
+            response.raise_for_status()
+            return response.content
+        raise ValueError("Image generation API image item contains neither b64_json nor url.")
+
+    def _comfy_client_for_preset(self, preset: ImageGenerationToolPreset) -> ComfyUIClient:
+        """按工具配置创建 ComfyUI client；未设置 base_url 时复用默认 client。"""
+
+        if not preset.comfy_base_url:
+            return self.comfy_client
+        return ComfyUIClient(preset.comfy_base_url)
+
+    def _ensure_generation_tool_ready(self, preset: ImageGenerationToolPreset) -> None:
+        """生成前校验工具配置满足运行需要。"""
+
+        if preset.kind == ImageGenerationToolKind.COMFYUI:
+            self._ensure_seed_configured(preset)
+            if not preset.workflow_json:
+                raise ValueError("Workflow JSON is required for ComfyUI image generation.")
+            return
+        if preset.kind == ImageGenerationToolKind.OPENAI_IMAGES_COMPATIBLE:
+            self._required_text(preset.api_base_url, "Image API base URL")
+            self._required_text(preset.model, "Image API model")
+            return
+        raise ValueError(f"Unsupported image generation tool kind: {preset.kind.value}")
+
+    def _normalize_tool_payload(
+        self,
+        *,
+        kind: ImageGenerationToolKind,
+        comfy_base_url: str | None,
+        workflow_json: str | None,
+        positive_node_id: str | None,
+        positive_input_name: str | None,
+        negative_node_id: str | None,
+        negative_input_name: str | None,
+        seed_node_id: str | None,
+        seed_input_name: str | None,
+        api_base_url: str | None,
+        endpoint_path: str | None,
+        api_key: str | None,
+        model: str | None,
+        size: str | None,
+        response_format: str | None,
+        seed_field_name: str | None,
+        negative_prompt_field_name: str | None,
+        extra_body_json: str | None,
+    ) -> dict[str, Any]:
+        """按工具类型规范化字段；不属于该工具的字段置空。"""
+
+        if kind == ImageGenerationToolKind.COMFYUI:
+            normalized_workflow = self._normalize_workflow_json(
+                self._required_text(workflow_json, "Workflow JSON")
+            )
+            normalized_positive_node_id = self._required_text(positive_node_id, "Positive node id")
+            normalized_positive_input_name = self._required_text(
+                positive_input_name,
+                "Positive input name",
+            )
+            self._validate_workflow_input(
+                normalized_workflow,
+                normalized_positive_node_id,
+                normalized_positive_input_name,
+            )
+            return {
+                "comfy_base_url": self._optional_text(comfy_base_url),
+                "workflow_json": json.dumps(normalized_workflow, ensure_ascii=False),
+                "positive_node_id": normalized_positive_node_id,
+                "positive_input_name": normalized_positive_input_name,
+                "negative_node_id": self._optional_text(negative_node_id),
+                "negative_input_name": self._optional_text(negative_input_name),
+                "seed_node_id": self._optional_text(seed_node_id),
+                "seed_input_name": self._optional_text(seed_input_name),
+                "api_base_url": None,
+                "endpoint_path": None,
+                "api_key": None,
+                "model": None,
+                "size": None,
+                "response_format": None,
+                "seed_field_name": None,
+                "negative_prompt_field_name": None,
+                "extra_body_json": None,
+            }
+
+        if kind == ImageGenerationToolKind.OPENAI_IMAGES_COMPATIBLE:
+            normalized_extra_body_json = None
+            if self._optional_text(extra_body_json):
+                normalized_extra_body_json = json.dumps(
+                    self._normalize_extra_body_json(extra_body_json or ""),
+                    ensure_ascii=False,
+                )
+            return {
+                "comfy_base_url": None,
+                "workflow_json": None,
+                "positive_node_id": None,
+                "positive_input_name": None,
+                "negative_node_id": None,
+                "negative_input_name": None,
+                "seed_node_id": None,
+                "seed_input_name": None,
+                "api_base_url": self._required_text(api_base_url, "Image API base URL"),
+                "endpoint_path": self._optional_text(endpoint_path) or "/images/generations",
+                "api_key": self._optional_text(api_key),
+                "model": self._required_text(model, "Image API model"),
+                "size": self._optional_text(size) or "1024x1024",
+                "response_format": self._optional_text(response_format) or "b64_json",
+                "seed_field_name": self._optional_text(seed_field_name),
+                "negative_prompt_field_name": self._optional_text(negative_prompt_field_name),
+                "extra_body_json": normalized_extra_body_json,
+            }
+
+        raise ValueError(f"Unsupported image generation tool kind: {kind.value}")
+
+    @staticmethod
+    def _normalize_extra_body_json(value: str) -> dict[str, Any]:
+        """校验 OpenAI Images 兼容 API 的额外请求体参数。"""
+
+        try:
+            payload = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Extra body JSON is invalid: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("Extra body JSON must be an object.")
+        return payload
+
+    @staticmethod
+    def _candidate_seed_pairs(candidates_per_page: int) -> list[CandidateSeedPair]:
+        """生成候选序号和 seed 对；同一批次中候选序号跨页复用同一个 seed。"""
+
+        return list(enumerate(ImageGenerationService._candidate_seeds(candidates_per_page), start=1))
+
+    def _missing_candidate_seed_pairs_by_page(
+        self,
+        *,
+        pages: list[ComicPage],
+        candidates_per_page: int,
+    ) -> dict[int, list[CandidateSeedPair]]:
+        """计算继续生成需要补的候选图；候选序号按已有图片创建顺序推断。"""
+
+        seed_by_candidate_index = self._candidate_seed_map_from_existing_images(
+            pages=pages,
+            candidates_per_page=candidates_per_page,
+        )
+        result: dict[int, list[CandidateSeedPair]] = {}
+        for page in pages:
+            existing_count = min(
+                len(self._sorted_page_images_for_candidate_order(page)),
+                candidates_per_page,
+            )
+            result[page.id] = [
+                (candidate_index, seed_by_candidate_index[candidate_index])
+                for candidate_index in range(existing_count + 1, candidates_per_page + 1)
+            ]
+        return result
+
+    def _candidate_seed_map_from_existing_images(
+        self,
+        *,
+        pages: list[ComicPage],
+        candidates_per_page: int,
+    ) -> dict[int, int]:
+        """从历史图片推断候选序号 seed；缺失的新候选序号生成新 seed。"""
+
+        seed_by_candidate_index: dict[int, int] = {}
+        used_seeds: set[int] = set()
+        for page in pages:
+            for candidate_index, image in enumerate(
+                self._sorted_page_images_for_candidate_order(page)[:candidates_per_page],
+                start=1,
+            ):
+                if image.seed is None:
+                    continue
+                used_seeds.add(image.seed)
+                seed_by_candidate_index.setdefault(candidate_index, image.seed)
+
+        for candidate_index in range(1, candidates_per_page + 1):
+            if candidate_index in seed_by_candidate_index:
+                continue
+            seed = self._unique_random_seed(used_seeds)
+            seed_by_candidate_index[candidate_index] = seed
+            used_seeds.add(seed)
+        return seed_by_candidate_index
+
+    @staticmethod
+    def _sorted_page_images_for_candidate_order(page: ComicPage) -> list[ComicImage]:
+        """候选序号由同页图片的创建顺序推断，旧图在前，新图在后。"""
+
+        return sorted(
+            page.images,
+            key=lambda image: (
+                image.created_at,
+                image.id,
+            ),
+        )
+
+    @staticmethod
+    def _unique_random_seed(used_seeds: set[int]) -> int:
+        """生成不与本批次已知 seed 冲突的随机 seed。"""
+
+        while True:
+            seed = random.randint(1, 2_147_483_647)
+            if seed not in used_seeds:
+                return seed
+
     @staticmethod
     def _candidate_seeds(candidates_per_page: int) -> list[int]:
         """为候选序号生成稳定 seed；批量生成时跨页复用同一候选序号 seed。"""
@@ -567,7 +1067,7 @@ class ImageGenerationService:
         return seeds
 
     @staticmethod
-    def _ensure_seed_configured(preset: ComfyWorkflowPreset) -> None:
+    def _ensure_seed_configured(preset: ImageGenerationToolPreset) -> None:
         """图片生成必须由后端注入 seed，因此 workflow preset 需要配置 seed 输入位置。"""
 
         if not preset.seed_node_id or not preset.seed_input_name:
@@ -588,7 +1088,8 @@ class ImageGenerationService:
         suffix = Path(filename).suffix or ".png"
         directory = self.output_dir / f"project_{project_id}" / f"page_{page_no}"
         directory.mkdir(parents=True, exist_ok=True)
-        local_path = directory / f"{prompt_id}_{index}{suffix}"
+        safe_prompt_id = "".join(char if char.isalnum() or char in "-_." else "_" for char in prompt_id)
+        local_path = directory / f"{safe_prompt_id}_{index}{suffix}"
         local_path.write_bytes(content)
         return local_path
 

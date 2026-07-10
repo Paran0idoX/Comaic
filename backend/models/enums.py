@@ -11,6 +11,23 @@ class ComicPageStatus(str, Enum):
     IMAGE_SELECTED = "image_selected"
 
 
+class PageScriptReviewStatus(str, Enum):
+    """分页脚本在脚本生成阶段的逐页审查状态。"""
+
+    UNREVIEWED = "unreviewed"
+    REVIEWING = "reviewing"
+    PASSED = "passed"
+    FAILED = "failed"
+
+
+class ScriptSectionStatus(str, Enum):
+    """分页脚本分段生成状态。"""
+
+    GENERATING = "generating"
+    FAILED = "failed"
+    COMPLETED = "completed"
+
+
 class GenerationTaskStatus(str, Enum):
     """ComfyUI 出图任务的生命周期状态。"""
 
@@ -56,6 +73,13 @@ class ImagePromptPresetKind(str, Enum):
 
     SCRIPT_TO_IMAGE_SYSTEM_PROMPT = "script_to_image_system_prompt"
     NEGATIVE_PROMPT = "negative_prompt"
+
+
+class ImageGenerationToolKind(str, Enum):
+    """图片生成工具类型。"""
+
+    COMFYUI = "comfyui"
+    OPENAI_IMAGES_COMPATIBLE = "openai_images_compatible"
 
 
 class LLMProvider(str, Enum):

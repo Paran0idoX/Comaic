@@ -4,30 +4,52 @@ import { ApiError, apiHeaders, normalizeBackendError, parseApiErrorResponse } fr
 export type ComfyWorkflowPreset = {
   id: number
   name: string
+  kind: 'comfyui' | 'openai_images_compatible'
   description: string | null
-  workflow_json: string
+  comfy_base_url: string | null
+  workflow_json: string | null
   is_default: boolean
-  positive_node_id: string
-  positive_input_name: string
+  positive_node_id: string | null
+  positive_input_name: string | null
   negative_node_id: string | null
   negative_input_name: string | null
   seed_node_id: string | null
   seed_input_name: string | null
+  api_base_url: string | null
+  endpoint_path: string | null
+  api_key: string | null
+  model: string | null
+  size: string | null
+  response_format: string | null
+  seed_field_name: string | null
+  negative_prompt_field_name: string | null
+  extra_body_json: string | null
   created_at: string
   updated_at: string
 }
 
 export type ComfyWorkflowPresetPayload = {
   name: string
+  kind: 'comfyui' | 'openai_images_compatible'
   description?: string | null
-  workflow_json: string
   is_default: boolean
-  positive_node_id: string
-  positive_input_name: string
+  comfy_base_url?: string | null
+  workflow_json?: string | null
+  positive_node_id?: string | null
+  positive_input_name?: string | null
   negative_node_id?: string | null
   negative_input_name?: string | null
   seed_node_id?: string | null
   seed_input_name?: string | null
+  api_base_url?: string | null
+  endpoint_path?: string | null
+  api_key?: string | null
+  model?: string | null
+  size?: string | null
+  response_format?: string | null
+  seed_field_name?: string | null
+  negative_prompt_field_name?: string | null
+  extra_body_json?: string | null
 }
 
 export type GeneratedImage = {
@@ -54,7 +76,7 @@ export type ImageGenerationPage = {
 }
 
 export type GenerateImagesPayload = {
-  workflow_preset_id: number
+  tool_preset_id: number
   poll_interval_seconds: number
   candidates_per_page: number
   negative_prompt?: string | null
@@ -100,14 +122,14 @@ const requestJson = async <T>(url: string, options: RequestInit = {}): Promise<T
 }
 
 export const listComfyWorkflows = async (): Promise<ComfyWorkflowPreset[]> => {
-  const result = await requestJson<{ items: ComfyWorkflowPreset[] }>('/api/image-generation/workflows')
+  const result = await requestJson<{ items: ComfyWorkflowPreset[] }>('/api/image-generation/tools')
   return result.items
 }
 
 export const createComfyWorkflow = (
   payload: ComfyWorkflowPresetPayload,
 ): Promise<ComfyWorkflowPreset> =>
-  requestJson<ComfyWorkflowPreset>('/api/image-generation/workflows', {
+  requestJson<ComfyWorkflowPreset>('/api/image-generation/tools', {
     method: 'POST',
     body: JSON.stringify(payload),
   })
@@ -116,13 +138,13 @@ export const updateComfyWorkflow = (
   workflowId: number,
   payload: ComfyWorkflowPresetPayload,
 ): Promise<ComfyWorkflowPreset> =>
-  requestJson<ComfyWorkflowPreset>(`/api/image-generation/workflows/${workflowId}`, {
+  requestJson<ComfyWorkflowPreset>(`/api/image-generation/tools/${workflowId}`, {
     method: 'PUT',
     body: JSON.stringify(payload),
   })
 
 export const deleteComfyWorkflow = (workflowId: number): Promise<void> =>
-  requestJson<void>(`/api/image-generation/workflows/${workflowId}`, {
+  requestJson<void>(`/api/image-generation/tools/${workflowId}`, {
     method: 'DELETE',
   })
 
@@ -152,6 +174,13 @@ export const streamGenerateImagesForTask = (
   callbacks: ImageGenerationStreamCallbacks,
 ): Promise<void> =>
   streamSse(`/api/image-generation/script-tasks/${taskId}/generate/stream`, payload, callbacks)
+
+export const streamContinueImagesForTask = (
+  taskId: number,
+  payload: GenerateImagesPayload,
+  callbacks: ImageGenerationStreamCallbacks,
+): Promise<void> =>
+  streamSse(`/api/image-generation/script-tasks/${taskId}/continue/stream`, payload, callbacks)
 
 export const streamGenerateImagesForPage = (
   pageId: number,
