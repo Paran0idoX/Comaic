@@ -4,11 +4,12 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session as SqlAlchemySession
 
 from backend.models.comic import (
+    AppSettings,
     ComicImage,
     ComicPage,
     ComicProject,
-    ComfyWorkflowPreset,
     GenerationTask,
+    ImageGenerationToolPreset,
     ImagePromptPreset,
     LLMConfig,
     OutlineCharacter,
@@ -22,11 +23,14 @@ from backend.models.comic import (
 from backend.models.enums import (
     ComicPageStatus,
     GenerationTaskStatus,
+    ImageGenerationToolKind,
     ImagePromptPresetKind,
     LLMProvider,
     OutlineVersionStatus,
+    PageScriptReviewStatus,
     ScriptGenerationMode,
     ScriptGenerationTaskStatus,
+    ScriptSectionStatus,
     SessionPurpose,
 )
 from backend.models.time import utc_now
@@ -217,6 +221,26 @@ class ComicRepository:
             select(LLMConfig).where(LLMConfig.is_active.is_(True))
         ):
             config.is_active = False
+
+    def get_app_settings(self) -> AppSettings:
+        """读取应用全局设置；首次访问时创建默认配置行。"""
+
+        settings = self.session.get(AppSettings, 1)
+        if settings is None:
+            settings = AppSettings(id=1, script_section_max_concurrency=3)
+            self.session.add(settings)
+            self.session.commit()
+            self.session.refresh(settings)
+        return settings
+
+    def update_app_settings(self, *, script_section_max_concurrency: int) -> AppSettings:
+        """更新应用全局设置。"""
+
+        settings = self.get_app_settings()
+        settings.script_section_max_concurrency = script_section_max_concurrency
+        self.session.commit()
+        self.session.refresh(settings)
+        return settings
 
     def create_session(
         self,
@@ -485,10 +509,41 @@ class ComicRepository:
             section.page_end = page_end
             section.title = title
             section.description = description
+            if section.status != ScriptSectionStatus.COMPLETED:
+                section.status = ScriptSectionStatus.GENERATING
+                section.error_message = None
 
         self.session.commit()
         self.session.refresh(section)
         return section
+
+    def update_script_section_status(
+        self,
+        *,
+        section_id: int,
+        status: ScriptSectionStatus,
+        error_message: str | None = None,
+    ) -> ScriptSection:
+        """更新分段生成状态，供继续生成和前端分段卡片使用。"""
+
+        section = self.session.get(ScriptSection, section_id)
+        if section is None:
+            raise ValueError(f"ScriptSection not found: {section_id}")
+
+        section.status = status
+        section.error_message = error_message
+        self.session.commit()
+        self.session.refresh(section)
+        return section
+
+    def reset_script_section_for_generation(self, section_id: int) -> ScriptSection:
+        """继续生成前把失败/未完成分段重新置为生成中。"""
+
+        return self.update_script_section_status(
+            section_id=section_id,
+            status=ScriptSectionStatus.GENERATING,
+            error_message=None,
+        )
 
     def get_script_section_by_no(self, *, task_id: int, section_no: int) -> ScriptSection | None:
         """读取某个脚本任务下指定编号的分段。"""
@@ -700,14 +755,38 @@ class ComicRepository:
         )
         return set(self.session.scalars(statement))
 
-    def is_script_section_completed(self, section_id: int) -> bool:
-        """判断分段内 page_start 到 page_end 的页面脚本是否已经全部落库。"""
+    def list_script_section_passed_page_nos(self, section_id: int) -> set[int]:
+        """读取某个分段下已经审查通过的页码集合。"""
+
+        statement = select(ComicPage.page_no).where(
+            ComicPage.section_id == section_id,
+            ComicPage.summary.is_not(None),
+            ComicPage.script_review_status == PageScriptReviewStatus.PASSED,
+        )
+        return set(self.session.scalars(statement))
+
+    def list_script_section_unpassed_page_nos(self, section_id: int) -> list[int]:
+        """读取分段内缺失或未审查通过的页码，继续生成只处理这些页面。"""
 
         section = self.session.get(ScriptSection, section_id)
         if section is None:
             raise ValueError(f"ScriptSection not found: {section_id}")
 
-        saved_page_nos = self.list_script_section_page_nos(section_id)
+        passed_page_nos = self.list_script_section_passed_page_nos(section_id)
+        return [
+            page_no
+            for page_no in range(section.page_start, section.page_end + 1)
+            if page_no not in passed_page_nos
+        ]
+
+    def is_script_section_completed(self, section_id: int) -> bool:
+        """判断分段内 page_start 到 page_end 的页面脚本是否全部审查通过。"""
+
+        section = self.session.get(ScriptSection, section_id)
+        if section is None:
+            raise ValueError(f"ScriptSection not found: {section_id}")
+
+        saved_page_nos = self.list_script_section_passed_page_nos(section_id)
         expected_page_nos = set(range(section.page_start, section.page_end + 1))
         return expected_page_nos.issubset(saved_page_nos)
 
@@ -967,6 +1046,8 @@ class ComicRepository:
         section_id: int | None = None,
         scene_id: int | None = None,
         character_ids: list[int] | None = None,
+        script_review_status: PageScriptReviewStatus = PageScriptReviewStatus.UNREVIEWED,
+        script_review_error: str | None = None,
     ) -> ComicPage:
         """按页码创建或更新结构化页面脚本，并标记为脚本已生成。"""
 
@@ -1000,9 +1081,87 @@ class ComicRepository:
                 )
             )
         page.status = ComicPageStatus.SCRIPT_READY
+        page.script_review_status = script_review_status
+        page.script_review_error = script_review_error
         self.session.commit()
         self.session.refresh(page)
         return page
+
+    def update_page_script_review_status(
+        self,
+        *,
+        page_id: int,
+        status: PageScriptReviewStatus,
+        error_message: str | None = None,
+    ) -> ComicPage:
+        """更新单页脚本审查状态。"""
+
+        page = self.session.get(ComicPage, page_id)
+        if page is None:
+            raise ValueError(f"ComicPage not found: {page_id}")
+
+        page.script_review_status = status
+        page.script_review_error = error_message
+        self.session.commit()
+        self.session.refresh(page)
+        return page
+
+    def update_section_pages_review_status(
+        self,
+        *,
+        section_id: int,
+        page_nos: list[int],
+        status: PageScriptReviewStatus,
+        error_message: str | None = None,
+    ) -> list[ComicPage]:
+        """批量更新一个分段内指定页码的脚本审查状态。"""
+
+        if not page_nos:
+            return []
+        pages = list(
+            self.session.scalars(
+                select(ComicPage).where(
+                    ComicPage.section_id == section_id,
+                    ComicPage.page_no.in_(page_nos),
+                )
+            )
+        )
+        for page in pages:
+            page.script_review_status = status
+            page.script_review_error = error_message
+        self.session.commit()
+        for page in pages:
+            self.session.refresh(page)
+        return pages
+
+    def mark_section_pages_review_failed(
+        self,
+        *,
+        project_id: int,
+        section_id: int,
+        page_nos: list[int],
+        error_message: str,
+    ) -> list[ComicPage]:
+        """把分段内指定页面标记为脚本异常；缺失页面创建空占位，便于前端展示和继续生成。"""
+
+        pages: list[ComicPage] = []
+        for page_no in sorted(set(page_nos)):
+            page = self.get_script_section_page(section_id=section_id, page_no=page_no)
+            if page is None:
+                page = ComicPage(
+                    project_id=project_id,
+                    section_id=section_id,
+                    page_no=page_no,
+                    status=ComicPageStatus.DRAFT,
+                )
+                self.session.add(page)
+            page.script_review_status = PageScriptReviewStatus.FAILED
+            page.script_review_error = error_message
+            pages.append(page)
+        self.session.commit()
+        for page in pages:
+            self.session.refresh(page)
+        return pages
 
     def clear_page_script(self, *, project_id: int, page_no: int) -> ComicPage:
         """清空指定页脚本；保留页面记录，便于后续继续关联 Prompt 和图片。"""
@@ -1029,6 +1188,8 @@ class ComicRepository:
         page.scene_id = None
         page.visual_characters = []
         page.status = ComicPageStatus.DRAFT
+        page.script_review_status = PageScriptReviewStatus.UNREVIEWED
+        page.script_review_error = None
         self.session.commit()
         self.session.refresh(page)
         return page
@@ -1195,20 +1356,176 @@ class ComicRepository:
         self.session.delete(preset)
         self.session.commit()
 
-    def list_comfy_workflow_presets(self) -> list[ComfyWorkflowPreset]:
-        """读取 ComfyUI workflow 配置列表，默认配置排在前面。"""
+    def list_image_generation_tool_presets(
+        self,
+        *,
+        kind: ImageGenerationToolKind | None = None,
+    ) -> list[ImageGenerationToolPreset]:
+        """读取通用生图工具配置，默认配置排在前面。"""
 
-        statement = select(ComfyWorkflowPreset).order_by(
-            ComfyWorkflowPreset.is_default.desc(),
-            ComfyWorkflowPreset.updated_at.desc(),
-            ComfyWorkflowPreset.id.desc(),
+        statement = select(ImageGenerationToolPreset)
+        if kind is not None:
+            statement = statement.where(ImageGenerationToolPreset.kind == kind)
+        statement = statement.order_by(
+            ImageGenerationToolPreset.is_default.desc(),
+            ImageGenerationToolPreset.updated_at.desc(),
+            ImageGenerationToolPreset.id.desc(),
         )
         return list(self.session.scalars(statement))
 
-    def get_comfy_workflow_preset(self, preset_id: int) -> ComfyWorkflowPreset | None:
-        """根据主键读取 ComfyUI workflow 配置。"""
+    def get_image_generation_tool_preset(self, preset_id: int) -> ImageGenerationToolPreset | None:
+        """根据主键读取通用生图工具配置。"""
 
-        return self.session.get(ComfyWorkflowPreset, preset_id)
+        return self.session.get(ImageGenerationToolPreset, preset_id)
+
+    def create_image_generation_tool_preset(
+        self,
+        *,
+        name: str,
+        kind: ImageGenerationToolKind,
+        description: str | None = None,
+        is_default: bool = False,
+        comfy_base_url: str | None = None,
+        workflow_json: str | None = None,
+        positive_node_id: str | None = None,
+        positive_input_name: str | None = None,
+        negative_node_id: str | None = None,
+        negative_input_name: str | None = None,
+        seed_node_id: str | None = None,
+        seed_input_name: str | None = None,
+        api_base_url: str | None = None,
+        endpoint_path: str | None = None,
+        api_key: str | None = None,
+        model: str | None = None,
+        size: str | None = None,
+        response_format: str | None = None,
+        seed_field_name: str | None = None,
+        negative_prompt_field_name: str | None = None,
+        extra_body_json: str | None = None,
+    ) -> ImageGenerationToolPreset:
+        """创建通用生图工具配置；同一时间只保留一个默认配置。"""
+
+        if is_default:
+            self._clear_default_image_generation_tool_presets()
+        preset = ImageGenerationToolPreset(
+            name=name,
+            description=description,
+            kind=kind,
+            is_default=is_default,
+            comfy_base_url=comfy_base_url,
+            workflow_json=workflow_json,
+            positive_node_id=positive_node_id,
+            positive_input_name=positive_input_name,
+            negative_node_id=negative_node_id,
+            negative_input_name=negative_input_name,
+            seed_node_id=seed_node_id,
+            seed_input_name=seed_input_name,
+            api_base_url=api_base_url,
+            endpoint_path=endpoint_path,
+            api_key=api_key,
+            model=model,
+            size=size,
+            response_format=response_format,
+            seed_field_name=seed_field_name,
+            negative_prompt_field_name=negative_prompt_field_name,
+            extra_body_json=extra_body_json,
+        )
+        self.session.add(preset)
+        self.session.commit()
+        self.session.refresh(preset)
+        return preset
+
+    def update_image_generation_tool_preset(
+        self,
+        *,
+        preset_id: int,
+        name: str,
+        kind: ImageGenerationToolKind,
+        description: str | None = None,
+        is_default: bool = False,
+        comfy_base_url: str | None = None,
+        workflow_json: str | None = None,
+        positive_node_id: str | None = None,
+        positive_input_name: str | None = None,
+        negative_node_id: str | None = None,
+        negative_input_name: str | None = None,
+        seed_node_id: str | None = None,
+        seed_input_name: str | None = None,
+        api_base_url: str | None = None,
+        endpoint_path: str | None = None,
+        api_key: str | None = None,
+        model: str | None = None,
+        size: str | None = None,
+        response_format: str | None = None,
+        seed_field_name: str | None = None,
+        negative_prompt_field_name: str | None = None,
+        extra_body_json: str | None = None,
+    ) -> ImageGenerationToolPreset:
+        """更新通用生图工具配置。"""
+
+        preset = self.session.get(ImageGenerationToolPreset, preset_id)
+        if preset is None:
+            raise ValueError(f"ImageGenerationToolPreset not found: {preset_id}")
+        if is_default:
+            self._clear_default_image_generation_tool_presets(except_preset_id=preset_id)
+        preset.name = name
+        preset.description = description
+        preset.kind = kind
+        preset.is_default = is_default
+        preset.comfy_base_url = comfy_base_url
+        preset.workflow_json = workflow_json
+        preset.positive_node_id = positive_node_id
+        preset.positive_input_name = positive_input_name
+        preset.negative_node_id = negative_node_id
+        preset.negative_input_name = negative_input_name
+        preset.seed_node_id = seed_node_id
+        preset.seed_input_name = seed_input_name
+        preset.api_base_url = api_base_url
+        preset.endpoint_path = endpoint_path
+        preset.api_key = api_key
+        preset.model = model
+        preset.size = size
+        preset.response_format = response_format
+        preset.seed_field_name = seed_field_name
+        preset.negative_prompt_field_name = negative_prompt_field_name
+        preset.extra_body_json = extra_body_json
+        self.session.commit()
+        self.session.refresh(preset)
+        return preset
+
+    def delete_image_generation_tool_preset(self, preset_id: int) -> None:
+        """删除通用生图工具配置；已生成图片不受影响。"""
+
+        preset = self.session.get(ImageGenerationToolPreset, preset_id)
+        if preset is None:
+            raise ValueError(f"ImageGenerationToolPreset not found: {preset_id}")
+        self.session.delete(preset)
+        self.session.commit()
+
+    def _clear_default_image_generation_tool_presets(
+        self,
+        except_preset_id: int | None = None,
+    ) -> None:
+        """确保生图工具只有一个默认项。"""
+
+        statement = select(ImageGenerationToolPreset).where(ImageGenerationToolPreset.is_default.is_(True))
+        for preset in self.session.scalars(statement):
+            if except_preset_id is not None and preset.id == except_preset_id:
+                continue
+            preset.is_default = False
+
+    def list_comfy_workflow_presets(self) -> list[ImageGenerationToolPreset]:
+        """旧接口别名：读取 ComfyUI 类型生图工具。"""
+
+        return self.list_image_generation_tool_presets(kind=ImageGenerationToolKind.COMFYUI)
+
+    def get_comfy_workflow_preset(self, preset_id: int) -> ImageGenerationToolPreset | None:
+        """旧接口别名：读取 ComfyUI 类型生图工具。"""
+
+        preset = self.get_image_generation_tool_preset(preset_id)
+        if preset is None or preset.kind != ImageGenerationToolKind.COMFYUI:
+            return None
+        return preset
 
     def create_comfy_workflow_preset(
         self,
@@ -1223,16 +1540,15 @@ class ComicRepository:
         negative_input_name: str | None = None,
         seed_node_id: str | None = None,
         seed_input_name: str | None = None,
-    ) -> ComfyWorkflowPreset:
-        """创建 ComfyUI workflow 配置；同一时间只保留一个默认配置。"""
+    ) -> ImageGenerationToolPreset:
+        """旧接口别名：创建 ComfyUI 类型生图工具。"""
 
-        if is_default:
-            self._clear_default_comfy_workflow_presets()
-        preset = ComfyWorkflowPreset(
+        return self.create_image_generation_tool_preset(
             name=name,
             description=description,
-            workflow_json=workflow_json,
+            kind=ImageGenerationToolKind.COMFYUI,
             is_default=is_default,
+            workflow_json=workflow_json,
             positive_node_id=positive_node_id,
             positive_input_name=positive_input_name,
             negative_node_id=negative_node_id,
@@ -1240,10 +1556,6 @@ class ComicRepository:
             seed_node_id=seed_node_id,
             seed_input_name=seed_input_name,
         )
-        self.session.add(preset)
-        self.session.commit()
-        self.session.refresh(preset)
-        return preset
 
     def update_comfy_workflow_preset(
         self,
@@ -1259,48 +1571,28 @@ class ComicRepository:
         negative_input_name: str | None = None,
         seed_node_id: str | None = None,
         seed_input_name: str | None = None,
-    ) -> ComfyWorkflowPreset:
-        """更新 ComfyUI workflow 配置。"""
+    ) -> ImageGenerationToolPreset:
+        """旧接口别名：更新 ComfyUI 类型生图工具。"""
 
-        preset = self.session.get(ComfyWorkflowPreset, preset_id)
-        if preset is None:
-            raise ValueError(f"ComfyWorkflowPreset not found: {preset_id}")
-        if is_default:
-            self._clear_default_comfy_workflow_presets(except_preset_id=preset_id)
-        preset.name = name
-        preset.description = description
-        preset.workflow_json = workflow_json
-        preset.is_default = is_default
-        preset.positive_node_id = positive_node_id
-        preset.positive_input_name = positive_input_name
-        preset.negative_node_id = negative_node_id
-        preset.negative_input_name = negative_input_name
-        preset.seed_node_id = seed_node_id
-        preset.seed_input_name = seed_input_name
-        self.session.commit()
-        self.session.refresh(preset)
-        return preset
+        return self.update_image_generation_tool_preset(
+            preset_id=preset_id,
+            name=name,
+            description=description,
+            kind=ImageGenerationToolKind.COMFYUI,
+            is_default=is_default,
+            workflow_json=workflow_json,
+            positive_node_id=positive_node_id,
+            positive_input_name=positive_input_name,
+            negative_node_id=negative_node_id,
+            negative_input_name=negative_input_name,
+            seed_node_id=seed_node_id,
+            seed_input_name=seed_input_name,
+        )
 
     def delete_comfy_workflow_preset(self, preset_id: int) -> None:
-        """删除 ComfyUI workflow 配置；已生成图片不受影响。"""
+        """旧接口别名：删除 ComfyUI 类型生图工具。"""
 
-        preset = self.session.get(ComfyWorkflowPreset, preset_id)
-        if preset is None:
-            raise ValueError(f"ComfyWorkflowPreset not found: {preset_id}")
-        self.session.delete(preset)
-        self.session.commit()
-
-    def _clear_default_comfy_workflow_presets(
-        self,
-        except_preset_id: int | None = None,
-    ) -> None:
-        """确保 ComfyUI workflow 配置只有一个默认项。"""
-
-        statement = select(ComfyWorkflowPreset).where(ComfyWorkflowPreset.is_default.is_(True))
-        for preset in self.session.scalars(statement):
-            if except_preset_id is not None and preset.id == except_preset_id:
-                continue
-            preset.is_default = False
+        self.delete_image_generation_tool_preset(preset_id)
 
     def _clear_default_image_prompt_presets(
         self,

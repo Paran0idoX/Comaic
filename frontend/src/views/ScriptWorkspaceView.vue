@@ -116,7 +116,9 @@ const displayedPages = computed(() => {
 })
 
 const taskTotalPages = computed(() => currentTask.value?.total_pages ?? totalPages.value)
-const completedPageCount = computed(() => pages.value.filter((page) => Boolean(page.summary)).length)
+const completedPageCount = computed(
+  () => pages.value.filter((page) => page.script_review_status === 'passed').length,
+)
 const completionPercentage = computed(() => {
   if (currentTask.value === null || taskTotalPages.value <= 0) {
     return 0
@@ -247,18 +249,37 @@ const requiredScriptFieldsFilled = () =>
       scriptForm.character_action.trim(),
   )
 
-const statusLabel = (status: string) => {
-  const key = `scripts.status.${status}`
+const reviewStatusLabel = (status: string) => {
+  const key = `scripts.reviewStatus.${status}`
   const translated = t(key)
   return translated === key ? status : translated
 }
 
-const statusTagType = (status: string) => {
-  if (status === 'script_ready') {
+const reviewStatusTagType = (status: string) => {
+  if (status === 'passed') {
     return 'success'
   }
-  if (status === 'draft') {
-    return 'info'
+  if (status === 'failed') {
+    return 'danger'
+  }
+  if (status === 'reviewing') {
+    return 'warning'
+  }
+  return 'info'
+}
+
+const sectionStatusLabel = (status: string) => {
+  const key = `scripts.sectionStatus.${status}`
+  const translated = t(key)
+  return translated === key ? status : translated
+}
+
+const sectionStatusTagType = (status: string) => {
+  if (status === 'completed') {
+    return 'success'
+  }
+  if (status === 'failed') {
+    return 'danger'
   }
   return 'warning'
 }
@@ -291,20 +312,6 @@ const scriptTaskLabel = (task: ScriptTask) =>
 
 const sectionPageRange = (section: ScriptSection) =>
   `${t('scripts.pages.pageNoPrefix')}${section.page_start}-${section.page_end}${t('scripts.pages.pageNoSuffix')}`
-
-const sectionCompleted = (section: ScriptSection) => {
-  const completed = new Set(
-    pages.value
-      .filter((page) => page.section_id === section.id && Boolean(page.summary))
-      .map((page) => page.page_no),
-  )
-  for (let pageNo = section.page_start; pageNo <= section.page_end; pageNo += 1) {
-    if (!completed.has(pageNo)) {
-      return false
-    }
-  }
-  return true
-}
 
 const firstMissingPageNo = () => {
   const total = currentTask.value?.total_pages ?? totalPages.value
@@ -443,6 +450,15 @@ const upsertPageInList = (page: ScriptPage) => {
   }
 }
 
+const upsertSectionInList = (section: ScriptSection) => {
+  const index = sections.value.findIndex((item) => item.id === section.id)
+  if (index === -1) {
+    sections.value = [...sections.value, section].sort((left, right) => left.section_no - right.section_no)
+  } else {
+    sections.value.splice(index, 1, section)
+  }
+}
+
 const loadProjects = async () => {
   loadingProjects.value = true
   try {
@@ -517,6 +533,28 @@ const loadVisualSettings = async () => {
   } finally {
     loadingVisualSettings.value = false
   }
+}
+
+let refreshingTaskStructure = false
+let pendingTaskStructureRefresh = false
+
+const refreshTaskStructure = () => {
+  if (selectedTaskId.value === null) {
+    return
+  }
+  if (refreshingTaskStructure) {
+    pendingTaskStructureRefresh = true
+    return
+  }
+
+  refreshingTaskStructure = true
+  void Promise.all([loadSections(), loadVisualSettings()]).finally(() => {
+    refreshingTaskStructure = false
+    if (pendingTaskStructureRefresh) {
+      pendingTaskStructureRefresh = false
+      refreshTaskStructure()
+    }
+  })
 }
 
 const loadScriptTasks = async (preferredTaskId?: number | null) => {
@@ -683,18 +721,31 @@ const generateBatch = async () => {
               upsertPageInList(page)
             }
           }
+          if (event === 'section_plan') {
+            if (Array.isArray(payload.sections)) {
+              sections.value = payload.sections as ScriptSection[]
+            }
+            refreshTaskStructure()
+          }
+          if (event === 'section') {
+            upsertSectionInList(payload as ScriptSection)
+            if (sections.value.length === 0 || scenes.value.length === 0) {
+              refreshTaskStructure()
+            }
+          }
           if (event === 'section_pages' && Array.isArray(payload.pages)) {
+            if (payload.section !== undefined) {
+              upsertSectionInList(payload.section as ScriptSection)
+            }
             for (const page of payload.pages as ScriptPage[]) {
               upsertPageInList(page)
             }
-            void loadSections()
-            void loadVisualSettings()
+            refreshTaskStructure()
           }
           if (event === 'done') {
             void loadScriptTasks(currentTaskId.value)
             void loadPages()
-            void loadSections()
-            void loadVisualSettings()
+            refreshTaskStructure()
             ElMessage.success(t('scripts.messages.batchSuccess'))
           }
           if (event === 'suspended') {
@@ -736,18 +787,31 @@ const continueBatch = async () => {
       {
         onEvent: (event, payload) => {
           addProgressEvent(event, payload)
+          if (event === 'section_plan') {
+            if (Array.isArray(payload.sections)) {
+              sections.value = payload.sections as ScriptSection[]
+            }
+            refreshTaskStructure()
+          }
+          if (event === 'section') {
+            upsertSectionInList(payload as ScriptSection)
+            if (sections.value.length === 0 || scenes.value.length === 0) {
+              refreshTaskStructure()
+            }
+          }
           if (event === 'section_pages' && Array.isArray(payload.pages)) {
+            if (payload.section !== undefined) {
+              upsertSectionInList(payload.section as ScriptSection)
+            }
             for (const page of payload.pages as ScriptPage[]) {
               upsertPageInList(page)
             }
-            void loadSections()
-            void loadVisualSettings()
+            refreshTaskStructure()
           }
           if (event === 'done') {
             void loadScriptTasks(selectedTaskId.value)
             void loadPages()
-            void loadSections()
-            void loadVisualSettings()
+            refreshTaskStructure()
             ElMessage.success(t('scripts.messages.continueSuccess'))
           }
           if (event === 'suspended') {
@@ -1266,13 +1330,12 @@ onActivated(async () => {
                 </span>
                 <span>{{ section.title }}</span>
                 <small>{{ section.description }}</small>
-                <el-tag :type="sectionCompleted(section) ? 'success' : 'info'" effect="light">
-                  {{
-                    sectionCompleted(section)
-                      ? t('scripts.sections.completed')
-                      : t('scripts.sections.pending')
-                  }}
+                <el-tag :type="sectionStatusTagType(section.status)" effect="light">
+                  {{ sectionStatusLabel(section.status) }}
                 </el-tag>
+                <small v-if="section.error_message" class="script-section-item__error">
+                  {{ section.error_message }}
+                </small>
               </button>
             </div>
           </div>
@@ -1307,9 +1370,15 @@ onActivated(async () => {
             <el-table-column prop="page_no" :label="t('scripts.pages.columns.pageNo')" width="88" />
             <el-table-column :label="t('scripts.pages.columns.status')" width="130">
               <template #default="{ row }">
-                <el-tag :type="statusTagType(row.status)" effect="light">
-                  {{ statusLabel(row.status) }}
-                </el-tag>
+                <el-tooltip
+                  :disabled="!row.script_review_error"
+                  :content="row.script_review_error"
+                  placement="top"
+                >
+                  <el-tag :type="reviewStatusTagType(row.script_review_status)" effect="light">
+                    {{ reviewStatusLabel(row.script_review_status) }}
+                  </el-tag>
+                </el-tooltip>
               </template>
             </el-table-column>
             <el-table-column :label="t('scripts.pages.columns.updatedAt')" width="136">
@@ -1787,6 +1856,11 @@ onActivated(async () => {
   line-height: 1.5;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 3;
+}
+
+.script-section-item__error {
+  color: #dc2626 !important;
+  -webkit-line-clamp: 2 !important;
 }
 
 .script-progress__scroll {

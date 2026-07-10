@@ -19,13 +19,26 @@ from backend.models.comic import (
     ScriptScene,
     ScriptSection,
 )
-from backend.models.enums import ScriptGenerationMode, ScriptGenerationTaskStatus
+from backend.models.enums import (
+    PageScriptReviewStatus,
+    ScriptGenerationMode,
+    ScriptGenerationTaskStatus,
+    ScriptSectionStatus,
+)
 from backend.repositories.comic_repository import ComicRepository
 from backend.services.task_runtime import RuntimeTaskType, running_task_registry
 
 
 AgentResultT = TypeVar("AgentResultT")
 logger = logging.getLogger(__name__)
+
+
+class SectionGenerationError(Exception):
+    """分段生成失败，并携带本次应标记为异常的页码。"""
+
+    def __init__(self, message: str, *, page_nos: list[int]):
+        super().__init__(message)
+        self.page_nos = page_nos
 
 
 @dataclass
@@ -37,6 +50,17 @@ class PendingSectionReview:
     visual_context: dict
     review_round: int
     task: asyncio.Task[dict]
+
+
+@dataclass
+class SectionGenerationJob:
+    """分段并发 worker 的输入快照，避免 worker 临时读取会变化的上下文。"""
+
+    section: ScriptSection
+    visual_context: dict
+    previous_context: dict
+    target_page_nos: list[int]
+    existing_pages_by_no: dict[int, dict]
 
 
 class ScriptService:
@@ -453,181 +477,15 @@ class ScriptService:
                 yield "section", self._section_to_payload(section)
             yield "phase", {"code": "script.planning.locked"}
 
-            writer_agent = PageScriptWriterAgent()
-            supervisor_agent = ScriptSupervisorAgent()
-            pending_reviews: list[PendingSectionReview] = []
-            for section in persisted_sections:
-                if self._is_script_task_suspended(task.id):
-                    self._cancel_pending_reviews(pending_reviews)
-                    yield "suspended", {"task_id": task.id, "status": ScriptGenerationTaskStatus.SUSPENDED.value}
-                    return
-                if self.repository.is_script_section_completed(section.id):
-                    yield "phase", {
-                        "code": "script.section.skipped",
-                        "section_no": section.section_no,
-                        "page_start": section.page_start,
-                        "page_end": section.page_end,
-                    }
-                    continue
-
-                suspended, review_events = await self._drain_completed_section_reviews(
-                    pending_reviews=pending_reviews,
-                    supervisor_agent=supervisor_agent,
-                    writer_agent=writer_agent,
-                    task_id=task.id,
-                    project_id=project_id,
-                    outline=outline_version.content,
-                    total_pages=total_pages,
-                    outline_characters=outline_characters,
-                    user_requirement=user_requirement,
-                    wait=False,
-                )
-                for event_name, payload in review_events:
-                    yield event_name, payload
-                if suspended:
-                    yield "suspended", {
-                        "task_id": task.id,
-                        "status": ScriptGenerationTaskStatus.SUSPENDED.value,
-                    }
-                    return
-
-                yield "phase", {
-                    "code": "script.section.generating",
-                    "section_no": section.section_no,
-                    "page_start": section.page_start,
-                    "page_end": section.page_end,
-                }
-                visual_context = self._section_visual_context(
-                    task_id=task.id,
-                    section=section,
-                    outline_version_id=outline_version.id,
-                )
-                previous_context = self._build_previous_sections_context(
-                    task_id=task.id,
-                    current_section_no=section.section_no,
-                )
-                section_pages_by_no: dict[int, dict] = {}
-                saved_pages_by_no: dict[int, ComicPage] = {}
-                for page_no in range(section.page_start, section.page_end + 1):
-                    if self._is_script_task_suspended(task.id):
-                        self._cancel_pending_reviews(pending_reviews)
-                        yield "suspended", {
-                            "task_id": task.id,
-                            "status": ScriptGenerationTaskStatus.SUSPENDED.value,
-                        }
-                        return
-
-                    suspended, review_events = await self._drain_completed_section_reviews(
-                        pending_reviews=pending_reviews,
-                        supervisor_agent=supervisor_agent,
-                        writer_agent=writer_agent,
-                        task_id=task.id,
-                        project_id=project_id,
-                        outline=outline_version.content,
-                        total_pages=total_pages,
-                        outline_characters=outline_characters,
-                        user_requirement=user_requirement,
-                        wait=False,
-                    )
-                    for event_name, payload in review_events:
-                        yield event_name, payload
-                    if suspended:
-                        yield "suspended", {
-                            "task_id": task.id,
-                            "status": ScriptGenerationTaskStatus.SUSPENDED.value,
-                        }
-                        return
-
-                    current_pages = self._recent_section_pages_for_writer(
-                        pages_by_no=section_pages_by_no,
-                        target_page_no=page_no,
-                        include_target=False,
-                    )
-                    suspended, page_payload, saved_page, page_events = await self._generate_and_save_page(
-                        writer_agent=writer_agent,
-                        task_id=task.id,
-                        project_id=project_id,
-                        outline=outline_version.content,
-                        total_pages=total_pages,
-                        section=section,
-                        page_no=page_no,
-                        visual_context=visual_context,
-                        outline_characters=outline_characters,
-                        previous_context=previous_context,
-                        user_requirement=user_requirement,
-                        current_pages=current_pages,
-                        is_revision=False,
-                        feedback="",
-                    )
-                    for event_name, payload in page_events:
-                        yield event_name, payload
-                    if suspended:
-                        self._cancel_pending_reviews(pending_reviews)
-                        yield "suspended", {
-                            "task_id": task.id,
-                            "status": ScriptGenerationTaskStatus.SUSPENDED.value,
-                        }
-                        return
-                    if page_payload is None or saved_page is None:
-                        raise ValueError(f"第 {page_no} 页脚本生成失败。")
-                    section_pages_by_no[page_no] = page_payload
-                    saved_pages_by_no[page_no] = saved_page
-
-                section_pages = [
-                    section_pages_by_no[page_no]
-                    for page_no in sorted(section_pages_by_no)
-                ]
-                saved_pages = [
-                    saved_pages_by_no[page_no]
-                    for page_no in sorted(saved_pages_by_no)
-                ]
-                yield "phase", {"code": "script.section.saved", "section_no": section.section_no}
-                yield "section_pages", {
-                    "section": self._section_to_payload(section),
-                    "pages": [self._page_to_payload(page) for page in saved_pages],
-                    "reviews": [],
-                }
-                pending_reviews.append(
-                    self._start_section_review(
-                        supervisor_agent=supervisor_agent,
-                        outline=outline_version.content,
-                        section=section,
-                        visual_context=visual_context,
-                        outline_characters=outline_characters,
-                        pages=section_pages,
-                        review_round=1,
-                    )
-                )
-                yield "phase", {
-                    "code": "script.section.review_started",
-                    "section_no": section.section_no,
-                }
-
-            if self._is_script_task_suspended(task.id):
-                self._cancel_pending_reviews(pending_reviews)
-                yield "suspended", {"task_id": task.id, "status": ScriptGenerationTaskStatus.SUSPENDED.value}
-                return
-            while pending_reviews:
-                suspended, review_events = await self._drain_completed_section_reviews(
-                    pending_reviews=pending_reviews,
-                    supervisor_agent=supervisor_agent,
-                    writer_agent=writer_agent,
-                    task_id=task.id,
-                    project_id=project_id,
-                    outline=outline_version.content,
-                    total_pages=total_pages,
-                    outline_characters=outline_characters,
-                    user_requirement=user_requirement,
-                    wait=True,
-                )
-                for event_name, payload in review_events:
-                    yield event_name, payload
-                if suspended:
-                    self._cancel_pending_reviews(pending_reviews)
-                    yield "suspended", {
-                        "task_id": task.id,
-                        "status": ScriptGenerationTaskStatus.SUSPENDED.value,
-                    }
+            async for event_name, payload in self._stream_concurrent_sections(
+                task=task,
+                outline_version=outline_version,
+                persisted_sections=persisted_sections,
+                outline_characters=outline_characters,
+                user_requirement=user_requirement,
+            ):
+                yield event_name, payload
+                if event_name == "suspended":
                     return
             task = self.repository.update_script_task(
                 task_id=task.id,
@@ -829,6 +687,643 @@ class ScriptService:
             if page_no < target_page_no or (include_target and page_no == target_page_no)
         ]
         return [pages_by_no[page_no] for page_no in candidate_page_nos[-limit:]]
+
+    async def _stream_concurrent_sections(
+        self,
+        *,
+        task: ScriptGenerationTask,
+        outline_version: OutlineVersion,
+        persisted_sections: list[ScriptSection],
+        outline_characters: list[dict],
+        user_requirement: str,
+    ):
+        """按 section 并发生成脚本；主 generator 串行落库和输出 SSE。"""
+
+        jobs: list[SectionGenerationJob] = []
+        for section in persisted_sections:
+            if self._is_script_task_suspended(task.id):
+                yield "suspended", {
+                    "task_id": task.id,
+                    "status": ScriptGenerationTaskStatus.SUSPENDED.value,
+                }
+                return
+            if section.status == ScriptSectionStatus.COMPLETED and self.repository.is_script_section_completed(section.id):
+                yield "phase", {
+                    "code": "script.section.skipped",
+                    "section_no": section.section_no,
+                    "page_start": section.page_start,
+                    "page_end": section.page_end,
+                }
+                continue
+            target_page_nos = self.repository.list_script_section_unpassed_page_nos(section.id)
+            if not target_page_nos:
+                section = self.repository.update_script_section_status(
+                    section_id=section.id,
+                    status=ScriptSectionStatus.COMPLETED,
+                    error_message=None,
+                )
+                yield "section", self._section_to_payload(section)
+                yield "phase", {
+                    "code": "script.section.skipped",
+                    "section_no": section.section_no,
+                    "page_start": section.page_start,
+                    "page_end": section.page_end,
+                }
+                continue
+            section = self.repository.reset_script_section_for_generation(section.id)
+            yield "section", self._section_to_payload(section)
+            existing_pages_by_no = {
+                page.page_no: self._page_to_writer_payload(page)
+                for page in self.repository.list_script_task_pages(task.id)
+                if page.section_id == section.id
+                and page.script_review_status == PageScriptReviewStatus.PASSED
+                and page.summary
+            }
+            jobs.append(
+                SectionGenerationJob(
+                    section=section,
+                    visual_context=self._section_visual_context(
+                        task_id=task.id,
+                        section=section,
+                        outline_version_id=outline_version.id,
+                    ),
+                    previous_context=self._build_previous_sections_context(
+                        task_id=task.id,
+                        current_section_no=section.section_no,
+                    ),
+                    target_page_nos=target_page_nos,
+                    existing_pages_by_no=existing_pages_by_no,
+                )
+            )
+
+        if not jobs:
+            return
+
+        configured_concurrency = self.repository.get_app_settings().script_section_max_concurrency
+        worker_count = min(len(jobs), max(1, min(20, configured_concurrency)))
+        yield "phase", {
+            "code": "script.sections.concurrent_started",
+            "count": len(jobs),
+            "section_count": len(jobs),
+            "worker_count": worker_count,
+        }
+
+        job_queue: asyncio.Queue[SectionGenerationJob | None] = asyncio.Queue()
+        event_queue: asyncio.Queue[dict] = asyncio.Queue()
+        for job in jobs:
+            job_queue.put_nowait(job)
+        for _ in range(worker_count):
+            job_queue.put_nowait(None)
+
+        workers = [
+            asyncio.create_task(
+                self._section_generation_worker(
+                    worker_no=worker_no,
+                    job_queue=job_queue,
+                    event_queue=event_queue,
+                    task_id=task.id,
+                    outline=outline_version.content,
+                    total_pages=task.total_pages,
+                    outline_characters=outline_characters,
+                    user_requirement=user_requirement,
+                )
+            )
+            for worker_no in range(1, worker_count + 1)
+        ]
+        completed_workers = 0
+        saved_pages_by_section: dict[int, dict[int, ComicPage]] = {}
+
+        try:
+            while completed_workers < worker_count:
+                if self._is_script_task_suspended(task.id):
+                    for worker in workers:
+                        worker.cancel()
+                    yield "suspended", {
+                        "task_id": task.id,
+                        "status": ScriptGenerationTaskStatus.SUSPENDED.value,
+                    }
+                    return
+                try:
+                    message = await asyncio.wait_for(event_queue.get(), timeout=1)
+                except asyncio.TimeoutError:
+                    continue
+
+                message_type = message.get("type")
+                if message_type == "worker_done":
+                    completed_workers += 1
+                    continue
+                if message_type == "worker_error":
+                    for worker in workers:
+                        worker.cancel()
+                    failed_section = message.get("section")
+                    if isinstance(failed_section, ScriptSection):
+                        error_message = str(message["error"])
+                        self.repository.update_script_section_status(
+                            section_id=failed_section.id,
+                            status=ScriptSectionStatus.FAILED,
+                            error_message=error_message,
+                        )
+                        failed_pages = self.repository.mark_section_pages_review_failed(
+                            project_id=task.project_id,
+                            section_id=failed_section.id,
+                            page_nos=list(message.get("target_page_nos", [])),
+                            error_message=error_message,
+                        )
+                        for page in failed_pages:
+                            yield "page", {
+                                "action": "updated",
+                                "page": self._page_to_payload(page),
+                                "page_no": page.page_no,
+                                "revision_note": "",
+                            }
+                        yield "section", self._section_to_payload(
+                            self.repository.get_script_section_by_no(
+                                task_id=failed_section.task_id,
+                                section_no=failed_section.section_no,
+                            )
+                            or failed_section
+                        )
+                    raise message["error"]
+                if message_type == "suspended":
+                    for worker in workers:
+                        worker.cancel()
+                    yield "suspended", {
+                        "task_id": task.id,
+                        "status": ScriptGenerationTaskStatus.SUSPENDED.value,
+                    }
+                    return
+                if message_type == "event":
+                    yield message["event"], message["payload"]
+                    continue
+                if message_type == "page_save":
+                    section = message["section"]
+                    page_payload = message["page_payload"]
+                    visual_settings = self._visual_settings_for_section(
+                        task_id=task.id,
+                        section_id=section.id,
+                        outline_version_id=outline_version.id,
+                        pages=[page_payload],
+                    )
+                    saved_page = self._save_section_pages(
+                        project_id=task.project_id,
+                        section=section,
+                        pages=[page_payload],
+                        visual_settings=visual_settings,
+                        script_review_status=PageScriptReviewStatus.REVIEWING,
+                    )[0]
+                    saved_pages_by_section.setdefault(section.id, {})[saved_page.page_no] = saved_page
+                    yield "page", {
+                        "action": "updated" if message.get("is_revision") else "created",
+                        "page": self._page_to_payload(saved_page),
+                        "page_no": saved_page.page_no,
+                        "revision_note": page_payload.get("revision_note", ""),
+                    }
+                    yield "phase", {
+                        "code": "script.page.saved",
+                        "section_no": section.section_no,
+                        "page_no": saved_page.page_no,
+                    }
+                    continue
+                if message_type == "section_review_passed":
+                    section = message["section"]
+                    page_nos = list(message.get("page_nos", []))
+                    passed_pages = self.repository.update_section_pages_review_status(
+                        section_id=section.id,
+                        page_nos=page_nos,
+                        status=PageScriptReviewStatus.PASSED,
+                        error_message=None,
+                    )
+                    for page in passed_pages:
+                        yield "page", {
+                            "action": "updated",
+                            "page": self._page_to_payload(page),
+                            "page_no": page.page_no,
+                            "revision_note": "",
+                        }
+                    completed_section = self.repository.update_script_section_status(
+                        section_id=section.id,
+                        status=ScriptSectionStatus.COMPLETED,
+                        error_message=None,
+                    )
+                    yield "section", self._section_to_payload(completed_section)
+                    section_pages = self.repository.list_script_task_pages(task.id)
+                    section_pages = [
+                        page for page in section_pages if page.section_id == completed_section.id
+                    ]
+                    yield "section_pages", {
+                        "section": self._section_to_payload(completed_section),
+                        "pages": [self._page_to_payload(page) for page in section_pages],
+                        "reviews": [],
+                    }
+                    continue
+                if message_type == "section_pages":
+                    section = message["section"]
+                    saved_pages_by_no = saved_pages_by_section.get(section.id, {})
+                    section_saved_pages = [
+                        saved_pages_by_no[page_no]
+                        for page_no in sorted(saved_pages_by_no)
+                    ]
+                    yield "section_pages", {
+                        "section": self._section_to_payload(section),
+                        "pages": [self._page_to_payload(page) for page in section_saved_pages],
+                        "reviews": message.get("reviews", []),
+                    }
+        finally:
+            for worker in workers:
+                if not worker.done():
+                    worker.cancel()
+            await asyncio.gather(*workers, return_exceptions=True)
+
+    async def _section_generation_worker(
+        self,
+        *,
+        worker_no: int,
+        job_queue: asyncio.Queue[SectionGenerationJob | None],
+        event_queue: asyncio.Queue[dict],
+        task_id: int,
+        outline: str,
+        total_pages: int,
+        outline_characters: list[dict],
+        user_requirement: str,
+    ) -> None:
+        """并发 worker：顺序处理分段队列，内部不直接写数据库。"""
+
+        writer_agent = PageScriptWriterAgent()
+        supervisor_agent = ScriptSupervisorAgent()
+        try:
+            while True:
+                job = await job_queue.get()
+                try:
+                    if job is None:
+                        return
+                    await self._run_section_generation_job(
+                        worker_no=worker_no,
+                        event_queue=event_queue,
+                        task_id=task_id,
+                        outline=outline,
+                        total_pages=total_pages,
+                        outline_characters=outline_characters,
+                        user_requirement=user_requirement,
+                        writer_agent=writer_agent,
+                        supervisor_agent=supervisor_agent,
+                        job=job,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - worker 失败由主 generator 统一处理
+                    failed_page_nos = getattr(exc, "page_nos", None)
+                    await event_queue.put(
+                        {
+                            "type": "worker_error",
+                            "section": job.section if job is not None else None,
+                            "section_no": job.section.section_no if job is not None else None,
+                            "target_page_nos": failed_page_nos
+                            if isinstance(failed_page_nos, list)
+                            else (job.target_page_nos if job is not None else []),
+                            "error": exc,
+                        }
+                    )
+                    return
+                finally:
+                    job_queue.task_done()
+        finally:
+            await event_queue.put({"type": "worker_done", "worker_no": worker_no})
+
+    async def _run_section_generation_job(
+        self,
+        *,
+        worker_no: int,
+        event_queue: asyncio.Queue[dict],
+        task_id: int,
+        outline: str,
+        total_pages: int,
+        outline_characters: list[dict],
+        user_requirement: str,
+        writer_agent: PageScriptWriterAgent,
+        supervisor_agent: ScriptSupervisorAgent,
+        job: SectionGenerationJob,
+    ) -> None:
+        """生成单个分段：逐页初稿、整段审查、问题页局部修订。"""
+
+        section = job.section
+        await self._put_sse_event(
+            event_queue,
+            "phase",
+            {
+                "code": "script.section.worker_started",
+                "worker_no": worker_no,
+                "section_no": section.section_no,
+            },
+        )
+        await self._put_sse_event(
+            event_queue,
+            "phase",
+            {
+                "code": "script.section.generating",
+                "section_no": section.section_no,
+                "page_start": section.page_start,
+                "page_end": section.page_end,
+            },
+        )
+        section_pages_by_no: dict[int, dict] = dict(job.existing_pages_by_no)
+        for page_no in job.target_page_nos:
+            current_pages = self._recent_section_pages_for_writer(
+                pages_by_no=section_pages_by_no,
+                target_page_no=page_no,
+                include_target=False,
+            )
+            suspended, page_payload, page_events = await self._generate_page_payload(
+                writer_agent=writer_agent,
+                task_id=task_id,
+                outline=outline,
+                total_pages=total_pages,
+                section=section,
+                page_no=page_no,
+                visual_context=job.visual_context,
+                outline_characters=outline_characters,
+                previous_context=job.previous_context,
+                user_requirement=user_requirement,
+                current_pages=current_pages,
+                is_revision=False,
+                feedback="",
+            )
+            for event_name, payload in page_events:
+                await self._put_sse_event(event_queue, event_name, payload)
+            if suspended:
+                await event_queue.put({"type": "suspended"})
+                return
+            if page_payload is None:
+                raise SectionGenerationError(
+                    f"第 {page_no} 页脚本生成失败。",
+                    page_nos=[page_no],
+                )
+            section_pages_by_no[page_no] = page_payload
+            await event_queue.put(
+                {
+                    "type": "page_save",
+                    "section": section,
+                    "page_payload": page_payload,
+                    "is_revision": False,
+                }
+            )
+
+        section_pages = [section_pages_by_no[page_no] for page_no in sorted(job.target_page_nos)]
+        await self._put_sse_event(
+            event_queue,
+            "phase",
+            {"code": "script.section.saved", "section_no": section.section_no},
+        )
+        await event_queue.put({"type": "section_pages", "section": section, "reviews": []})
+
+        review_round = 1
+        while True:
+            await self._put_sse_event(
+                event_queue,
+                "phase",
+                {
+                    "code": "script.section.review_started",
+                    "section_no": section.section_no,
+                    "attempt": review_round,
+                },
+            )
+            suspended, review_result = await self._await_agent_or_suspended(
+                task_id,
+                supervisor_agent.review_section_pages(
+                    outline=outline,
+                    current_section=self._section_to_payload(section),
+                    section_scenes=job.visual_context["scenes"],
+                    section_characters=job.visual_context["characters"],
+                    outline_characters=outline_characters,
+                    pages=section_pages,
+                ),
+            )
+            if suspended:
+                await event_queue.put({"type": "suspended"})
+                return
+            reviews = [
+                review if isinstance(review, dict) else {"summary": str(review)}
+                for review in review_result.get("reviews", [])
+            ]
+            for review in reviews:
+                await self._put_sse_event(
+                    event_queue,
+                    "review",
+                    {"section_no": section.section_no, **review},
+                )
+            if self._section_review_passed(review_result):
+                await event_queue.put(
+                    {
+                        "type": "section_review_passed",
+                        "section": section,
+                        "page_nos": sorted(section_pages_by_no),
+                    }
+                )
+                await self._put_sse_event(
+                    event_queue,
+                    "phase",
+                    {
+                        "code": "script.section.review_passed",
+                        "section_no": section.section_no,
+                    },
+                )
+                await self._put_sse_event(
+                    event_queue,
+                    "phase",
+                    {
+                        "code": "script.section.worker_completed",
+                        "worker_no": worker_no,
+                        "section_no": section.section_no,
+                    },
+                )
+                return
+
+            revision_page_nos = self._revision_page_nos_from_reviews(reviews)
+            if not revision_page_nos:
+                raise SectionGenerationError(
+                    f"第 {section.section_no} 段监督未通过，但没有可修订页码。",
+                    page_nos=job.target_page_nos,
+                )
+            if review_round >= 3:
+                feedback = self._review_feedback(reviews)
+                raise SectionGenerationError(
+                    f"第 {section.section_no} 段脚本连续 3 次监督未通过：{feedback}",
+                    page_nos=revision_page_nos,
+                )
+
+            await self._put_sse_event(
+                event_queue,
+                "phase",
+                {
+                    "code": "script.section.review_revision_started",
+                    "section_no": section.section_no,
+                    "revision_page_nos": revision_page_nos,
+                },
+            )
+            feedback_by_page_no = self._review_feedback_by_page_no(reviews)
+            for page_no in revision_page_nos:
+                current_pages = self._recent_section_pages_for_writer(
+                    pages_by_no=section_pages_by_no,
+                    target_page_no=page_no,
+                    include_target=True,
+                )
+                suspended, page_payload, page_events = await self._generate_page_payload(
+                    writer_agent=writer_agent,
+                    task_id=task_id,
+                    outline=outline,
+                    total_pages=total_pages,
+                    section=section,
+                    page_no=page_no,
+                    visual_context=job.visual_context,
+                    outline_characters=outline_characters,
+                    previous_context={"completed_section_summaries": [], "recent_full_sections": []},
+                    user_requirement=user_requirement,
+                    current_pages=current_pages,
+                    is_revision=True,
+                    feedback=feedback_by_page_no.get(page_no, self._review_feedback(reviews)),
+                )
+                for event_name, payload in page_events:
+                    await self._put_sse_event(event_queue, event_name, payload)
+                if suspended:
+                    await event_queue.put({"type": "suspended"})
+                    return
+                if page_payload is None:
+                    raise SectionGenerationError(
+                        f"第 {page_no} 页修订失败。",
+                        page_nos=[page_no],
+                    )
+                section_pages_by_no[page_no] = page_payload
+                await event_queue.put(
+                    {
+                        "type": "page_save",
+                        "section": section,
+                        "page_payload": page_payload,
+                        "is_revision": True,
+                    }
+                )
+            section_pages = [
+                section_pages_by_no[page_no]
+                for page_no in sorted(job.target_page_nos)
+            ]
+            review_round += 1
+
+    @staticmethod
+    async def _put_sse_event(
+        event_queue: asyncio.Queue[dict],
+        event_name: str,
+        payload: dict,
+    ) -> None:
+        """把普通 SSE 事件包装进 worker 队列。"""
+
+        await event_queue.put({"type": "event", "event": event_name, "payload": payload})
+
+    async def _generate_page_payload(
+        self,
+        *,
+        writer_agent: PageScriptWriterAgent,
+        task_id: int,
+        outline: str,
+        total_pages: int,
+        section: ScriptSection,
+        page_no: int,
+        visual_context: dict,
+        outline_characters: list[dict],
+        previous_context: dict,
+        user_requirement: str,
+        current_pages: list[dict],
+        is_revision: bool,
+        feedback: str,
+    ) -> tuple[bool, dict | None, list[tuple[str, dict]]]:
+        """只生成并校验单页 payload，不落库；并发 worker 使用。"""
+
+        events: list[tuple[str, dict]] = []
+        page_feedback = feedback
+        for attempt in range(1, 4):
+            if self._is_script_task_suspended(task_id):
+                return True, None, events
+            events.append(
+                (
+                    "phase",
+                    {
+                        "code": "script.page.generating",
+                        "section_no": section.section_no,
+                        "page_no": page_no,
+                        "attempt": attempt,
+                    },
+                )
+            )
+            suspended, raw_pages = await self._await_agent_or_suspended(
+                task_id,
+                writer_agent.generate_page(
+                    outline=outline,
+                    total_pages=total_pages,
+                    current_section=self._section_to_payload(section),
+                    target_page_no=page_no,
+                    section_scenes=visual_context["scenes"],
+                    section_characters=visual_context["characters"],
+                    previous_context=previous_context,
+                    outline_characters=outline_characters,
+                    user_requirement=user_requirement,
+                    feedback=page_feedback,
+                    is_revision=is_revision,
+                    current_pages=current_pages,
+                ),
+            )
+            if suspended:
+                return True, None, events
+            try:
+                normalized_page = self._normalize_single_page(
+                    pages=raw_pages,
+                    section=section,
+                    page_no=page_no,
+                )[0]
+                self._validate_page_visual_references(
+                    pages=[normalized_page],
+                    visual_context=visual_context,
+                )
+                return False, normalized_page, events
+            except ValueError as exc:
+                page_feedback = str(exc)
+                events.append(
+                    (
+                        "phase",
+                        {
+                            "code": "script.page.validation_failed",
+                            "section_no": section.section_no,
+                            "page_no": page_no,
+                            "attempt": attempt,
+                        },
+                    )
+                )
+                if attempt >= 3:
+                    raise ValueError(f"第 {page_no} 页脚本连续 3 次校验失败：{page_feedback}") from exc
+        return False, None, events
+
+    @staticmethod
+    def _validate_page_visual_references(*, pages: list[dict], visual_context: dict) -> None:
+        """用 worker 内存中的视觉设定先做引用校验，避免无效页面进入落库队列。"""
+
+        scene_keys = {
+            str(scene.get("scene_key", "")).strip()
+            for scene in visual_context.get("scenes", [])
+            if isinstance(scene, dict)
+        }
+        character_keys = {
+            str(character.get("character_key", "")).strip()
+            for character in visual_context.get("characters", [])
+            if isinstance(character, dict)
+        }
+        for page in pages:
+            page_no = page.get("page_no")
+            scene_key = str(page.get("scene_key", "")).strip()
+            if scene_key not in scene_keys:
+                raise ValueError(f"page {page_no} scene_key not found: {scene_key}")
+            page_character_keys = page.get("character_keys", [])
+            page_characters_text = str(page.get("characters", "")).strip()
+            if page_characters_text and page_characters_text != "无" and not page_character_keys:
+                raise ValueError(f"page {page_no} has characters text but no character_keys")
+            for character_key in page_character_keys:
+                if character_key not in character_keys:
+                    raise ValueError(f"page {page_no} character_key not found: {character_key}")
 
     async def _generate_and_save_page(
         self,
@@ -1170,6 +1665,29 @@ class ScriptService:
             "composition": str(page_payload.get("composition", "")).strip(),
             "character_action": str(page_payload.get("character_action", "")).strip(),
             "dialogue": str(page_payload.get("dialogue", "")).strip() or "无",
+        }
+
+    @staticmethod
+    def _page_to_writer_payload(page: ComicPage) -> dict:
+        """把已落库页面转成 Writer 上下文需要的结构化页面字段。"""
+
+        return {
+            "section_no": page.section.section_no if page.section is not None else None,
+            "page_no": page.page_no,
+            "scene_key": page.script_scene.scene_key if page.script_scene is not None else "",
+            "character_keys": [
+                character.character_key
+                for character in sorted(page.visual_characters, key=lambda item: item.character_key)
+            ],
+            "summary": page.summary or "",
+            "characters": page.characters or "",
+            "clothing": page.clothing or "",
+            "scene": page.scene or "",
+            "composition": page.composition or "",
+            "character_action": page.character_action or "",
+            "dialogue": page.dialogue or "无",
+            "is_revision": False,
+            "revision_note": "",
         }
 
     @staticmethod
@@ -1704,6 +2222,7 @@ class ScriptService:
         section: ScriptSection,
         pages: list[dict],
         visual_settings: dict,
+        script_review_status: PageScriptReviewStatus = PageScriptReviewStatus.UNREVIEWED,
     ) -> list[ComicPage]:
         """当前 section 通过校验后再批量落库，避免保存半成品页面。"""
 
@@ -1721,6 +2240,8 @@ class ScriptService:
                     section_id=section.id,
                     scene_id=scene_id,
                     character_ids=character_ids,
+                    script_review_status=script_review_status,
+                    script_review_error=None,
                     **self._page_payload_for_save(page_payload),
                 )
             )
@@ -1866,7 +2387,10 @@ class ScriptService:
             "composition": page.composition,
             "character_action": page.character_action,
             "dialogue": page.dialogue,
+            "image_prompt": page.image_prompt,
             "status": page.status.value,
+            "script_review_status": page.script_review_status.value,
+            "script_review_error": page.script_review_error,
             "created_at": page.created_at.isoformat(),
             "updated_at": page.updated_at.isoformat(),
         }
@@ -1953,6 +2477,8 @@ class ScriptService:
             "page_end": section.page_end,
             "title": section.title,
             "description": section.description,
+            "status": section.status.value,
+            "error_message": section.error_message,
             "created_at": section.created_at.isoformat(),
             "updated_at": section.updated_at.isoformat(),
         }

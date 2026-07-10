@@ -23,6 +23,20 @@ class SettingsService:
         ensure_llm_configs(self.repository)
         return self.repository.list_llm_configs()
 
+    def get_app_settings(self):
+        """读取应用级运行设置；不存在时使用默认值初始化。"""
+
+        return self.repository.get_app_settings()
+
+    def update_app_settings(self, *, script_section_max_concurrency: int):
+        """更新应用级运行设置。"""
+
+        if script_section_max_concurrency < 1 or script_section_max_concurrency > 20:
+            raise ValueError("script_section_max_concurrency must be between 1 and 20.")
+        return self.repository.update_app_settings(
+            script_section_max_concurrency=script_section_max_concurrency,
+        )
+
     def create_llm_config(
         self,
         *,
