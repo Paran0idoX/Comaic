@@ -94,6 +94,8 @@ def page_to_response(page: ComicPage) -> ScriptPageResponse:
         dialogue=page.dialogue,
         image_prompt=page.image_prompt,
         status=page.status.value,
+        script_review_status=page.script_review_status.value,
+        script_review_error=page.script_review_error,
         created_at=page.created_at,
         updated_at=page.updated_at,
     )
@@ -175,6 +177,8 @@ def section_to_response(section: ScriptSection) -> ScriptSectionResponse:
         page_end=section.page_end,
         title=section.title,
         description=section.description,
+        status=section.status.value,
+        error_message=section.error_message,
         created_at=section.created_at,
         updated_at=section.updated_at,
         pages=[page_to_response(page) for page in sorted(section.pages, key=lambda item: item.page_no)],

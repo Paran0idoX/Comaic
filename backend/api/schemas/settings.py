@@ -75,3 +75,15 @@ class TestLLMConfigResponse(BaseModel):
     """测试连接结果。"""
 
     ok: bool
+
+
+class AppSettingsResponse(BaseModel):
+    """应用全局设置响应。"""
+
+    script_section_max_concurrency: int = Field(ge=1, le=20)
+
+
+class UpdateAppSettingsRequest(BaseModel):
+    """更新应用全局设置请求。"""
+
+    script_section_max_concurrency: int = Field(ge=1, le=20)

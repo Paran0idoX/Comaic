@@ -11,11 +11,14 @@ from backend.api.schemas.image_generation import (
     ComfyWorkflowPresetResponse,
     GenerateImagesRequest,
     GenerationTaskResponse,
+    ImageGenerationToolPresetListResponse,
+    ImageGenerationToolPresetRequest,
+    ImageGenerationToolPresetResponse,
     ImageGenerationPageListResponse,
     ImageGenerationPageResponse,
 )
 from backend.api.scripts import SSE_HEADERS, sse_event
-from backend.models.comic import ComicImage, ComicPage, ComfyWorkflowPreset, GenerationTask
+from backend.models.comic import ComicImage, ComicPage, GenerationTask, ImageGenerationToolPreset
 from backend.models.database import SessionLocal
 from backend.repositories.comic_repository import ComicRepository
 from backend.i18n.errors import AppError, http_exception, sse_error_payload
@@ -26,24 +29,38 @@ from backend.services.image_generation_service import ImageGenerationService
 router = APIRouter(prefix="/api/image-generation", tags=["image-generation"])
 
 
-def workflow_to_response(preset: ComfyWorkflowPreset) -> ComfyWorkflowPresetResponse:
-    """把 workflow 配置 ORM 对象转换为 API 响应。"""
+def tool_to_response(preset: ImageGenerationToolPreset) -> ImageGenerationToolPresetResponse:
+    """把生图工具配置 ORM 对象转换为 API 响应。"""
 
-    return ComfyWorkflowPresetResponse(
+    return ImageGenerationToolPresetResponse(
         id=preset.id,
         name=preset.name,
+        kind=preset.kind,
         description=preset.description,
-        workflow_json=preset.workflow_json,
         is_default=preset.is_default,
+        comfy_base_url=preset.comfy_base_url,
+        workflow_json=preset.workflow_json,
         positive_node_id=preset.positive_node_id,
         positive_input_name=preset.positive_input_name,
         negative_node_id=preset.negative_node_id,
         negative_input_name=preset.negative_input_name,
         seed_node_id=preset.seed_node_id,
         seed_input_name=preset.seed_input_name,
+        api_base_url=preset.api_base_url,
+        endpoint_path=preset.endpoint_path,
+        api_key=preset.api_key,
+        model=preset.model,
+        size=preset.size,
+        response_format=preset.response_format,
+        seed_field_name=preset.seed_field_name,
+        negative_prompt_field_name=preset.negative_prompt_field_name,
+        extra_body_json=preset.extra_body_json,
         created_at=preset.created_at,
         updated_at=preset.updated_at,
     )
+
+
+workflow_to_response = tool_to_response
 
 
 def image_to_response(image: ComicImage) -> ComicImageResponse:
@@ -101,6 +118,62 @@ def list_workflows() -> ComfyWorkflowPresetListResponse:
         service = ImageGenerationService(ComicRepository(db_session))
         presets = service.list_workflow_presets()
         return ComfyWorkflowPresetListResponse(items=[workflow_to_response(preset) for preset in presets])
+
+
+@router.get("/tools", response_model=ImageGenerationToolPresetListResponse)
+def list_tools() -> ImageGenerationToolPresetListResponse:
+    """读取全部生图工具配置列表。"""
+
+    with SessionLocal() as db_session:
+        service = ImageGenerationService(ComicRepository(db_session))
+        presets = service.list_tool_presets()
+        return ImageGenerationToolPresetListResponse(items=[tool_to_response(preset) for preset in presets])
+
+
+@router.post("/tools", response_model=ImageGenerationToolPresetResponse, status_code=status.HTTP_201_CREATED)
+def create_tool(
+    request: ImageGenerationToolPresetRequest,
+    http_request: Request,
+) -> ImageGenerationToolPresetResponse:
+    """创建生图工具配置。"""
+
+    with SessionLocal() as db_session:
+        service = ImageGenerationService(ComicRepository(db_session))
+        try:
+            preset = service.create_tool_preset(**request.model_dump())
+        except ValueError as exc:
+            raise http_exception(exc, request_locale(http_request)) from exc
+        return tool_to_response(preset)
+
+
+@router.put("/tools/{tool_id}", response_model=ImageGenerationToolPresetResponse)
+def update_tool(
+    tool_id: int,
+    request: ImageGenerationToolPresetRequest,
+    http_request: Request,
+) -> ImageGenerationToolPresetResponse:
+    """更新生图工具配置。"""
+
+    with SessionLocal() as db_session:
+        service = ImageGenerationService(ComicRepository(db_session))
+        try:
+            preset = service.update_tool_preset(preset_id=tool_id, **request.model_dump())
+        except ValueError as exc:
+            raise http_exception(exc, request_locale(http_request)) from exc
+        return tool_to_response(preset)
+
+
+@router.delete("/tools/{tool_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_tool(tool_id: int, http_request: Request) -> Response:
+    """删除生图工具配置。"""
+
+    with SessionLocal() as db_session:
+        service = ImageGenerationService(ComicRepository(db_session))
+        try:
+            service.delete_tool_preset(tool_id)
+        except ValueError as exc:
+            raise http_exception(exc, request_locale(http_request)) from exc
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post("/workflows", response_model=ComfyWorkflowPresetResponse, status_code=status.HTTP_201_CREATED)
@@ -184,7 +257,35 @@ def stream_generate_for_script_task(
             try:
                 async for event, payload in service.stream_generate_for_script_task(
                     task_id=task_id,
-                    workflow_preset_id=request.workflow_preset_id,
+                    tool_preset_id=request.effective_tool_preset_id,
+                    poll_interval_seconds=request.poll_interval_seconds,
+                    candidates_per_page=request.candidates_per_page,
+                    negative_prompt=request.negative_prompt,
+                ):
+                    yield sse_event(event, payload)
+            except Exception as exc:
+                yield sse_event("error", sse_error_payload(exc, locale))
+
+    return EventSourceResponse(event_generator(), headers=SSE_HEADERS, ping=5)
+
+
+@router.post("/script-tasks/{task_id}/continue/stream")
+def stream_continue_for_script_task(
+    task_id: int,
+    request: GenerateImagesRequest,
+    http_request: Request,
+) -> EventSourceResponse:
+    """继续批量生成脚本任务下缺少候选图的页面，并用 SSE 返回进度。"""
+
+    locale = request_locale(http_request)
+
+    async def event_generator():
+        with SessionLocal() as db_session:
+            service = ImageGenerationService(ComicRepository(db_session))
+            try:
+                async for event, payload in service.stream_continue_for_script_task(
+                    task_id=task_id,
+                    tool_preset_id=request.effective_tool_preset_id,
                     poll_interval_seconds=request.poll_interval_seconds,
                     candidates_per_page=request.candidates_per_page,
                     negative_prompt=request.negative_prompt,
@@ -212,7 +313,7 @@ def stream_generate_for_page(
             try:
                 async for event, payload in service.stream_generate_for_page(
                     page_id=page_id,
-                    workflow_preset_id=request.workflow_preset_id,
+                    tool_preset_id=request.effective_tool_preset_id,
                     poll_interval_seconds=request.poll_interval_seconds,
                     candidates_per_page=request.candidates_per_page,
                     negative_prompt=request.negative_prompt,
