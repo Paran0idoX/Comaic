@@ -19,6 +19,8 @@ export type ScriptPage = {
   dialogue: string | null
   image_prompt: string | null
   status: string
+  script_review_status: string
+  script_review_error: string | null
   created_at: string
   updated_at: string
 }
@@ -35,6 +37,8 @@ export type ScriptSection = {
   page_end: number
   title: string
   description: string
+  status: string
+  error_message: string | null
   created_at: string
   updated_at: string
   pages: ScriptPage[]

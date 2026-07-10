@@ -76,6 +76,8 @@ class ScriptPageResponse(BaseModel):
     dialogue: str | None
     image_prompt: str | None
     status: str
+    script_review_status: str
+    script_review_error: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -90,6 +92,8 @@ class ScriptSectionResponse(BaseModel):
     page_end: int
     title: str
     description: str
+    status: str
+    error_message: str | None = None
     created_at: datetime
     updated_at: datetime
     pages: list[ScriptPageResponse] = Field(default_factory=list)
