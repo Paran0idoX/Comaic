@@ -21,11 +21,14 @@ from backend.models.database import Base
 from backend.models.enums import (
     ComicPageStatus,
     GenerationTaskStatus,
+    ImageGenerationToolKind,
     ImagePromptPresetKind,
     LLMProvider,
     OutlineVersionStatus,
+    PageScriptReviewStatus,
     ScriptGenerationMode,
     ScriptGenerationTaskStatus,
+    ScriptSectionStatus,
     SessionPurpose,
 )
 from backend.models.time import AwareUTCDateTime, utc_now
@@ -129,6 +132,43 @@ class ComfyWorkflowPreset(TimestampMixin, Base):
     negative_input_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     seed_node_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     seed_input_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
+
+class ImageGenerationToolPreset(TimestampMixin, Base):
+    """通用生图工具配置：支持 ComfyUI workflow 和 OpenAI Images 兼容 API。"""
+
+    __tablename__ = "image_generation_tool_preset"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(255))
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    kind: Mapped[ImageGenerationToolKind] = enum_column(
+        ImageGenerationToolKind,
+        index=True,
+        default=ImageGenerationToolKind.COMFYUI,
+    )
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # ComfyUI 配置。comfy_base_url 为空时回退到 COMFYUI_BASE_URL。
+    comfy_base_url: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
+    workflow_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    positive_node_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    positive_input_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    negative_node_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    negative_input_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    seed_node_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    seed_input_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
+    # OpenAI Images 兼容 API 配置。
+    api_base_url: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
+    endpoint_path: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    api_key: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    model: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    size: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    response_format: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    seed_field_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    negative_prompt_field_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    extra_body_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
 
 class LLMConfig(TimestampMixin, Base):
@@ -275,6 +315,11 @@ class ComicPage(TimestampMixin, Base):
         ComicPageStatus,
         default=ComicPageStatus.DRAFT,
     )
+    script_review_status: Mapped[PageScriptReviewStatus] = enum_column(
+        PageScriptReviewStatus,
+        default=PageScriptReviewStatus.UNREVIEWED,
+    )
+    script_review_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     # selected_image_id 指向用户最终选择的候选图；未选择前为空。
     selected_image_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("comic_image.id"),
@@ -403,6 +448,11 @@ class ScriptSection(TimestampMixin, Base):
     page_end: Mapped[int] = mapped_column(Integer)
     title: Mapped[str] = mapped_column(String(255), default="")
     description: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[ScriptSectionStatus] = enum_column(
+        ScriptSectionStatus,
+        default=ScriptSectionStatus.GENERATING,
+    )
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     task: Mapped["ScriptGenerationTask"] = relationship(back_populates="sections")
     pages: Mapped[list["ComicPage"]] = relationship(back_populates="section")
