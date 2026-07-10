@@ -6,6 +6,7 @@ from backend.models.comic import (
     ComicProject,
     ComfyWorkflowPreset,
     GenerationTask,
+    ImageGenerationToolPreset,
     LLMConfig,
     OutlineCharacter,
     OutlineVersion,
@@ -14,9 +15,12 @@ from backend.models.comic import (
 from backend.models.enums import (
     ComicPageStatus,
     GenerationTaskStatus,
+    ImageGenerationToolKind,
     LLMProvider,
     OutlineVersionStatus,
+    PageScriptReviewStatus,
     SessionPurpose,
+    ScriptSectionStatus,
 )
 
 __all__ = [
@@ -25,13 +29,17 @@ __all__ = [
     "ComicProject",
     "ComfyWorkflowPreset",
     "GenerationTask",
+    "ImageGenerationToolPreset",
     "LLMConfig",
     "OutlineCharacter",
     "OutlineVersion",
     "Session",
     "ComicPageStatus",
     "GenerationTaskStatus",
+    "ImageGenerationToolKind",
     "LLMProvider",
     "OutlineVersionStatus",
+    "PageScriptReviewStatus",
     "SessionPurpose",
+    "ScriptSectionStatus",
 ]

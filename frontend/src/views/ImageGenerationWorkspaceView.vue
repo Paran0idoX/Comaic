@@ -11,6 +11,7 @@ import {
   listComfyWorkflows,
   listImageGenerationPages,
   selectGeneratedImage,
+  streamContinueImagesForTask,
   streamGenerateImagesForPage,
   streamGenerateImagesForTask,
   suspendImageGenerationTask,
@@ -66,6 +67,7 @@ const loading = ref(false)
 const loadingTasks = ref(false)
 const loadingPages = ref(false)
 const generating = ref(false)
+const continuing = ref(false)
 const suspending = ref(false)
 const workflowDialogVisible = ref(false)
 const workflowDialogMode = ref<'create' | 'edit'>('create')
@@ -83,7 +85,9 @@ const generationForm = reactive({
 
 const workflowForm = reactive({
   name: '',
+  kind: 'comfyui' as 'comfyui' | 'openai_images_compatible',
   description: '',
+  comfy_base_url: '',
   workflow_json: '',
   is_default: false,
   positive_node_id: '',
@@ -92,6 +96,15 @@ const workflowForm = reactive({
   negative_input_name: '',
   seed_node_id: '',
   seed_input_name: '',
+  api_base_url: '',
+  endpoint_path: '/images/generations',
+  api_key: '',
+  model: '',
+  size: '1024x1024',
+  response_format: 'b64_json',
+  seed_field_name: '',
+  negative_prompt_field_name: '',
+  extra_body_json: '',
 })
 
 const selectedProject = computed(
@@ -101,8 +114,23 @@ const selectedWorkflow = computed(
   () => workflows.value.find((workflow) => workflow.id === selectedWorkflowId.value) ?? null,
 )
 const sortedPages = computed(() => [...pages.value].sort((left, right) => left.page_no - right.page_no))
+const generationRunning = computed(() => generating.value || continuing.value)
 const canGenerate = computed(
-  () => selectedTaskId.value !== null && selectedWorkflowId.value !== null && !generating.value,
+  () => selectedTaskId.value !== null && selectedWorkflowId.value !== null && !generationRunning.value,
+)
+const pagesNeedingContinuation = computed(() =>
+  pages.value.filter(
+    (page) =>
+      Boolean(page.image_prompt) &&
+      page.images.length < generationForm.candidates_per_page,
+  ),
+)
+const canContinueGeneration = computed(
+  () =>
+    selectedTaskId.value !== null &&
+    selectedWorkflowId.value !== null &&
+    pagesNeedingContinuation.value.length > 0 &&
+    !generationRunning.value,
 )
 
 const nowLabel = () => formatLocalNowTime(locale.value)
@@ -117,6 +145,11 @@ const shortText = (value: string | null, maxLength = 120) => {
 
 const taskLabel = (task: ScriptTask) =>
   `#${task.id} · ${task.mode} · ${task.total_pages} ${t('imageGeneration.generation.pagesUnit')}`
+
+const toolKindLabel = (kind: ComfyWorkflowPreset['kind']) =>
+  kind === 'openai_images_compatible'
+    ? t('imageGeneration.workflows.kindOpenAIImagesCompatible')
+    : t('imageGeneration.workflows.kindComfyUI')
 
 const eventType = (event: string): TimelineLevel => {
   if (event === 'done' || event === 'image' || event === 'page_done') {
@@ -203,7 +236,9 @@ const addProgressEvent = (event: string, payload: Record<string, unknown> = {}) 
 
 const resetWorkflowForm = () => {
   workflowForm.name = ''
+  workflowForm.kind = 'comfyui'
   workflowForm.description = ''
+  workflowForm.comfy_base_url = ''
   workflowForm.workflow_json = ''
   workflowForm.is_default = false
   workflowForm.positive_node_id = ''
@@ -212,6 +247,15 @@ const resetWorkflowForm = () => {
   workflowForm.negative_input_name = ''
   workflowForm.seed_node_id = ''
   workflowForm.seed_input_name = ''
+  workflowForm.api_base_url = ''
+  workflowForm.endpoint_path = '/images/generations'
+  workflowForm.api_key = ''
+  workflowForm.model = ''
+  workflowForm.size = '1024x1024'
+  workflowForm.response_format = 'b64_json'
+  workflowForm.seed_field_name = ''
+  workflowForm.negative_prompt_field_name = ''
+  workflowForm.extra_body_json = ''
 }
 
 const parseWorkflowJson = (content: string) => {
@@ -376,19 +420,48 @@ const handleWorkflowFileChange = (uploadFile: UploadFile) => {
 
 const workflowPayload = () => ({
   name: workflowForm.name.trim(),
+  kind: workflowForm.kind,
   description: workflowForm.description.trim() || null,
-  workflow_json: workflowForm.workflow_json.trim(),
   is_default: workflowForm.is_default,
-  positive_node_id: workflowForm.positive_node_id.trim(),
-  positive_input_name: workflowForm.positive_input_name.trim(),
+  comfy_base_url: workflowForm.comfy_base_url.trim() || null,
+  workflow_json: workflowForm.workflow_json.trim() || null,
+  positive_node_id: workflowForm.positive_node_id.trim() || null,
+  positive_input_name: workflowForm.positive_input_name.trim() || null,
   negative_node_id: workflowForm.negative_node_id.trim() || null,
   negative_input_name: workflowForm.negative_input_name.trim() || null,
   seed_node_id: workflowForm.seed_node_id.trim() || null,
   seed_input_name: workflowForm.seed_input_name.trim() || null,
+  api_base_url: workflowForm.api_base_url.trim() || null,
+  endpoint_path: workflowForm.endpoint_path.trim() || null,
+  api_key: workflowForm.api_key.trim() || null,
+  model: workflowForm.model.trim() || null,
+  size: workflowForm.size.trim() || null,
+  response_format: workflowForm.response_format.trim() || null,
+  seed_field_name: workflowForm.seed_field_name.trim() || null,
+  negative_prompt_field_name: workflowForm.negative_prompt_field_name.trim() || null,
+  extra_body_json: workflowForm.extra_body_json.trim() || null,
 })
 
+const validateExtraBodyJson = () => {
+  const content = workflowForm.extra_body_json.trim()
+  if (!content) {
+    return true
+  }
+  try {
+    const parsed = JSON.parse(content) as unknown
+    if (parsed === null || Array.isArray(parsed) || typeof parsed !== 'object') {
+      throw new Error('Extra body must be a JSON object.')
+    }
+    workflowForm.extra_body_json = JSON.stringify(parsed, null, 2)
+    return true
+  } catch {
+    ElMessage.warning(t('imageGeneration.errors.extraBodyJsonInvalid'))
+    return false
+  }
+}
+
 const streamPayload = () => ({
-  workflow_preset_id: selectedWorkflowId.value ?? 0,
+  tool_preset_id: selectedWorkflowId.value ?? 0,
   poll_interval_seconds: generationForm.poll_interval_seconds,
   candidates_per_page: generationForm.candidates_per_page,
   negative_prompt: generationForm.negative_prompt.trim() || null,
@@ -400,7 +473,7 @@ const ensureWorkflowSeedConfigured = () => {
     ElMessage.warning(t('imageGeneration.errors.selectWorkflow'))
     return false
   }
-  if (!workflow.seed_node_id || !workflow.seed_input_name) {
+  if (workflow.kind === 'comfyui' && (!workflow.seed_node_id || !workflow.seed_input_name)) {
     ElMessage.warning(t('imageGeneration.errors.workflowSeedRequired'))
     return false
   }
@@ -477,22 +550,47 @@ const openEditWorkflow = (workflow: ComfyWorkflowPreset) => {
   workflowDialogMode.value = 'edit'
   editingWorkflowId.value = workflow.id
   workflowForm.name = workflow.name
+  workflowForm.kind = workflow.kind
   workflowForm.description = workflow.description ?? ''
-  workflowForm.workflow_json = workflow.workflow_json
+  workflowForm.comfy_base_url = workflow.comfy_base_url ?? ''
+  workflowForm.workflow_json = workflow.workflow_json ?? ''
   workflowForm.is_default = workflow.is_default
-  workflowForm.positive_node_id = workflow.positive_node_id
-  workflowForm.positive_input_name = workflow.positive_input_name
+  workflowForm.positive_node_id = workflow.positive_node_id ?? ''
+  workflowForm.positive_input_name = workflow.positive_input_name ?? 'text'
   workflowForm.negative_node_id = workflow.negative_node_id ?? ''
   workflowForm.negative_input_name = workflow.negative_input_name ?? ''
   workflowForm.seed_node_id = workflow.seed_node_id ?? ''
   workflowForm.seed_input_name = workflow.seed_input_name ?? ''
+  workflowForm.api_base_url = workflow.api_base_url ?? ''
+  workflowForm.endpoint_path = workflow.endpoint_path ?? '/images/generations'
+  workflowForm.api_key = workflow.api_key ?? ''
+  workflowForm.model = workflow.model ?? ''
+  workflowForm.size = workflow.size ?? '1024x1024'
+  workflowForm.response_format = workflow.response_format ?? 'b64_json'
+  workflowForm.seed_field_name = workflow.seed_field_name ?? ''
+  workflowForm.negative_prompt_field_name = workflow.negative_prompt_field_name ?? ''
+  workflowForm.extra_body_json = workflow.extra_body_json ?? ''
   workflowDialogVisible.value = true
 }
 
 const saveWorkflow = async () => {
   const payload = workflowPayload()
-  if (!payload.name || !payload.workflow_json || !payload.positive_node_id || !payload.positive_input_name) {
+  if (!payload.name) {
     ElMessage.warning(t('imageGeneration.errors.emptyWorkflow'))
+    return
+  }
+  if (
+    payload.kind === 'comfyui' &&
+    (!payload.workflow_json || !payload.positive_node_id || !payload.positive_input_name)
+  ) {
+    ElMessage.warning(t('imageGeneration.errors.emptyWorkflow'))
+    return
+  }
+  if (payload.kind === 'openai_images_compatible' && (!payload.api_base_url || !payload.model)) {
+    ElMessage.warning(t('imageGeneration.errors.emptyTool'))
+    return
+  }
+  if (payload.kind === 'openai_images_compatible' && !validateExtraBodyJson()) {
     return
   }
   try {
@@ -570,6 +668,7 @@ const generateBatch = async () => {
         }
         if (event === 'suspended') {
           generating.value = false
+          continuing.value = false
           suspending.value = false
           void loadPages()
           ElMessage.warning(t('imageGeneration.messages.suspended'))
@@ -592,7 +691,71 @@ const generateBatch = async () => {
   }
 }
 
+const continueBatch = async () => {
+  if (selectedTaskId.value === null || selectedWorkflowId.value === null) {
+    ElMessage.warning(t('imageGeneration.errors.selectTaskAndWorkflow'))
+    return
+  }
+  if (pagesNeedingContinuation.value.length === 0) {
+    ElMessage.info(t('imageGeneration.messages.noPagesToContinue'))
+    return
+  }
+  if (!canContinueGeneration.value) {
+    return
+  }
+  if (!ensureWorkflowSeedConfigured()) {
+    return
+  }
+  continuing.value = true
+  try {
+    await streamContinueImagesForTask(selectedTaskId.value, streamPayload(), {
+      onEvent: (event, payload) => {
+        addProgressEvent(event, payload)
+        if (event === 'start') {
+          const taskId = Number(payload.task_id)
+          currentGenerationTaskId.value = Number.isFinite(taskId) ? taskId : null
+        }
+        if (event === 'image') {
+          upsertImage(payload)
+        }
+        if (event === 'done') {
+          void loadPages()
+          const total = Number(payload.total ?? 0)
+          ElMessage.success(
+            total === 0
+              ? t('imageGeneration.messages.noPagesToContinue')
+              : t('imageGeneration.messages.continued'),
+          )
+        }
+        if (event === 'suspended') {
+          generating.value = false
+          continuing.value = false
+          suspending.value = false
+          void loadPages()
+          ElMessage.warning(t('imageGeneration.messages.suspended'))
+        }
+      },
+      onError: (error) => {
+        const message = apiErrorMessage(error, t, t('imageGeneration.errors.continueFailed'))
+        addProgressEvent('error', {
+          code: error.code,
+          message,
+        })
+        ElMessage.error(message)
+      },
+    })
+  } catch (error) {
+    ElMessage.error(apiErrorMessage(error, t, t('imageGeneration.errors.continueFailed')))
+  } finally {
+    continuing.value = false
+    suspending.value = false
+  }
+}
+
 const generatePage = async (page: ImageGenerationPage) => {
+  if (generationRunning.value) {
+    return
+  }
   if (selectedWorkflowId.value === null) {
     ElMessage.warning(t('imageGeneration.errors.selectWorkflow'))
     return
@@ -700,7 +863,12 @@ onMounted(() => {
           </el-form-item>
           <el-form-item :label="t('imageGeneration.generation.workflow')">
             <el-select v-model="selectedWorkflowId" filterable>
-              <el-option v-for="workflow in workflows" :key="workflow.id" :label="workflow.name" :value="workflow.id" />
+              <el-option
+                v-for="workflow in workflows"
+                :key="workflow.id"
+                :label="`${workflow.name} · ${toolKindLabel(workflow.kind)}`"
+                :value="workflow.id"
+              />
             </el-select>
           </el-form-item>
           <div class="generation-config__numbers">
@@ -728,7 +896,18 @@ onMounted(() => {
             {{ t('imageGeneration.actions.generate') }}
           </el-button>
           <el-button
-            v-if="generating"
+            v-if="pagesNeedingContinuation.length > 0"
+            type="primary"
+            plain
+            :icon="Picture"
+            :loading="continuing"
+            :disabled="!canContinueGeneration"
+            @click="continueBatch"
+          >
+            {{ t('imageGeneration.actions.continue') }}
+          </el-button>
+          <el-button
+            v-if="generationRunning"
             type="warning"
             :icon="VideoPause"
             :loading="suspending"
@@ -754,7 +933,10 @@ onMounted(() => {
         <div class="workflow-list">
           <article v-for="workflow in workflows" :key="workflow.id" class="workflow-item">
             <div>
-              <strong>{{ workflow.name }}</strong>
+              <div class="workflow-item__title">
+                <strong>{{ workflow.name }}</strong>
+                <el-tag size="small" effect="plain">{{ toolKindLabel(workflow.kind) }}</el-tag>
+              </div>
               <el-tag v-if="workflow.is_default" type="success" effect="plain">
                 {{ t('imageGeneration.workflows.default') }}
               </el-tag>
@@ -845,56 +1027,108 @@ onMounted(() => {
 
     <el-dialog v-model="workflowDialogVisible" :title="t('imageGeneration.workflows.editorTitle')" width="920px">
       <el-form label-position="top">
-        <el-form-item :label="t('imageGeneration.workflows.name')">
-          <el-input v-model="workflowForm.name" />
-        </el-form-item>
+        <div class="workflow-form-grid">
+          <el-form-item :label="t('imageGeneration.workflows.name')">
+            <el-input v-model="workflowForm.name" />
+          </el-form-item>
+          <el-form-item :label="t('imageGeneration.workflows.kind')">
+            <el-select v-model="workflowForm.kind">
+              <el-option :label="t('imageGeneration.workflows.kindComfyUI')" value="comfyui" />
+              <el-option
+                :label="t('imageGeneration.workflows.kindOpenAIImagesCompatible')"
+                value="openai_images_compatible"
+              />
+            </el-select>
+          </el-form-item>
+          <el-form-item>
+            <el-checkbox v-model="workflowForm.is_default">
+              {{ t('imageGeneration.workflows.default') }}
+            </el-checkbox>
+          </el-form-item>
+        </div>
         <el-form-item :label="t('imageGeneration.workflows.descriptionLabel')">
           <el-input v-model="workflowForm.description" />
         </el-form-item>
-        <el-form-item>
-          <el-checkbox v-model="workflowForm.is_default">
-            {{ t('imageGeneration.workflows.default') }}
-          </el-checkbox>
-        </el-form-item>
-        <div class="workflow-node-grid">
-          <el-form-item :label="t('imageGeneration.workflows.positiveNode')">
-            <el-input v-model="workflowForm.positive_node_id" />
+
+        <template v-if="workflowForm.kind === 'comfyui'">
+          <el-form-item :label="t('imageGeneration.workflows.comfyBaseUrl')">
+            <el-input v-model="workflowForm.comfy_base_url" :placeholder="t('imageGeneration.workflows.comfyBaseUrlPlaceholder')" />
           </el-form-item>
-          <el-form-item :label="t('imageGeneration.workflows.positiveInput')">
-            <el-input v-model="workflowForm.positive_input_name" />
-          </el-form-item>
-          <el-form-item :label="t('imageGeneration.workflows.negativeNode')">
-            <el-input v-model="workflowForm.negative_node_id" />
-          </el-form-item>
-          <el-form-item :label="t('imageGeneration.workflows.negativeInput')">
-            <el-input v-model="workflowForm.negative_input_name" />
-          </el-form-item>
-          <el-form-item :label="t('imageGeneration.workflows.seedNode')">
-            <el-input v-model="workflowForm.seed_node_id" />
-          </el-form-item>
-          <el-form-item :label="t('imageGeneration.workflows.seedInput')">
-            <el-input v-model="workflowForm.seed_input_name" />
-          </el-form-item>
-        </div>
-        <el-form-item :label="t('imageGeneration.workflows.workflowJson')">
-          <div class="workflow-json-tools">
-            <el-upload
-              drag
-              accept=".json,application/json"
-              :show-file-list="false"
-              :auto-upload="false"
-              :on-change="handleWorkflowFileChange"
-              class="workflow-upload"
-            >
-              <el-icon class="workflow-upload__icon"><UploadFilled /></el-icon>
-              <div class="workflow-upload__text">{{ t('imageGeneration.workflows.uploadHint') }}</div>
-            </el-upload>
-            <el-button :icon="Search" @click="parseWorkflowNodesFromTextarea">
-              {{ t('imageGeneration.actions.parseWorkflowNodes') }}
-            </el-button>
+          <div class="workflow-node-grid">
+            <el-form-item :label="t('imageGeneration.workflows.positiveNode')">
+              <el-input v-model="workflowForm.positive_node_id" />
+            </el-form-item>
+            <el-form-item :label="t('imageGeneration.workflows.positiveInput')">
+              <el-input v-model="workflowForm.positive_input_name" />
+            </el-form-item>
+            <el-form-item :label="t('imageGeneration.workflows.negativeNode')">
+              <el-input v-model="workflowForm.negative_node_id" />
+            </el-form-item>
+            <el-form-item :label="t('imageGeneration.workflows.negativeInput')">
+              <el-input v-model="workflowForm.negative_input_name" />
+            </el-form-item>
+            <el-form-item :label="t('imageGeneration.workflows.seedNode')">
+              <el-input v-model="workflowForm.seed_node_id" />
+            </el-form-item>
+            <el-form-item :label="t('imageGeneration.workflows.seedInput')">
+              <el-input v-model="workflowForm.seed_input_name" />
+            </el-form-item>
           </div>
-          <el-input v-model="workflowForm.workflow_json" type="textarea" :rows="18" resize="none" />
-        </el-form-item>
+          <el-form-item :label="t('imageGeneration.workflows.workflowJson')">
+            <div class="workflow-json-tools">
+              <el-upload
+                drag
+                accept=".json,application/json"
+                :show-file-list="false"
+                :auto-upload="false"
+                :on-change="handleWorkflowFileChange"
+                class="workflow-upload"
+              >
+                <el-icon class="workflow-upload__icon"><UploadFilled /></el-icon>
+                <div class="workflow-upload__text">{{ t('imageGeneration.workflows.uploadHint') }}</div>
+              </el-upload>
+              <el-button :icon="Search" @click="parseWorkflowNodesFromTextarea">
+                {{ t('imageGeneration.actions.parseWorkflowNodes') }}
+              </el-button>
+            </div>
+            <el-input v-model="workflowForm.workflow_json" type="textarea" :rows="18" resize="none" />
+          </el-form-item>
+        </template>
+
+        <template v-else>
+          <div class="workflow-node-grid">
+            <el-form-item :label="t('imageGeneration.workflows.apiBaseUrl')">
+              <el-input v-model="workflowForm.api_base_url" placeholder="https://api.example.com/v1" />
+            </el-form-item>
+            <el-form-item :label="t('imageGeneration.workflows.endpointPath')">
+              <el-input v-model="workflowForm.endpoint_path" />
+            </el-form-item>
+            <el-form-item :label="t('imageGeneration.workflows.model')">
+              <el-input v-model="workflowForm.model" />
+            </el-form-item>
+            <el-form-item :label="t('imageGeneration.workflows.apiKey')">
+              <el-input v-model="workflowForm.api_key" type="password" show-password />
+            </el-form-item>
+            <el-form-item :label="t('imageGeneration.workflows.size')">
+              <el-input v-model="workflowForm.size" placeholder="1024x1024" />
+            </el-form-item>
+            <el-form-item :label="t('imageGeneration.workflows.responseFormat')">
+              <el-select v-model="workflowForm.response_format" allow-create filterable>
+                <el-option label="b64_json" value="b64_json" />
+                <el-option label="url" value="url" />
+              </el-select>
+            </el-form-item>
+            <el-form-item :label="t('imageGeneration.workflows.seedFieldName')">
+              <el-input v-model="workflowForm.seed_field_name" />
+            </el-form-item>
+            <el-form-item :label="t('imageGeneration.workflows.negativePromptFieldName')">
+              <el-input v-model="workflowForm.negative_prompt_field_name" />
+            </el-form-item>
+          </div>
+          <el-form-item :label="t('imageGeneration.workflows.extraBodyJson')">
+            <el-input v-model="workflowForm.extra_body_json" type="textarea" :rows="8" resize="none" />
+          </el-form-item>
+        </template>
       </el-form>
       <template #footer>
         <el-button @click="workflowDialogVisible = false">{{ t('projects.cancel') }}</el-button>
@@ -964,6 +1198,7 @@ onMounted(() => {
 }
 
 .generation-config__numbers,
+.workflow-form-grid,
 .workflow-node-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1013,6 +1248,13 @@ onMounted(() => {
 .workflow-item p {
   margin: 6px 0 0;
   color: var(--text-soft);
+}
+
+.workflow-item__title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
 }
 
 .workflow-actions {
