@@ -604,6 +604,10 @@ onMounted(() => {
             :name="IMAGE_PROMPT_PRESET_KINDS.system"
           />
           <el-tab-pane
+            :label="t('prompts.presets.shotPlannerPrompt')"
+            :name="IMAGE_PROMPT_PRESET_KINDS.shot"
+          />
+          <el-tab-pane
             :label="t('prompts.presets.negativePrompt')"
             :name="IMAGE_PROMPT_PRESET_KINDS.negative"
           />

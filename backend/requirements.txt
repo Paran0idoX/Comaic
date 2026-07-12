@@ -21,3 +21,6 @@ sse-starlette==3.0.3
 SQLAlchemy==2.0.50
 uvicorn==0.38.0
 Babel==2.17.0
+alembic==1.16.5
+Pillow==11.3.0
+python-multipart==0.0.20
