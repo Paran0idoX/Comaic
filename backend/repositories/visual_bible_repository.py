@@ -7,7 +7,6 @@ from sqlalchemy.orm import Session
 from backend.models.comic import (
     ComicImage,
     ComicProject,
-    ModelProfile,
     OutlineCharacter,
     OutfitVariant,
     SceneVisualVersion,
@@ -18,7 +17,6 @@ from backend.models.comic import (
 )
 from backend.models.enums import (
     ApprovalStatus,
-    ModelFamily,
     VisualAssetRole,
     VisualAssetSource,
     VisualAssetStorageKind,
@@ -48,36 +46,6 @@ class VisualBibleRepository:
     def get_comic_image(self, image_id: int) -> ComicImage | None:
         return self.session.get(ComicImage, image_id)
 
-    # Model profiles -----------------------------------------------------
-    def list_model_profiles(self) -> list[ModelProfile]:
-        return list(
-            self.session.scalars(
-                select(ModelProfile).order_by(
-                    ModelProfile.family,
-                    ModelProfile.is_default.desc(),
-                    ModelProfile.name,
-                )
-            )
-        )
-
-    def get_model_profile(self, profile_id: int) -> ModelProfile | None:
-        return self.session.get(ModelProfile, profile_id)
-
-    def save_model_profile(self, profile: ModelProfile) -> ModelProfile:
-        if profile.is_default:
-            others = self.session.scalars(
-                select(ModelProfile).where(
-                    ModelProfile.family == profile.family,
-                    ModelProfile.id != profile.id,
-                )
-            )
-            for other in others:
-                other.is_default = False
-        self.session.add(profile)
-        self.session.commit()
-        self.session.refresh(profile)
-        return profile
-
     # Outfit variants ---------------------------------------------------
     def list_outfit_variants(
         self,
@@ -102,6 +70,26 @@ class VisualBibleRepository:
 
     def get_outfit_variant(self, variant_id: int) -> OutfitVariant | None:
         return self.session.get(OutfitVariant, variant_id)
+
+    def get_latest_outfit_variant_by_key(
+        self,
+        *,
+        outline_character_id: int,
+        key: str,
+    ) -> OutfitVariant | None:
+        """按角色与稳定 key 读取最新服装版本，供自动草稿重试时复用。"""
+
+        statement = (
+            select(OutfitVariant)
+            .where(
+                OutfitVariant.outline_character_id == outline_character_id,
+                OutfitVariant.key == key,
+                OutfitVariant.status != ApprovalStatus.ARCHIVED,
+            )
+            .order_by(OutfitVariant.version.desc())
+            .limit(1)
+        )
+        return self.session.scalar(statement)
 
     def next_outfit_version(self, *, outline_character_id: int, key: str) -> int:
         current = self.session.scalar(
@@ -187,6 +175,36 @@ class VisualBibleRepository:
 
     def get_scene_version(self, version_id: int) -> SceneVisualVersion | None:
         return self.session.get(SceneVisualVersion, version_id)
+
+    def get_scene_version_by_content(
+        self,
+        *,
+        script_scene_id: int,
+        landmarks_json: str,
+        spatial_relations_json: str,
+        camera_presets_json: str,
+        object_states_json: str,
+        color_palette_json: str,
+        lighting_state_json: str,
+    ) -> SceneVisualVersion | None:
+        """按规范化内容匹配场景版本，避免把人工版本误当成自动草稿。"""
+
+        statement = (
+            select(SceneVisualVersion)
+            .where(
+                SceneVisualVersion.script_scene_id == script_scene_id,
+                SceneVisualVersion.status != ApprovalStatus.ARCHIVED,
+                SceneVisualVersion.landmarks_json == landmarks_json,
+                SceneVisualVersion.spatial_relations_json == spatial_relations_json,
+                SceneVisualVersion.camera_presets_json == camera_presets_json,
+                SceneVisualVersion.object_states_json == object_states_json,
+                SceneVisualVersion.color_palette_json == color_palette_json,
+                SceneVisualVersion.lighting_state_json == lighting_state_json,
+            )
+            .order_by(SceneVisualVersion.version.desc())
+            .limit(1)
+        )
+        return self.session.scalar(statement)
 
     def next_scene_version(self, script_scene_id: int) -> int:
         current = self.session.scalar(
@@ -275,7 +293,6 @@ class VisualBibleRepository:
         entity_id: int | None,
         entity_key: str | None,
         role: VisualAssetRole,
-        model_family: ModelFamily,
         storage_kind: VisualAssetStorageKind,
         source: VisualAssetSource,
         version: int,
@@ -298,7 +315,6 @@ class VisualBibleRepository:
             entity_id=entity_id,
             entity_key=entity_key,
             role=role,
-            model_family=model_family,
             storage_kind=storage_kind,
             local_path=local_path,
             renderer_locator=renderer_locator,

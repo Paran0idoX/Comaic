@@ -5,36 +5,9 @@ from pydantic import BaseModel, Field, model_validator
 
 from backend.models.enums import (
     ApprovalStatus,
-    ModelFamily,
     VisualAssetRole,
     VisualEntityType,
 )
-
-
-class ModelProfileRequest(BaseModel):
-    name: str
-    family: ModelFamily
-    variant: str = ""
-    checkpoint_name: str = ""
-    checkpoint_hash: str | None = None
-    component_manifest: dict[str, Any] = Field(default_factory=dict)
-    default_render: dict[str, Any] = Field(default_factory=dict)
-    license: str | None = None
-    commercial_use_allowed: bool | None = None
-    paid_service_allowed: bool | None = None
-    fine_tuning_allowed: bool | None = None
-    redistribution_allowed: bool | None = None
-    license_notice: str | None = None
-    is_enabled: bool = False
-    is_default: bool = False
-
-
-class ModelProfileResponse(ModelProfileRequest):
-    id: int
-    compiler_key: str
-    compiler_version: str
-    created_at: datetime
-    updated_at: datetime
 
 
 class OutfitVariantRequest(BaseModel):
@@ -64,12 +37,12 @@ class OutfitVariantResponse(OutfitVariantRequest):
 class StyleProfileRequest(BaseModel):
     key: str
     name: str
-    model_family: ModelFamily = ModelFamily.GENERIC
-    positive_tokens: str = ""
-    negative_tokens: str = ""
+    positive_tag: str = ""
+    negative_tag: str = ""
+    positive_natural_language: str = ""
+    negative_natural_language: str = ""
     color_palette: list[Any] = Field(default_factory=list)
     lighting: str = ""
-    render_defaults: dict[str, Any] = Field(default_factory=dict)
 
 
 class StyleProfileResponse(StyleProfileRequest):
@@ -111,7 +84,6 @@ class VisualAssetLocatorRequest(BaseModel):
     entity_id: int | None = Field(default=None, gt=0)
     entity_key: str | None = None
     role: VisualAssetRole
-    model_family: ModelFamily = ModelFamily.GENERIC
     renderer_locator: str
     sha256: str | None = None
     approve: bool = False
@@ -128,7 +100,6 @@ class PromoteImageRequest(BaseModel):
     entity_id: int | None = Field(default=None, gt=0)
     entity_key: str | None = None
     role: VisualAssetRole
-    model_family: ModelFamily = ModelFamily.GENERIC
     approve: bool = False
 
 
@@ -139,7 +110,6 @@ class VisualAssetResponse(BaseModel):
     entity_id: int | None
     entity_key: str | None
     role: VisualAssetRole
-    model_family: ModelFamily
     storage_kind: str
     local_path: str | None
     renderer_locator: str | None

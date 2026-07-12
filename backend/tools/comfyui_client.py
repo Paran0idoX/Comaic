@@ -113,3 +113,37 @@ class ComfyUIClient:
                     }
                 )
         return images
+
+    @staticmethod
+    def extract_execution_error(history: dict[str, Any], prompt_id: str) -> str | None:
+        """从 history 的状态消息中提取执行错误，避免无图片时无限轮询。"""
+
+        prompt_history = history.get(prompt_id, history)
+        if not isinstance(prompt_history, dict):
+            return None
+        status = prompt_history.get("status")
+        if not isinstance(status, dict):
+            return None
+        messages = status.get("messages")
+        if isinstance(messages, list):
+            for message in reversed(messages):
+                if not isinstance(message, (list, tuple)) or len(message) < 2:
+                    continue
+                kind = str(message[0])
+                if kind not in {"execution_error", "execution_interrupted"}:
+                    continue
+                details = message[1] if isinstance(message[1], dict) else {}
+                parts = [
+                    str(details.get("exception_type") or kind),
+                    str(details.get("exception_message") or "").strip(),
+                    (
+                        f"node {details.get('node_id')} ({details.get('node_type')})"
+                        if details.get("node_id") or details.get("node_type")
+                        else ""
+                    ),
+                ]
+                return ": ".join(value for value in parts if value)[:2000]
+        status_text = str(status.get("status_str") or "").lower()
+        if status_text in {"error", "failed", "failure"}:
+            return f"ComfyUI history status is {status_text}."
+        return None

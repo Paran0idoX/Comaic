@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from backend.models.enums import GenerationMode, SeedStrategy
+from backend.models.enums import GenerationMode, ImagePromptType, SeedStrategy
 from backend.services.image_generation_service import ImageGenerationService
 
 
@@ -10,9 +10,9 @@ class FakeGenerationRepository:
         self.calls = []
 
     def list_successful_runs(
-        self, *, page_id, model_profile_id, generation_mode, image_spec_id
+        self, *, page_id, prompt_type, generation_mode, image_spec_id
     ):
-        del model_profile_id, generation_mode
+        del prompt_type, generation_mode
         self.calls.append((page_id, image_spec_id))
         return self.runs_by_page.get(page_id, [])
 
@@ -26,7 +26,7 @@ def test_per_page_seeds_are_unique_and_shared_candidate_reuses_by_slot() -> None
     per_page = _service()._structured_seed_pairs(
         pages=pages,
         generation_repository=FakeGenerationRepository(),
-        model_profile_id=1,
+        prompt_type=ImagePromptType.TAG,
         generation_mode=GenerationMode.PREVIEW,
         image_spec_ids_by_page={1: 11, 2: 12, 3: 13},
         candidates_per_page=2,
@@ -39,7 +39,7 @@ def test_per_page_seeds_are_unique_and_shared_candidate_reuses_by_slot() -> None
     shared = _service()._structured_seed_pairs(
         pages=pages,
         generation_repository=FakeGenerationRepository(),
-        model_profile_id=1,
+        prompt_type=ImagePromptType.TAG,
         generation_mode=GenerationMode.PREVIEW,
         image_spec_ids_by_page={1: 11, 2: 12, 3: 13},
         candidates_per_page=2,
@@ -64,7 +64,7 @@ def test_continue_uses_successful_generation_run_slots() -> None:
     result = _service()._structured_seed_pairs(
         pages=pages,
         generation_repository=repository,
-        model_profile_id=1,
+        prompt_type=ImagePromptType.NATURAL_LANGUAGE,
         generation_mode=GenerationMode.FINAL,
         image_spec_ids_by_page={1: 11, 2: 12},
         candidates_per_page=2,

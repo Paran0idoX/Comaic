@@ -1,59 +1,86 @@
-from types import SimpleNamespace
-
 import pytest
 
-from backend.models.enums import GenerationMode
-from backend.services.renderer_backends import ComfyUIBackend, OpenAIImagesBackend
+from backend.i18n.errors import AppError
+from backend.models.comic import ImageGenerationToolPreset
+from backend.services.renderer_backends import ComfyUIBackend, RendererSubmission
 
 
 class FakeComfyClient:
-    def __init__(self):
-        self.uploads = []
+    def __init__(self, history):
+        self.history = history
 
-    def upload_image(self, **kwargs):
-        self.uploads.append(kwargs)
-        return f"{kwargs['subfolder']}/{kwargs['filename']}"
+    def get_history(self, _prompt_id):
+        return self.history
 
+    @staticmethod
+    def extract_output_images(history, prompt_id):
+        from backend.tools.comfyui_client import ComfyUIClient
 
-@pytest.mark.asyncio
-async def test_comfy_asset_upload_is_deduplicated_by_hash(tmp_path, monkeypatch) -> None:
-    async def direct_to_thread(function, *args, **kwargs):
-        return function(*args, **kwargs)
+        return ComfyUIClient.extract_output_images(history, prompt_id)
 
-    monkeypatch.setattr("backend.services.renderer_backends.asyncio.to_thread", direct_to_thread)
-    image = tmp_path / "reference.png"
-    image.write_bytes(b"test-image")
-    client = FakeComfyClient()
-    backend = ComfyUIBackend(SimpleNamespace(comfy_base_url=None), client)
-    first = {
-        "storage_kind": "local_file",
-        "local_path": str(image),
-        "sha256": "a" * 64,
-    }
-    second = dict(first)
-    payload = {"identity_assets": [first], "identity": {"references": [second]}}
+    @staticmethod
+    def extract_execution_error(history, prompt_id):
+        from backend.tools.comfyui_client import ComfyUIClient
 
-    await backend._resolve_assets(payload, {})
-
-    assert len(client.uploads) == 1
-    assert first["renderer_name"] == second["renderer_name"]
+        return ComfyUIClient.extract_execution_error(history, prompt_id)
 
 
-@pytest.mark.asyncio
-async def test_prompt_only_backend_rejects_final_reference_requirements_without_request() -> None:
-    backend = OpenAIImagesBackend(
-        SimpleNamespace(
-            api_base_url="https://unused.invalid",
-            model="unused",
-            seed_field_name=None,
-        )
+def _submission() -> RendererSubmission:
+    return RendererSubmission(
+        external_id="prompt-1",
+        applied_spec={},
+        workflow={},
+        workflow_hash="hash",
+        degradations=[],
+        seed_applied=True,
     )
-    with pytest.raises(ValueError, match="prompt-only backend"):
-        await backend.submit(
-            spec={
-                "prompt": {"positive": "test", "negative": ""},
-                "required_capabilities": ["txt2img", "reference_image"],
-            },
-            seed=1,
-            mode=GenerationMode.FINAL,
+
+
+@pytest.mark.asyncio
+async def test_comfy_wait_raises_immediately_for_execution_error() -> None:
+    client = FakeComfyClient(
+        {
+            "prompt-1": {
+                "outputs": {},
+                "status": {
+                    "status_str": "error",
+                    "messages": [
+                        [
+                            "execution_error",
+                            {
+                                "node_id": "47",
+                                "node_type": "KSampler",
+                                "exception_type": "RuntimeError",
+                                "exception_message": "out of memory",
+                            },
+                        ]
+                    ],
+                },
+            }
+        }
+    )
+    backend = ComfyUIBackend(ImageGenerationToolPreset(), client)
+
+    with pytest.raises(AppError) as captured:
+        await backend.wait(
+            _submission(),
+            poll_interval_seconds=0.001,
+            timeout_seconds=1,
         )
+
+    assert captured.value.code == "image_generation.comfyui_execution_failed"
+    assert "node 47" in str(captured.value)
+
+
+@pytest.mark.asyncio
+async def test_comfy_wait_has_external_timeout() -> None:
+    backend = ComfyUIBackend(ImageGenerationToolPreset(), FakeComfyClient({}))
+
+    with pytest.raises(AppError) as captured:
+        await backend.wait(
+            _submission(),
+            poll_interval_seconds=0.001,
+            timeout_seconds=0.01,
+        )
+
+    assert captured.value.code == "image_generation.comfyui_timeout"

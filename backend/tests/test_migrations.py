@@ -11,7 +11,9 @@ ROOT = Path(__file__).resolve().parents[2]
 def _environment(database: Path) -> dict[str, str]:
     env = os.environ.copy()
     env["DATABASE_URL"] = f"sqlite:///{database}"
-    env["PYTHONPATH"] = str(ROOT)
+    env["PYTHONPATH"] = os.pathsep.join(
+        value for value in (str(ROOT), env.get("PYTHONPATH")) if value
+    )
     return env
 
 
@@ -26,21 +28,42 @@ def _run_python(code: str, database: Path, *, check: bool = True) -> subprocess.
     )
 
 
-def test_empty_database_upgrades_to_head_and_seeds_profiles(tmp_path: Path) -> None:
+def test_empty_database_upgrades_to_model_independent_head(tmp_path: Path) -> None:
     database = tmp_path / "empty.sqlite3"
     _run_python("from backend.models.database import init_db; init_db()", database)
 
     with sqlite3.connect(database) as connection:
         revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-        profiles = connection.execute(
-            "SELECT family, is_enabled FROM model_profile ORDER BY family"
-        ).fetchall()
+        model_table = connection.execute(
+            "SELECT count(1) FROM sqlite_master WHERE type='table' AND name='model_profile'"
+        ).fetchone()[0]
+        spec_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(image_spec)").fetchall()
+        }
+        tool_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(image_generation_tool_preset)"
+            ).fetchall()
+        }
         run_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(generation_run)").fetchall()
         }
-    assert revision == "0002_visual_consistency_p0"
-    assert profiles == [("anima", 0), ("z_image", 0)]
-    assert {"workflow_hash", "seed_strategy", "applied_spec_json"} <= run_columns
+    assert revision == "0004_image_spec_compilation"
+    assert model_table == 0
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT count(1) FROM sqlite_master "
+            "WHERE type='table' AND name='image_spec_compilation'"
+        ).fetchone()[0] == 1
+    assert "prompt_type" in spec_columns
+    assert "model_profile_id" not in spec_columns
+    assert {"provider", "prompt_type"} <= tool_columns
+    assert {"kind", "model_profile_id", "runtime_manifest_json"}.isdisjoint(tool_columns)
+    assert {"workflow_hash", "seed_strategy", "provider", "prompt_type"} <= run_columns
+    assert {"model_profile_id", "model_manifest_json", "render_params_json"}.isdisjoint(
+        run_columns
+    )
     _run_python(
         "from alembic import command; from alembic.config import Config; "
         "command.check(Config('alembic.ini'))",
@@ -122,15 +145,20 @@ def test_unversioned_baseline_is_backed_up_and_preserves_data(tmp_path: Path) ->
     assert len(backups) == 1
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT title FROM comic_project WHERE id=1").fetchone()[0] == "Legacy project"
-        assert connection.execute("SELECT summary FROM comic_page WHERE id=1").fetchone()[0] == "summary"
+        assert connection.execute(
+            "SELECT summary, status FROM comic_page WHERE id=1"
+        ).fetchone() == ("summary", "script_ready")
         assert connection.execute("SELECT seed, generation_run_id FROM comic_image WHERE id=1").fetchone() == (42, None)
         assert connection.execute("SELECT default_model FROM llm_config WHERE id=1").fetchone()[0] == "model"
-        capabilities, bindings = connection.execute(
-            "SELECT capabilities_json, bindings_json FROM image_generation_tool_preset WHERE id=1"
+        capabilities, bindings, provider, prompt_type = connection.execute(
+            "SELECT capabilities_json, bindings_json, provider, prompt_type "
+            "FROM image_generation_tool_preset WHERE id=1"
         ).fetchone()
     assert '"txt2img"' in capabilities
     assert '"prompt.positive"' in bindings
     assert '"render.seed"' in bindings
+    assert provider == "comfyui"
+    assert prompt_type == "natural_language"
 
 
 def test_unknown_unversioned_schema_is_rejected_without_stamping(tmp_path: Path) -> None:

@@ -1,22 +1,23 @@
 from io import BytesIO
 import hashlib
-import json
+from dataclasses import dataclass
 from pathlib import Path
+import re
 from typing import Any
 from uuid import uuid4
 
 from PIL import Image, UnidentifiedImageError
 
 from backend.models.comic import (
-    ModelProfile,
     OutfitVariant,
     SceneVisualVersion,
+    ScriptCharacter,
+    ScriptScene,
     StyleProfile,
     VisualAsset,
 )
 from backend.models.enums import (
     ApprovalStatus,
-    ModelFamily,
     VisualAssetRole,
     VisualAssetSource,
     VisualAssetStorageKind,
@@ -32,10 +33,6 @@ IMAGE_FORMATS = {
     "JPEG": ("image/jpeg", ".jpg"),
     "WEBP": ("image/webp", ".webp"),
 }
-COMPILER_BY_FAMILY = {
-    ModelFamily.ANIMA: "anima_v1",
-    ModelFamily.Z_IMAGE: "z_image_v1",
-}
 ALLOWED_ASSET_ROLES = {
     VisualEntityType.CHARACTER: {
         VisualAssetRole.IDENTITY_FACE,
@@ -47,14 +44,12 @@ ALLOWED_ASSET_ROLES = {
         VisualAssetRole.LINEART,
         VisualAssetRole.SEGMENTATION,
         VisualAssetRole.MASK,
-        VisualAssetRole.LORA,
     },
     VisualEntityType.OUTFIT: {
         VisualAssetRole.OUTFIT_FRONT,
         VisualAssetRole.OUTFIT_BACK,
         VisualAssetRole.OUTFIT_DETAIL,
         VisualAssetRole.MASK,
-        VisualAssetRole.LORA,
     },
     VisualEntityType.SCENE: {
         VisualAssetRole.SCENE_MASTER,
@@ -64,11 +59,9 @@ ALLOWED_ASSET_ROLES = {
         VisualAssetRole.LINEART,
         VisualAssetRole.SEGMENTATION,
         VisualAssetRole.MASK,
-        VisualAssetRole.LORA,
     },
     VisualEntityType.STYLE: {
         VisualAssetRole.STYLE_REFERENCE,
-        VisualAssetRole.LORA,
     },
     VisualEntityType.PROP: {
         VisualAssetRole.PROP_REFERENCE,
@@ -85,6 +78,42 @@ ALLOWED_ASSET_ROLES = {
 }
 
 
+@dataclass
+class VisualBibleDraftSummary:
+    """脚本视觉设定同步到视觉圣经后的结果统计。"""
+
+    created_outfits: int = 0
+    reused_outfits: int = 0
+    preserved_outfits: int = 0
+    skipped_characters: int = 0
+    created_scenes: int = 0
+    reused_scenes: int = 0
+    preserved_scenes: int = 0
+
+    @property
+    def outfit_count(self) -> int:
+        """返回已绑定到视觉圣经服装版本的分段角色数量。"""
+
+        return self.created_outfits + self.reused_outfits + self.preserved_outfits
+
+    @property
+    def scene_count(self) -> int:
+        """返回已绑定到视觉圣经场景版本的脚本场景数量。"""
+
+        return self.created_scenes + self.reused_scenes + self.preserved_scenes
+
+    def event_payload(self) -> dict[str, int]:
+        """转换为稳定的 SSE 数据，不把数据库实体暴露给前端。"""
+
+        return {
+            "outfit_count": self.outfit_count,
+            "scene_count": self.scene_count,
+            "created_outfit_count": self.created_outfits,
+            "created_scene_count": self.created_scenes,
+            "skipped_character_count": self.skipped_characters,
+        }
+
+
 class VisualBibleService:
     """视觉圣经业务层：验证版本归属、资产文件和人工批准边界。"""
 
@@ -97,99 +126,158 @@ class VisualBibleService:
         self.repository = repository
         self.asset_root = Path(asset_root)
 
-    # Model profiles -----------------------------------------------------
-    def list_model_profiles(self) -> list[ModelProfile]:
-        return self.repository.list_model_profiles()
-
-    def create_model_profile(
+    def derive_script_visual_drafts(
         self,
         *,
-        name: str,
-        family: ModelFamily,
-        variant: str = "",
-        checkpoint_name: str = "",
-        checkpoint_hash: str | None = None,
-        component_manifest: dict[str, Any] | None = None,
-        default_render: dict[str, Any] | None = None,
-        license: str | None = None,
-        commercial_use_allowed: bool | None = None,
-        paid_service_allowed: bool | None = None,
-        fine_tuning_allowed: bool | None = None,
-        redistribution_allowed: bool | None = None,
-        license_notice: str | None = None,
-        is_enabled: bool = False,
-        is_default: bool = False,
-    ) -> ModelProfile:
-        if family not in COMPILER_BY_FAMILY:
-            raise ValueError("Generic model profiles cannot compile ImageSpec.")
-        if is_enabled and not checkpoint_name.strip():
-            raise ValueError("Enabled model profile requires checkpoint_name.")
-        profile = ModelProfile(
-            name=self._required(name, "Model profile name"),
-            family=family,
-            variant=variant.strip(),
-            checkpoint_name=checkpoint_name.strip(),
-            checkpoint_hash=self._optional_sha256(checkpoint_hash, "Checkpoint hash"),
-            component_manifest_json=canonical_json(component_manifest or {}),
-            compiler_key=COMPILER_BY_FAMILY[family],
-            compiler_version="1",
-            default_render_json=canonical_json(default_render or {}),
-            license=self._optional(license),
-            commercial_use_allowed=commercial_use_allowed,
-            paid_service_allowed=paid_service_allowed,
-            fine_tuning_allowed=fine_tuning_allowed,
-            redistribution_allowed=redistribution_allowed,
-            license_notice=self._optional(license_notice),
-            is_enabled=is_enabled,
-            is_default=is_default,
-        )
-        return self.repository.save_model_profile(profile)
+        project_id: int,
+        scenes: list[ScriptScene],
+        characters: list[ScriptCharacter],
+    ) -> VisualBibleDraftSummary:
+        """从已锁定脚本设定派生可审核草稿，并幂等绑定到场景和分段角色。
 
-    def update_model_profile(self, *, profile_id: int, **values: Any) -> ModelProfile:
-        profile = self.repository.get_model_profile(profile_id)
-        if profile is None:
-            raise ValueError(f"ModelProfile not found: {profile_id}")
-        family = values.get("family", profile.family)
-        if family not in COMPILER_BY_FAMILY:
-            raise ValueError("Generic model profiles cannot compile ImageSpec.")
-        checkpoint_name = str(values.get("checkpoint_name", profile.checkpoint_name)).strip()
-        is_enabled = bool(values.get("is_enabled", profile.is_enabled))
-        if is_enabled and not checkpoint_name:
-            raise ValueError("Enabled model profile requires checkpoint_name.")
-        profile.name = self._required(str(values.get("name", profile.name)), "Model profile name")
-        profile.family = family
-        profile.variant = str(values.get("variant", profile.variant)).strip()
-        profile.checkpoint_name = checkpoint_name
-        profile.checkpoint_hash = self._optional_sha256(
-            values.get("checkpoint_hash"), "Checkpoint hash"
-        )
-        profile.component_manifest_json = canonical_json(
-            values["component_manifest"]
-            if "component_manifest" in values
-            else json.loads(profile.component_manifest_json)
-        )
-        profile.default_render_json = canonical_json(
-            values["default_render"]
-            if "default_render" in values
-            else json.loads(profile.default_render_json)
-        )
-        profile.compiler_key = COMPILER_BY_FAMILY[family]
-        for field_name in (
-            "license",
-            "license_notice",
-            "commercial_use_allowed",
-            "paid_service_allowed",
-            "fine_tuning_allowed",
-            "redistribution_allowed",
-            "is_enabled",
-            "is_default",
-        ):
-            if field_name in values:
-                value = values[field_name]
-                if field_name in {"license", "license_notice"}:
-                    value = self._optional(value)
-                setattr(profile, field_name, value)
-        return self.repository.save_model_profile(profile)
+        自动派生只补齐空绑定；人工已经选中的版本不会被脚本续跑覆盖。草稿仍需
+        人工批准后才会进入最终 ImageSpec，因而不会绕过视觉圣经的审核边界。
+        """
+
+        self._require_project(project_id)
+        summary = VisualBibleDraftSummary()
+        for character in characters:
+            if character.outfit_variant_id is not None:
+                summary.preserved_outfits += 1
+                continue
+            if character.outline_character_id is None:
+                summary.skipped_characters += 1
+                continue
+
+            outline_character = self.repository.get_outline_character(
+                character.outline_character_id
+            )
+            if (
+                outline_character is None
+                or outline_character.outline_version.project_id != project_id
+            ):
+                raise ValueError(
+                    "ScriptCharacter outline baseline does not belong to project: "
+                    f"{character.id}"
+                )
+
+            clothing = self._stable_outfit_text(
+                character.current_clothing,
+                outline_character.default_clothing,
+            )
+            accessories = self._stable_outfit_text(
+                character.current_accessories,
+                outline_character.default_accessories,
+            )
+            color_palette = self._first_text(outline_character.default_color_palette)
+            if not any((clothing, accessories, color_palette)):
+                summary.skipped_characters += 1
+                continue
+
+            negative_constraints = self._join_distinct_text(
+                outline_character.negative_constraints,
+                character.negative_constraints,
+            )
+            outfit_content = {
+                "garment_components": self._text_list(clothing),
+                "layer_order": [],
+                "colors": self._text_list(color_palette),
+                "materials": [],
+                "patterns": [],
+                "accessories": self._text_list(accessories),
+                "trigger_tokens": [],
+                "negative_constraints": negative_constraints,
+            }
+            digest = hashlib.sha256(
+                canonical_json(outfit_content).encode("utf-8")
+            ).hexdigest()[:20]
+            outfit_key = f"script_{digest}"
+            outfit = self.repository.get_latest_outfit_variant_by_key(
+                outline_character_id=outline_character.id,
+                key=outfit_key,
+            )
+            if outfit is None:
+                outfit = self.repository.create_outfit_variant(
+                    project_id=project_id,
+                    outline_character_id=outline_character.id,
+                    key=outfit_key,
+                    version=self.repository.next_outfit_version(
+                        outline_character_id=outline_character.id,
+                        key=outfit_key,
+                    ),
+                    name=self._automatic_outfit_name(
+                        character.name or outline_character.name,
+                        clothing or accessories or color_palette,
+                    ),
+                    garment_components_json=canonical_json(
+                        outfit_content["garment_components"]
+                    ),
+                    layer_order_json=canonical_json(outfit_content["layer_order"]),
+                    colors_json=canonical_json(outfit_content["colors"]),
+                    materials_json=canonical_json(outfit_content["materials"]),
+                    patterns_json=canonical_json(outfit_content["patterns"]),
+                    accessories_json=canonical_json(outfit_content["accessories"]),
+                    trigger_tokens_json=canonical_json(outfit_content["trigger_tokens"]),
+                    negative_constraints=negative_constraints,
+                    status=ApprovalStatus.DRAFT,
+                )
+                summary.created_outfits += 1
+            else:
+                summary.reused_outfits += 1
+            self.repository.assign_outfit_variant(
+                script_character_id=character.id,
+                outfit_variant_id=outfit.id,
+            )
+
+        for scene in scenes:
+            if scene.task.project_id != project_id:
+                raise ValueError(
+                    f"ScriptScene does not belong to project {project_id}: {scene.id}"
+                )
+            if scene.selected_visual_version_id is not None:
+                summary.preserved_scenes += 1
+                continue
+
+            scene_content = {
+                "landmarks": self._distinct_text_list(
+                    scene.visual_anchors,
+                    scene.environment_details,
+                ),
+                "spatial_relations": {},
+                "camera_presets": [],
+                "object_states": {},
+                "color_palette": self._text_list(scene.color_palette),
+                "lighting_state": self._non_empty_mapping(
+                    lighting=scene.lighting,
+                    time_of_day=scene.time_of_day,
+                    weather=scene.weather,
+                ),
+            }
+            serialized = {
+                f"{field_name}_json": canonical_json(value)
+                for field_name, value in scene_content.items()
+            }
+            version = self.repository.get_scene_version_by_content(
+                script_scene_id=scene.id,
+                **serialized,
+            )
+            if version is None:
+                version = self.repository.create_scene_version(
+                    project_id=project_id,
+                    script_scene_id=scene.id,
+                    version=self.repository.next_scene_version(scene.id),
+                    **serialized,
+                    status=ApprovalStatus.DRAFT,
+                )
+                summary.created_scenes += 1
+            else:
+                summary.reused_scenes += 1
+            self.repository.select_scene_version(
+                script_scene_id=scene.id,
+                version_id=version.id,
+            )
+
+        return summary
 
     # Versioned visual settings ----------------------------------------
     def list_outfits(
@@ -200,6 +288,84 @@ class VisualBibleService:
             project_id=project_id,
             outline_character_id=outline_character_id,
         )
+
+    @staticmethod
+    def _first_text(*values: Any) -> str:
+        """按优先级返回第一个非空文本。"""
+
+        for value in values:
+            normalized = str(value or "").strip()
+            if normalized:
+                return normalized
+        return ""
+
+    @classmethod
+    def _stable_outfit_text(cls, current: Any, default: Any) -> str:
+        """相同基础服饰只因湿污、卷袖或持有位置变化时复用默认真值。"""
+
+        current_text = cls._first_text(current)
+        default_text = cls._first_text(default)
+        if not current_text:
+            return default_text
+        if not default_text:
+            return current_text
+
+        def head(value: str) -> str:
+            # Agent 通常先写服饰名，再用逗号或括号补充分段状态。
+            first = re.split(r"[，,。；;（(]", value, maxsplit=1)[0]
+            return "".join(first.casefold().split())
+
+        current_head = head(current_text)
+        default_head = head(default_text)
+        shorter = min(len(current_head), len(default_head))
+        longer = max(len(current_head), len(default_head), 1)
+        same_base = current_head == default_head or (
+            shorter / longer >= 0.8
+            and (current_head in default_head or default_head in current_head)
+        )
+        return default_text if same_base else current_text
+
+    @classmethod
+    def _text_list(cls, value: Any) -> list[str]:
+        """保留 Agent 自由文本整体，避免按标点误拆语义。"""
+
+        normalized = cls._first_text(value)
+        return [normalized] if normalized else []
+
+    @classmethod
+    def _distinct_text_list(cls, *values: Any) -> list[str]:
+        """去重组合多个视觉描述，保持原始出现顺序。"""
+
+        result: list[str] = []
+        for value in values:
+            normalized = cls._first_text(value)
+            if normalized and normalized not in result:
+                result.append(normalized)
+        return result
+
+    @classmethod
+    def _join_distinct_text(cls, *values: Any) -> str:
+        """合并大纲和分段禁止项，同时去掉完全重复的文本。"""
+
+        return "\n".join(cls._distinct_text_list(*values))
+
+    @classmethod
+    def _non_empty_mapping(cls, **values: Any) -> dict[str, str]:
+        """只保存脚本实际提供的场景光照状态。"""
+
+        return {
+            key: normalized
+            for key, value in values.items()
+            if (normalized := cls._first_text(value))
+        }
+
+    @classmethod
+    def _automatic_outfit_name(cls, character_name: Any, description: Any) -> str:
+        """生成可辨认但不参与稳定 key 的草稿名称。"""
+
+        name = cls._first_text(character_name) or "角色"
+        detail = cls._first_text(description) or "脚本造型"
+        return f"{name} · {detail}"[:255]
 
     def create_outfit(
         self,
@@ -245,12 +411,12 @@ class VisualBibleService:
         project_id: int,
         key: str,
         name: str,
-        model_family: ModelFamily = ModelFamily.GENERIC,
-        positive_tokens: str = "",
-        negative_tokens: str = "",
+        positive_tag: str = "",
+        negative_tag: str = "",
+        positive_natural_language: str = "",
+        negative_natural_language: str = "",
         color_palette: list[Any] | None = None,
         lighting: str = "",
-        render_defaults: dict[str, Any] | None = None,
     ) -> StyleProfile:
         self._require_project(project_id)
         normalized_key = self._required(key, "Style key")
@@ -262,12 +428,12 @@ class VisualBibleService:
                 key=normalized_key,
             ),
             name=self._required(name, "Style name"),
-            model_family=model_family,
-            positive_tokens=positive_tokens.strip(),
-            negative_tokens=negative_tokens.strip(),
+            positive_tag=positive_tag.strip(),
+            negative_tag=negative_tag.strip(),
+            positive_natural_language=positive_natural_language.strip(),
+            negative_natural_language=negative_natural_language.strip(),
             color_palette_json=canonical_json(color_palette or []),
             lighting=lighting.strip(),
-            render_defaults_json=canonical_json(render_defaults or {}),
             status=ApprovalStatus.DRAFT,
         )
 
@@ -395,7 +561,6 @@ class VisualBibleService:
         entity_id: int | None,
         entity_key: str | None,
         role: VisualAssetRole,
-        model_family: ModelFamily,
         content: bytes,
         crop_metadata: dict[str, Any] | None = None,
         mask_asset_id: int | None = None,
@@ -404,9 +569,7 @@ class VisualBibleService:
         approve: bool = False,
     ) -> VisualAsset:
         if role == VisualAssetRole.LORA:
-            raise ValueError(
-                "LoRA files cannot be uploaded to Comaic; register a renderer locator and hash."
-            )
+            raise ValueError("LoRA must be configured inside the ComfyUI workflow.")
         self._validate_asset_owner(
             project_id=project_id,
             entity_type=entity_type,
@@ -444,7 +607,6 @@ class VisualBibleService:
             entity_id=entity_id,
             entity_key=self._optional(entity_key),
             role=role,
-            model_family=model_family,
             storage_kind=VisualAssetStorageKind.LOCAL_FILE,
             source=source,
             version=version,
@@ -468,11 +630,12 @@ class VisualBibleService:
         entity_id: int | None,
         entity_key: str | None,
         role: VisualAssetRole,
-        model_family: ModelFamily,
         renderer_locator: str,
         sha256: str | None = None,
         approve: bool = False,
     ) -> VisualAsset:
+        if role == VisualAssetRole.LORA:
+            raise ValueError("LoRA must be configured inside the ComfyUI workflow.")
         self._validate_asset_owner(
             project_id=project_id,
             entity_type=entity_type,
@@ -482,11 +645,6 @@ class VisualBibleService:
         )
         locator = self._required(renderer_locator, "Renderer locator")
         normalized_hash = self._optional_sha256(sha256, "Asset sha256")
-        if role == VisualAssetRole.LORA:
-            if model_family == ModelFamily.GENERIC:
-                raise ValueError("LoRA assets require an explicit model family.")
-            if normalized_hash is None:
-                raise ValueError("LoRA assets require a sha256 hash.")
         status = ApprovalStatus.APPROVED if approve else ApprovalStatus.DRAFT
         from backend.models.time import utc_now
 
@@ -496,7 +654,6 @@ class VisualBibleService:
             entity_id=entity_id,
             entity_key=self._optional(entity_key),
             role=role,
-            model_family=model_family,
             storage_kind=VisualAssetStorageKind.RENDERER_LOCATOR,
             source=VisualAssetSource.RENDERER_LOCATOR,
             version=self.repository.next_asset_version(
@@ -520,7 +677,6 @@ class VisualBibleService:
         entity_id: int | None,
         entity_key: str | None,
         role: VisualAssetRole,
-        model_family: ModelFamily,
         approve: bool = False,
     ) -> VisualAsset:
         image = self.repository.get_comic_image(image_id)
@@ -535,7 +691,6 @@ class VisualBibleService:
             entity_id=entity_id,
             entity_key=entity_key,
             role=role,
-            model_family=model_family,
             content=path.read_bytes(),
             source=VisualAssetSource.GENERATED_IMAGE,
             source_image_id=image.id,
@@ -546,6 +701,8 @@ class VisualBibleService:
         asset = self.repository.get_asset(asset_id)
         if asset is None:
             raise ValueError(f"VisualAsset not found: {asset_id}")
+        if asset.role == VisualAssetRole.LORA and status != ApprovalStatus.ARCHIVED:
+            raise ValueError("Historical LoRA assets can only remain archived.")
         if status == ApprovalStatus.APPROVED:
             self._validate_mask_asset(
                 project_id=asset.project_id,

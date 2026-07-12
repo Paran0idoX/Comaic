@@ -2,24 +2,28 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field, model_validator
 
-from backend.models.enums import GenerationMode, ImageGenerationToolKind, SeedStrategy
+from backend.models.enums import (
+    GenerationMode,
+    ImageGenerationProvider,
+    ImagePromptType,
+    SeedStrategy,
+)
 
 
 class ImageGenerationToolPresetRequest(BaseModel):
     """创建或更新生图工具配置的请求体。"""
 
     name: str
-    kind: ImageGenerationToolKind = ImageGenerationToolKind.COMFYUI
+    provider: ImageGenerationProvider = ImageGenerationProvider.COMFYUI
+    prompt_type: ImagePromptType = ImagePromptType.NATURAL_LANGUAGE
     description: str | None = None
     is_default: bool = False
-    model_profile_id: int | None = Field(default=None, gt=0)
     capabilities: dict = Field(
         default_factory=lambda: {"features": ["txt2img"], "limits": {}}
     )
     bindings: dict = Field(
         default_factory=lambda: {"schema_version": 1, "bindings": []}
     )
-    runtime_manifest: dict = Field(default_factory=dict)
     comfy_base_url: str | None = None
     workflow_json: str | None = None
     positive_node_id: str | None = None
@@ -44,13 +48,12 @@ class ImageGenerationToolPresetResponse(BaseModel):
 
     id: int
     name: str
-    kind: ImageGenerationToolKind
+    provider: ImageGenerationProvider
+    prompt_type: ImagePromptType
     description: str | None
     is_default: bool
-    model_profile_id: int | None
     capabilities: dict
     bindings: dict
-    runtime_manifest: dict
     comfy_base_url: str | None
     workflow_json: str | None
     positive_node_id: str | None
@@ -108,7 +111,8 @@ class ImageGenerationPageResponse(BaseModel):
 
     page_id: int
     page_no: int
-    image_prompt: str | None
+    prompt_type: ImagePromptType | None
+    positive_prompt: str | None
     status: str
     selected_image_id: int | None
     latest_spec_id: int | None = None
@@ -131,8 +135,8 @@ class GenerateImagesRequest(BaseModel):
     tool_preset_id: int | None = Field(default=None, gt=0)
     workflow_preset_id: int | None = Field(default=None, gt=0)
     poll_interval_seconds: float = Field(default=2.0, ge=0.5, le=20)
+    wait_timeout_seconds: float = Field(default=600.0, ge=30, le=3600)
     candidates_per_page: int = Field(default=1, ge=1, le=4)
-    negative_prompt: str | None = None
     generation_mode: GenerationMode = GenerationMode.PREVIEW
     seed_strategy: SeedStrategy = SeedStrategy.PER_PAGE
 
@@ -173,7 +177,8 @@ class GenerationRunResponse(BaseModel):
     page_id: int
     image_spec_id: int
     tool_preset_id: int
-    model_profile_id: int
+    provider: ImageGenerationProvider
+    prompt_type: ImagePromptType
     candidate_index: int
     seed: int | None
     seed_applied: bool
@@ -184,9 +189,7 @@ class GenerationRunResponse(BaseModel):
     workflow: dict | None
     workflow_hash: str | None
     bindings: dict
-    model_manifest: dict
     resolved_assets: list
-    render_params: dict
     degradations: list
     applied_spec: dict
     error_code: str | None

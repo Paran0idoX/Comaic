@@ -9,8 +9,8 @@ from backend.models.comic import (
     ContinuityEvent,
     ImagePromptPreset,
     ImageSpec,
+    ImageSpecCompilation,
     LLMConfig,
-    ModelProfile,
     OutfitVariant,
     PageShotPlan,
     ScriptCharacter,
@@ -30,8 +30,8 @@ from backend.models.enums import (
     ContinuityTargetType,
     GenerationMode,
     ImagePromptPresetKind,
+    ImagePromptType,
 )
-from backend.models.time import utc_now
 
 
 class ImageSpecRepository:
@@ -111,17 +111,6 @@ class ImageSpecRepository:
             return None
         return self.session.get(StyleProfile, style_profile_id)
 
-    def get_model_profiles(self, profile_ids: list[int]) -> list[ModelProfile]:
-        if not profile_ids:
-            return []
-        profiles = list(
-            self.session.scalars(
-                select(ModelProfile).where(ModelProfile.id.in_(profile_ids))
-            )
-        )
-        by_id = {profile.id: profile for profile in profiles}
-        return [by_id[profile_id] for profile_id in profile_ids if profile_id in by_id]
-
     def get_prompt_preset(
         self,
         preset_id: int | None,
@@ -137,6 +126,73 @@ class ImageSpecRepository:
                 f"ImagePromptPreset {preset_id} kind must be {expected_kind.value}."
             )
         return preset
+
+    def list_prompt_presets(
+        self,
+        kind: ImagePromptPresetKind | None = None,
+    ) -> list[ImagePromptPreset]:
+        statement = select(ImagePromptPreset)
+        if kind is not None:
+            statement = statement.where(ImagePromptPreset.kind == kind)
+        return list(
+            self.session.scalars(
+                statement.order_by(
+                    ImagePromptPreset.kind,
+                    ImagePromptPreset.is_default.desc(),
+                    ImagePromptPreset.updated_at.desc(),
+                )
+            )
+        )
+
+    def create_prompt_preset(self, **values: Any) -> ImagePromptPreset:
+        item = ImagePromptPreset(**values)
+        if item.is_default:
+            self._clear_default_prompt_presets(item.kind)
+        self.session.add(item)
+        self.session.commit()
+        self.session.refresh(item)
+        return item
+
+    def update_prompt_preset(
+        self,
+        preset_id: int,
+        **values: Any,
+    ) -> ImagePromptPreset:
+        item = self.session.get(ImagePromptPreset, preset_id)
+        if item is None:
+            raise ValueError(f"ImagePromptPreset not found: {preset_id}")
+        if bool(values.get("is_default")):
+            self._clear_default_prompt_presets(
+                ImagePromptPresetKind(values.get("kind", item.kind)),
+                except_preset_id=item.id,
+            )
+        for field_name, value in values.items():
+            setattr(item, field_name, value)
+        self.session.commit()
+        self.session.refresh(item)
+        return item
+
+    def delete_prompt_preset(self, preset_id: int) -> None:
+        item = self.session.get(ImagePromptPreset, preset_id)
+        if item is None:
+            raise ValueError(f"ImagePromptPreset not found: {preset_id}")
+        self.session.delete(item)
+        self.session.commit()
+
+    def _clear_default_prompt_presets(
+        self,
+        kind: ImagePromptPresetKind,
+        *,
+        except_preset_id: int | None = None,
+    ) -> None:
+        for item in self.session.scalars(
+            select(ImagePromptPreset).where(
+                ImagePromptPreset.kind == kind,
+                ImagePromptPreset.is_default.is_(True),
+            )
+        ):
+            if item.id != except_preset_id:
+                item.is_default = False
 
     def get_default_prompt_preset(
         self,
@@ -311,7 +367,7 @@ class ImageSpecRepository:
         page_id: int,
         snapshot_id: int,
         shot_plan_id: int,
-        model_profile_id: int,
+        prompt_type: ImagePromptType,
         style_profile_id: int | None,
         negative_prompt_preset_id: int | None,
         generation_mode: GenerationMode,
@@ -329,7 +385,7 @@ class ImageSpecRepository:
             page_id=page_id,
             snapshot_id=snapshot_id,
             shot_plan_id=shot_plan_id,
-            model_profile_id=model_profile_id,
+            prompt_type=prompt_type,
             style_profile_id=style_profile_id,
             negative_prompt_preset_id=negative_prompt_preset_id,
             generation_mode=generation_mode,
@@ -348,21 +404,23 @@ class ImageSpecRepository:
         self.session.refresh(item)
         return item
 
-    def update_legacy_prompt_cache(self, page_id: int, prompt: str) -> None:
-        page = self.session.get(ComicPage, page_id)
-        if page is None:
-            raise ValueError(f"ComicPage not found: {page_id}")
-        page.image_prompt = prompt
+    def mark_pages_spec_ready(self, page_ids: list[int]) -> None:
+        """三种规格全部落库后再推进页面状态，避免半成品被生成链路读取。"""
+
         from backend.models.enums import ComicPageStatus
 
-        page.status = ComicPageStatus.PROMPT_READY
+        for page_id in page_ids:
+            page = self.session.get(ComicPage, page_id)
+            if page is None:
+                raise ValueError(f"ComicPage not found: {page_id}")
+            page.status = ComicPageStatus.SPEC_READY
         self.session.commit()
 
     def list_latest_specs(
         self,
         *,
         task_id: int,
-        model_profile_id: int | None = None,
+        prompt_type: ImagePromptType | None = None,
     ) -> list[ImageSpec]:
         statement = (
             select(ImageSpec)
@@ -370,27 +428,121 @@ class ImageSpecRepository:
             .join(ScriptSection, ComicPage.section_id == ScriptSection.id)
             .where(ScriptSection.task_id == task_id)
             .options(
-                selectinload(ImageSpec.model_profile),
                 selectinload(ImageSpec.snapshot),
                 selectinload(ImageSpec.shot_plan),
             )
-            .order_by(ImageSpec.page_id, ImageSpec.model_profile_id, ImageSpec.id.desc())
+            .order_by(ImageSpec.page_id, ImageSpec.prompt_type, ImageSpec.id.desc())
         )
-        if model_profile_id is not None:
-            statement = statement.where(ImageSpec.model_profile_id == model_profile_id)
+        if prompt_type is not None:
+            statement = statement.where(ImageSpec.prompt_type == prompt_type)
         rows = list(self.session.scalars(statement))
-        latest: dict[tuple[int, int, GenerationMode], ImageSpec] = {}
+        latest: dict[tuple[int, ImagePromptType, GenerationMode], ImageSpec] = {}
         for item in rows:
-            key = (item.page_id, item.model_profile_id, item.generation_mode)
+            key = (item.page_id, item.prompt_type, item.generation_mode)
             latest.setdefault(key, item)
         return list(latest.values())
+
+    # ImageSpec batch compilation ------------------------------------
+    def create_image_spec_compilation(
+        self,
+        *,
+        task_id: int,
+        continuity_compilation_id: int,
+        source_hash: str,
+        generation_mode: GenerationMode,
+        total_pages: int,
+        total_specs: int,
+    ) -> ImageSpecCompilation:
+        item = ImageSpecCompilation(
+            script_task_id=task_id,
+            continuity_compilation_id=continuity_compilation_id,
+            source_hash=source_hash,
+            status=CompilationStatus.RUNNING,
+            generation_mode=generation_mode,
+            total_pages=total_pages,
+            completed_pages=0,
+            total_specs=total_specs,
+            completed_specs=0,
+            failed_pages_json="[]",
+        )
+        self.session.add(item)
+        self.session.commit()
+        self.session.refresh(item)
+        return item
+
+    def list_shot_plans(
+        self,
+        *,
+        page_id: int,
+        snapshot_id: int,
+    ) -> list[PageShotPlan]:
+        """返回当前页面快照的历史计划，Service 再按 Prompt/模型 hash 判定复用。"""
+
+        return list(
+            self.session.scalars(
+                select(PageShotPlan)
+                .where(
+                    PageShotPlan.page_id == page_id,
+                    PageShotPlan.snapshot_id == snapshot_id,
+                )
+                .order_by(PageShotPlan.id.desc())
+            )
+        )
+
+    def update_image_spec_compilation_progress(
+        self,
+        item: ImageSpecCompilation,
+        *,
+        completed_pages: int,
+        completed_specs: int,
+        failed_pages_json: str = "[]",
+    ) -> None:
+        item.completed_pages = completed_pages
+        item.completed_specs = completed_specs
+        item.failed_pages_json = failed_pages_json
+        self.session.commit()
+
+    def complete_image_spec_compilation(self, item: ImageSpecCompilation) -> None:
+        item.status = CompilationStatus.SUCCEEDED
+        item.completed_pages = item.total_pages
+        item.completed_specs = item.total_specs
+        item.failed_pages_json = "[]"
+        item.error_code = None
+        item.error_message = None
+        self.session.commit()
+
+    def fail_image_spec_compilation(
+        self,
+        item: ImageSpecCompilation,
+        *,
+        completed_pages: int,
+        completed_specs: int,
+        failed_pages_json: str,
+        error_code: str,
+        error_message: str,
+    ) -> None:
+        item.status = CompilationStatus.FAILED
+        item.completed_pages = completed_pages
+        item.completed_specs = completed_specs
+        item.failed_pages_json = failed_pages_json
+        item.error_code = error_code
+        item.error_message = error_message
+        self.session.commit()
+
+    def list_image_spec_compilations(self, task_id: int) -> list[ImageSpecCompilation]:
+        return list(
+            self.session.scalars(
+                select(ImageSpecCompilation)
+                .where(ImageSpecCompilation.script_task_id == task_id)
+                .order_by(ImageSpecCompilation.id.desc())
+            )
+        )
 
     def get_image_spec(self, spec_id: int) -> ImageSpec | None:
         return self.session.scalar(
             select(ImageSpec)
             .where(ImageSpec.id == spec_id)
             .options(
-                selectinload(ImageSpec.model_profile),
                 selectinload(ImageSpec.snapshot),
                 selectinload(ImageSpec.shot_plan),
             )

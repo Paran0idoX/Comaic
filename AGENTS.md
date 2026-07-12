@@ -6,7 +6,7 @@
 
 `comaic` 是一个基于 LangChain 的 AI 漫画生成 Agent Demo。MVP 目标是跑通完整链路：
 
-用户输入剧情大纲和总页数 -> 生成每页漫画脚本 -> 生成每页 ComfyUI 文生图 Prompt -> 调用本地 ComfyUI 生成图片 -> 保存项目、页面、图片和任务状态 -> 人工选择每页最终图片。
+用户输入剧情大纲和总页数 -> 生成每页漫画脚本 -> 维护视觉真值 -> 为每页编译三类 ImageSpec -> 调用所选生图 Provider -> 保存项目、页面、图片和任务状态 -> 人工选择每页最终图片。
 
 当前阶段不要做复杂分镜、自动选图、复杂多 Agent 编排或过重架构。优先让链路清晰、可运行、可人工确认。
 
@@ -39,7 +39,7 @@ comaic/
 ## 前端结构
 
 - `frontend/` 使用 Vue 3 + Vite + Element Plus。
-- 当前只放 MVP 占位工作台，后续接入大纲对话、脚本确认、Prompt 确认和图片选择。
+- 当前包含大纲、分页脚本、视觉圣经、Visual Specs、图片生成、设置等 MVP 工作台。
 - 前端依赖和脚本写在 `frontend/package.json`。
 - 前端功能如果需要额外 npm 包，可以安装轻量、明确用途的依赖；安装后必须同步更新 `frontend/package.json` 和 `frontend/package-lock.json`，并在完成后运行前端类型检查或构建。
 - LLM 生成的大纲、脚本等富文本内容如果按 Markdown 展示，优先使用成熟 Markdown 渲染库；默认关闭原始 HTML 解析，避免把模型输出当成可执行 HTML。
@@ -51,10 +51,11 @@ MVP 核心表位于 `backend/models/comic.py`：
 - `comic_project`：项目标题、时间戳。项目表不保存状态、总页数、prompt、大纲或 `thread_id`。
 - `session`：通用业务会话，使用 `purpose` 区分大纲等场景，并用 `thread_id` 关联 Agent 记忆。
 - `outline_version`：大纲版本快照，归属于具体会话，每个会话只保留最近 5 个版本。
-- `comic_page`：项目页码、结构化页面脚本、图片 prompt、状态、最终选择图片。页面脚本不保存单个 `script` 字段，使用 `summary`、`characters`、`clothing`、`scene`、`composition`、`character_action`、`dialogue` 等字段表达。
+- `comic_page`：项目页码、结构化页面脚本、状态、最终选择图片。页面不保存单个 `script` 或 `image_prompt` 字段，脚本使用 `summary`、`characters`、`clothing`、`scene`、`composition`、`character_action`、`dialogue` 等字段表达。
+- `image_spec`：页面在某次视觉编译下的模型无关生图规格，每页分别保存 `tag`、`natural_language`、`hybrid` 三种 Prompt 表达。
 - `comic_image`：页面生成图片、远程/本地路径、seed、workflow、prompt、评分、是否选中。
-- `generation_task`：ComfyUI prompt id、任务状态、批量大小、错误信息。
-- `comfy_workflow_preset`：页面维护的 ComfyUI API workflow JSON 和 Prompt 注入节点配置。
+- `generation_task` / `generation_run`：批量任务状态与逐候选的 Provider、Prompt 类型、ImageSpec 溯源和外部请求 id。
+- `image_generation_tool_preset`：生图 Provider 配置；ComfyUI 保存 workflow/binding，OpenAI Images 兼容工具保存其接口配置。
 - `llm_config`：LangChain Provider 模型配置；单表保存多组 API 配置，每组用 `model_names` JSON 字段维护多个模型名，并用 `default_model` 指定该组默认模型。API Key 只保存在本地 SQLite，设置页会按本地 MVP 需求明文回显。
 
 数据库初始化入口在 `backend/models/database.py` 的 `init_db()`。默认数据库地址是 `sqlite:///data/comaic.sqlite3`，从项目根目录运行后端时会写入根目录 `data/`。
@@ -71,7 +72,7 @@ MVP 核心表位于 `backend/models/comic.py`：
 
 ## 分层原则
 
-- Agent：面向单一智能任务，例如生成分页脚本、生成图片 Prompt、调用 ComfyUI 工具。Agent 不直接操作数据库。
+- Agent：面向单一智能任务，例如生成分页脚本、提取连续性事件或规划 ShotPlan。Agent 不直接操作数据库。
 - Service：编排业务流程，例如创建项目、调用 Agent、写入 Repository、更新状态。
 - Repository：只处理数据库增删改查，不调用 LLM，也不调用 ComfyUI。
 - Tool：封装外部系统调用，例如 ComfyUI HTTP API，不写业务状态流转。
@@ -128,7 +129,7 @@ COMFYUI_BASE_URL=http://127.0.0.1:8188
 
 - Prompt 文件放在 `backend/prompts/`，优先使用 Markdown。
 - 使用 `backend.utils.prompt_loader.PromptLoader` 读取 prompt 内容。
-- 命名使用语义化英文，例如 `script_system_prompt.md`、`image_prompt_user_prompt.md`。
+- 命名使用语义化英文，例如 `script_system_prompt.md`、`shot_planner_prompt.md`。
 - `backend/prompts/ountline_system_prompt.md` 是历史拼写错误文件，仅为兼容保留；新代码使用 `backend/prompts/outline_system_prompt.md`。
 - Prompt 模板中使用 `{outline}`、`{total_pages}`、`{script}` 这类显式变量。`total_pages` 可以作为生成脚本时的输入参数，但不存入 `comic_project`。
 
@@ -195,25 +196,36 @@ pybabel compile -d backend/locales
   - `script_character` 归属于 `script_section`，`character_key` 在同一分段内唯一，并通过 `outline_character_id` 回溯到大纲角色基准。
   - `comic_page.scene_id` 和 `comic_page_character` 负责把页面绑定到具体场景和角色。
   - 页面自己的 `scene`、`characters`、`clothing` 只描述本页局部变化，不承担全局一致性职责。
+- Service 保存脚本视觉设定时，会自动派生视觉圣经草稿：
+  - 分段角色的当前服装、配件和大纲默认色彩生成 `OutfitVariant(DRAFT)`；相同角色的相同造型按内容 key 复用。
+  - 中心化场景的视觉锚点、环境、色彩和光照生成 `SceneVisualVersion(DRAFT)`；重试和继续生成不得重复创建相同内容。
+  - 自动草稿可以绑定到 `script_character` / `script_scene` 供前端审核，但只有 `APPROVED` 版本才能进入 Final ImageSpec。
+  - 已有人工绑定不得被自动派生覆盖；无法回溯到 `outline_character` 的分段角色不自动创建服装版本。
+  - 风格和参考图片没有足够的脚本来源，仍由视觉圣经页面人工维护或后续独立生成流程负责。
 - 脚本 Agent prompt 放在 `backend/prompts/script_planning_prompt.md`、`script_writer_prompt.md` 和 `script_supervisor_prompt.md`。
 
-## ImagePromptAgent 约定
+## ImageSpec / Prompt 类型约定
 
-`backend/agents/image_prompt_agent.py` 负责把页面脚本转换为文生图正向 Prompt，不负责落库。
+`backend/services/image_spec_service.py` 负责把视觉真值、连续性状态和 ShotPlan 编译成模型无关的 ImageSpec；这条链路不再使用 ImagePromptAgent，也不再向 `comic_page` 写单一 `image_prompt`。
 
-- 图片 Prompt 配置使用通用 `ImagePromptPreset` 表维护，用 `ImagePromptPresetKind` 区分脚本转图 SystemPrompt 和 Negative Prompt。
-- 脚本转图 SystemPrompt 会传给 LLM；Negative Prompt 不传给 LLM，只作为后续 ComfyUI 出图配置返回或使用。
-- ImagePromptAgent 不使用 `response_format`；直接读取模型最后一条 AI 文本输出作为正向 Prompt，并由 Service 校验空值和落库。
-- 图片 Prompt 生成范围以已完成的脚本生成任务为单位，Service 读取任务下页面脚本并并发调用 Agent。
-- 图片 Prompt 生成时必须组合大纲级 `outline_character`、分段级 `script_character`、任务级 `script_scene` 和单页结构化脚本，保持同角色固定样貌一致，同时允许分段造型变化。
-- 生成出的正向 Prompt 保存到 `comic_page.image_prompt`，页面状态使用 `ComicPageStatus.PROMPT_READY`。
-- 前端维护 Prompt 配置时可以使用 Markdown 预览，但必须关闭原始 HTML 渲染。
+- Prompt 表达只分为 `tag`、`natural_language`、`hybrid` 三类，统一使用 `ImagePromptType`，不得引入具体图片模型、checkpoint 或模型家族作为业务分支。
+- 每次按脚本任务编译时，每页必须共享同一个 ShotPlan，并分别生成三条 ImageSpec；同一页、同一 Prompt 类型只保留一条当前有效规格。
+- Hybrid 必须同时保存 tag 与自然语言组件；最终正向/负向 Prompt 的组合顺序都是“自然语言 + 换行 + tag”。
+- 风格配置分别保存 tag 和自然语言的正向/负向内容，不能假设两种表达可互换。
+- Negative Prompt preset 同样分别维护 tag 与自然语言内容；ShotPlanner preset 与 Negative Prompt preset 统一由 Visual Specs 页面管理。
+- ImageSpec 必须组合大纲级 `outline_character`、分段级 `script_character`、任务级 `script_scene`、已批准视觉资产和单页结构化脚本。
+- 三种 ImageSpec 都成功后，页面状态才更新为 `ComicPageStatus.SPEC_READY`。
+- 历史 LoRA 资产只保留归档审计；新业务不创建、不提升、不绑定 LoRA。底模、LoRA、采样器等具体实现由 ComfyUI workflow 自行管理。
 
-## 图片生成 / ComfyUI 约定
+## 图片生成 Provider 约定
 
 `backend/services/image_generation_service.py` 负责图片生成业务编排，`backend/tools/comfyui_client.py` 只封装 ComfyUI HTTP API。
 
-- 前端“图片生成”页面维护 ComfyUI workflow preset；后端只按 preset 中配置的节点 id 和 input 名称注入 `comic_page.image_prompt`，不要猜测节点。
+- 生图工具只按 Provider 分类：`comfyui` 与 `openai_images_compatible`；使用 `ImageGenerationProvider`，不得用具体图片模型定义项目级能力。
+- 每个工具必须选择自己消费的 `ImagePromptType`，生成时只读取页面下相同类型且未过期的最新 ImageSpec。
+- ComfyUI 工具通过受限 binding 把 `prompt.positive`、`prompt.negative`、`render.seed` 和可选参考条件注入 workflow；不要猜测节点，也不要暴露任意表达式求值。
+- ComfyUI 的底模、LoRA、采样器和调度器保留在 workflow JSON 内，不进入 ImageSpec、项目配置或运行 manifest。
+- OpenAI Images 兼容 Provider 可以在工具配置内部保存具体 `model`，但该值不得反向影响 ImageSpec 编译或项目数据模型。
 - 批量图片生成按“每页一次 ComfyUI `/prompt` 请求”提交，不一次性提交全部页面。
 - 生成结果追加保存到 `comic_image`，不要自动删除旧候选图，方便人工比较。
 - 图片生成暂停只停止提交后续页面，不调用 ComfyUI interrupt，不中断已经提交的当前 prompt。
@@ -224,7 +236,7 @@ pybabel compile -d backend/locales
 后端安装依赖：
 
 ```bash
-conda activate lang_graph
+conda activate comaic
 pip install -r backend/requirements.txt
 ```
 

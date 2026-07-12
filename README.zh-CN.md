@@ -2,26 +2,27 @@
 
 [English](./README.md) | 简体中文
 
-Comaic 是一个本地优先的 AI 漫画生成工作台。它把“故事大纲 -> 分页脚本 -> 文生图 Prompt -> ComfyUI 图片生成 -> 人工选图”串成一条可操作的 MVP 链路，适合用来实验 AI 辅助漫画创作流程。
+Comaic 是一个本地优先的 AI 漫画生成工作台。它把“故事大纲 -> 分页脚本 -> 视觉真值 -> 三类 ImageSpec -> 生图 Provider -> 人工选图”串成一条可操作的 MVP 链路，适合用来实验 AI 辅助漫画创作流程。
 
-当前版本重点不是自动完成所有创作判断，而是让每个关键产物都能被用户确认和调整：大纲可以多轮对话生成，分页脚本可以人工编辑，图片 Prompt 可以重新生成，ComfyUI 候选图可以逐页选择最终版本。
+当前版本重点不是自动完成所有创作判断，而是让每个关键产物都能被用户确认和调整。项目数据不绑定具体图片模型：系统为每页同时编译 tag、自然语言和混合型 Prompt，真正的底模、LoRA 与采样参数留在生图工具内部。
 
 ## 功能概览
 
 - 项目管理：创建、编辑、删除漫画项目。
 - 大纲工作台：与 Outline Agent 多轮对话，实时流式显示回复，并保存大纲版本。
 - 分页脚本：基于大纲版本生成分页漫画脚本，支持批量生成、暂停、删除分段和人工编辑。
-- 图片 Prompt：维护“脚本转文生图 Prompt”的 System Prompt，并为已完成脚本任务批量生成图片 Prompt。
-- 图片生成：维护 ComfyUI Workflow preset，基于页面图片 Prompt 调用本地 ComfyUI 生成候选图。
+- 视觉圣经：维护角色、服装、场景、风格和参考资产；风格分别保存 tag 与自然语言表达。
+- Visual Specs：维护 ShotPlanner/Negative Prompt preset，并为每页同时编译 tag、自然语言、混合型 ImageSpec。
+- 图片生成：按 Prompt 类型配置 ComfyUI 或 OpenAI Images 兼容工具，并生成页面候选图。
 - 人工选择：为每页候选图选择最终图片。
 - 多语言前端：当前支持中文和英文。
 
 ## 技术栈
 
-- Backend：Python、FastAPI、LangChain、DeepAgents、SQLAlchemy、SQLite、SSE
-- LLM：DeepSeek OpenAI-compatible API
+- Backend：Python、FastAPI、LangChain、SQLAlchemy、Alembic、SQLite、SSE
+- LLM：设置页支持的 LangChain Provider
 - Frontend：Vue 3、Vite、Element Plus、vue-i18n
-- Image Generation：本地 ComfyUI HTTP API
+- Image Generation：本地 ComfyUI 或 OpenAI Images 兼容 API
 
 ## 项目结构
 
@@ -32,7 +33,9 @@ Comaic/
 ├── data/         # SQLite，本地开发数据
 ├── outputs/      # ComfyUI 生成图片保存目录
 ├── workflows/    # 可选：本地 workflow_api.json 备份
-├── start.sh      # 同时启动前后端的本地脚本
+├── start.ps1     # 推荐的 Windows PowerShell 启动入口
+├── start.py      # 同终端启动前后端，支持后端重载和 Vite HMR
+├── start.sh      # 保留给 Bash 开发环境的启动脚本
 ├── README.md
 ├── README.zh-CN.md
 ├── AGENTS.md
@@ -44,8 +47,8 @@ Comaic/
 - Python 3.12
 - Node.js 20.19+ 或 22.12+
 - npm
-- Conda，推荐环境名：`lang_graph`
-- 本地 ComfyUI，默认地址：`http://127.0.0.1:8188`
+- Conda，推荐环境名：`comaic`
+- 可选本地 ComfyUI，默认地址：`http://127.0.0.1:8188`
 - 在设置页配置的模型 Provider API Key
 
 ## 快速开始
@@ -60,8 +63,8 @@ cd Comaic
 ### 2. 创建并激活 Python 环境
 
 ```bash
-conda create -n lang_graph python=3.12
-conda activate lang_graph
+conda create -n comaic python=3.12
+conda activate comaic
 ```
 
 ### 3. 安装后端依赖
@@ -92,15 +95,15 @@ cp backend/.env.example .env
 DEEPSEEK_MODEL=deepseek-v4-flash
 DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
 
-DATABASE_URL=sqlite:///data/Comaic.sqlite3
+DATABASE_URL=sqlite:///data/comaic.sqlite3
 COMFYUI_BASE_URL=http://127.0.0.1:8188
 ```
 
 真实 `.env` 不要提交到 Git。首次启动时，系统只用 `.env` 初始化默认模型名和配置壳；API Key 不从环境变量读取，必须在右上角“设置”页面保存。页面保存后，新建的 Agent 调用会优先使用 SQLite 中 active 配置的默认模型。
 
-### 6. 启动 ComfyUI
+### 6. 可选：启动 ComfyUI
 
-请先按 ComfyUI 官方方式启动本地服务，并确保浏览器可访问：
+使用 `comfyui` Provider 时，请先按 ComfyUI 官方方式启动本地服务，并确保浏览器可访问：
 
 ```text
 http://127.0.0.1:8188
@@ -108,10 +111,17 @@ http://127.0.0.1:8188
 
 ### 7. 启动 Comaic
 
-推荐使用根目录脚本同时启动前后端：
+启动器会在同一个终端启动前后端；后端源码或 Prompt 变化时由启动器重启，前端继续使用
+Vite HMR。Windows 推荐使用 PowerShell 入口：
+
+```powershell
+.\start.ps1
+```
+
+其它平台或需要直接调用 Python 时：
 
 ```bash
-./start.sh
+python start.py
 ```
 
 默认地址：
@@ -137,7 +147,7 @@ npm run dev
 
 进入“项目”页面，点击“新建项目”，输入项目标题。
 
-项目只是创作容器；大纲、脚本、图片 Prompt 和图片生成任务都会关联到具体项目。
+项目只是创作容器；大纲、脚本、视觉真值、ImageSpec 和图片生成任务都会关联到具体项目，但项目不会绑定某个具体图片模型。
 
 ### 1.1 配置模型
 
@@ -184,41 +194,31 @@ npm run dev
 - 人物动作
 - 对话
 
-脚本生成阶段会按分段细化角色设定，例如当前分段中的服装、发型、情绪、身体状态和临时变化。图片 Prompt 生成时会同时使用大纲角色基准、分段角色设定和单页脚本。
+脚本生成阶段会按分段细化角色设定，例如当前分段中的服装、发型、情绪、身体状态和临时变化。保存这些设定时，系统会同步创建并绑定视觉圣经中的服装草稿和场景母版草稿；相同内容会复用，继续生成不会覆盖人工选择。ImageSpec 编译时会同时使用大纲角色基准、分段角色设定、视觉圣经和单页脚本。
 
 生成完成后，你可以查看、编辑、清空或删除页面脚本。批量生成过程中可以暂停，暂停后已生成内容会保留。
 
-### 4. 生成图片 Prompt
+### 4. 维护视觉真值并编译 ImageSpec
 
-进入“图片 Prompt”页面：
+先进入“视觉圣经”审核分页脚本自动生成的服装与场景草稿，并维护角色、风格和参考资产。草稿只有经人工批准后才会进入 Final ImageSpec；风格和参考图片目前不会从脚本中臆造，仍需人工维护。风格的正向/负向内容分别填写 tag 与自然语言版本。
 
-1. 维护“脚本 -> 文生图 Prompt”的 System Prompt preset。
-2. 选择项目。
-3. 选择已完成的脚本生成任务。
-4. 选择 System Prompt preset。
-5. 点击生成。
+然后进入“Visual Specs”页面：
 
-系统会将每页结构化脚本转成适合文生图模型使用的正向 Prompt，并保存到页面数据中。再次生成同一任务的图片 Prompt 时，会先清空该任务已有 Prompt，再实时写入新的结果。
+1. 选择项目与已完成的脚本任务。
+2. 按需维护 ShotPlanner 和 Negative Prompt preset。
+3. 选择风格与生成模式，开始编译。
+4. 按页查看 tag、自然语言和 hybrid 三个标签页。
 
-### 5. 配置 ComfyUI Workflow
+三种 ImageSpec 共用同一份 ShotPlan。Hybrid 会保留两种组件，并按“自然语言 + 换行 + tag”组合最终正向和负向 Prompt。只有三种规格都成功后，页面才会进入 `spec_ready`。
 
-进入“图片生成”页面，先维护 Workflow preset。
+### 5. 配置生图工具
 
-Workflow preset 需要使用 ComfyUI 的 API workflow JSON，而不是普通界面 workflow。你可以：
+进入“图片生成”页面维护工具 preset。每个工具必须选择 Provider 和它消费的 Prompt 类型：
 
-- 直接粘贴 workflow API JSON。
-- 拖拽或选择 `.json` 文件。
-- 使用“自动解析节点”自动识别正向 Prompt 节点和 Seed 节点。
+- `comfyui`：粘贴 ComfyUI API workflow JSON，并用受限 binding 显式绑定正向 Prompt、负向 Prompt、Seed 和可选参考条件。底模、LoRA、采样器、调度器都留在 workflow 内。
+- `openai_images_compatible`：配置兼容 API 地址、路径、API Key、模型与返回格式。具体模型只属于该工具，不影响项目和 ImageSpec。
 
-至少需要配置：
-
-- Workflow JSON
-- 正向 Prompt 节点 ID
-- 正向 Prompt 输入名，常见为 `text`
-- Seed 节点 ID
-- Seed 输入名，`KSampler` 常见为 `seed`，`KSamplerAdvanced` 常见为 `noise_seed`
-
-Seed 节点是图片生成必需配置。Comaic 会由后端注入 seed，不再依赖 workflow 内置 seed。
+Comaic 不猜测 workflow 中的模型和采样配置。ComfyUI 工具至少需要绑定 `prompt.positive`；Final 模式下，ImageSpec 要求的参考条件与 Seed 也必须被 workflow 能力和 binding 覆盖。
 
 ### 6. 生成图片
 
@@ -226,11 +226,11 @@ Seed 节点是图片生成必需配置。Comaic 会由后端注入 seed，不再
 
 1. 选择项目。
 2. 选择已完成脚本任务。
-3. 选择 Workflow preset。
+3. 选择与目标 ImageSpec Prompt 类型匹配的生图工具。
 4. 设置每页候选图数量和轮询间隔。
 5. 点击生成。
 
-当前批量图片生成策略是：每个页面候选图单独提交一次 ComfyUI `/prompt` 请求。批量开始前，后端会为每个候选序号生成一个 seed，并在所有页面中复用同一候选序号的 seed。例如所有页面的第 1 个候选图使用同一个 seed，而同一页内部不同候选图使用不同 seed。后端会轮询 `/history/{prompt_id}`，通过 `/view` 下载生成图片，并保存到 `outputs/`。
+生成前，后端会校验当前 ImageSpec 是否过期，并只读取与工具 Prompt 类型相同的最新规格。批量开始前会为每个候选序号生成 seed，并在所有页面中复用同一候选序号的 seed；结果统一保存到 `outputs/`。
 
 再次生成不会删除旧图，而是追加新的候选图，方便人工比较。生成过程中可以点击暂停；暂停只会停止提交后续页面，不会中断已经提交给 ComfyUI 的当前任务。
 
@@ -240,7 +240,7 @@ Seed 节点是图片生成必需配置。Comaic 会由后端注入 seed，不再
 
 ## ComfyUI Workflow 说明
 
-Comaic 不内置固定 ComfyUI 工作流。你需要在页面中维护自己的 Workflow preset。
+Comaic 不内置固定 ComfyUI 工作流，也不在项目层维护 checkpoint、LoRA、采样器或模型许可证。你需要在页面中维护自己的 Workflow preset。
 
 推荐做法：
 
@@ -248,7 +248,7 @@ Comaic 不内置固定 ComfyUI 工作流。你需要在页面中维护自己的 
 2. 导出 API workflow JSON。
 3. 在 Comaic 的“图片生成”页面新增 Workflow preset。
 4. 拖入 JSON 文件或粘贴 JSON。
-5. 确认正向 Prompt 节点 ID/输入名，以及 Seed 节点 ID/输入名。
+5. 确认 `prompt.positive`、可选 `prompt.negative` 和 `render.seed` 的 binding。
 6. 保存 preset 后用于图片生成。
 
 如果 workflow 里有多个 `CLIPTextEncode` 或采样器节点，前端会尝试选择最可能的正向 Prompt 和 Seed 节点，但仍建议你手动检查一次。
@@ -287,15 +287,15 @@ pybabel compile -d backend/locales
 
 ## 本地数据
 
-- SQLite 默认保存到 `data/Comaic.sqlite3`
+- SQLite 默认保存到 `data/comaic.sqlite3`
 - 生成图片默认保存到 `outputs/`
 - `.env`、`data/`、`outputs/`、`frontend/node_modules/`、`frontend/dist/` 不应提交到 Git
 
-当前项目仍是 MVP，本地 SQLite 没有引入正式迁移工具。如果开发期间 ORM 表结构变化导致旧库不兼容，可以删除本地数据库后重启：
+项目使用 Alembic 管理 SQLite schema，后端启动时会自动升级到当前 revision。开发数据不重要时也可以删除本地数据库后重建：
 
 ```bash
-rm data/Comaic.sqlite3
-./start.sh
+rm data/comaic.sqlite3
+python start.py
 ```
 
 时间字段以带 `+00:00` 的 UTC ISO8601 字符串写入 SQLite，页面展示时会自动转成浏览器本地时间。若你从旧版本升级到当前版本，请删除旧的本地 SQLite 后重建。
@@ -308,13 +308,13 @@ rm data/Comaic.sqlite3
 
 前端 Vite 默认运行在 `5173`，后端 FastAPI 默认运行在 `8000`。前端通过 Vite proxy 将 `/api` 请求转发到后端。
 
-### 为什么需要先启动 ComfyUI？
+### 什么情况下需要先启动 ComfyUI？
 
-图片生成阶段会调用本地 ComfyUI HTTP API。如果 ComfyUI 没有启动，图片生成请求会失败。
+只有选择 `comfyui` Provider 时才需要。若工具使用 OpenAI Images 兼容 Provider，则不依赖本地 ComfyUI。
 
 ### Workflow JSON 拖入后没有识别到正向 Prompt 节点怎么办？
 
-请确认拖入的是 ComfyUI API workflow JSON，并手动填写正向 Prompt 节点 ID 和输入名。常见输入名是 `text`。
+请确认拖入的是 ComfyUI API workflow JSON，并手动填写正向 Prompt 节点 ID 和输入名，或直接编辑 `prompt.positive` binding。常见输入名是 `text`。
 
 ### 图片生成会覆盖旧候选图吗？
 
@@ -335,7 +335,7 @@ rm data/Comaic.sqlite3
 Comaic 目前是 MVP 版本，核心链路已经跑通，但仍适合继续扩展：
 
 - 更稳定的任务恢复与进度重连
-- 更完整的数据库迁移
+- 更完善的迁移回滚与备份工具
 - 更丰富的 ComfyUI workflow 参数注入
 - 图片生成恢复继续
 - 更细的权限、项目导出和部署方案

@@ -1,33 +1,43 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
 from backend.models.enums import (
     ContinuityEventTiming,
     ContinuityEventType,
     ContinuityTargetType,
     GenerationMode,
+    ImagePromptPresetKind,
+    ImagePromptType,
 )
 
 
 class CompileImageSpecsRequest(BaseModel):
-    model_profile_ids: list[int] = Field(min_length=1)
-    primary_model_profile_id: int = Field(gt=0)
     style_profile_id: int | None = Field(default=None, gt=0)
     shot_planner_preset_id: int | None = Field(default=None, gt=0)
     negative_prompt_preset_id: int | None = Field(default=None, gt=0)
     generation_mode: GenerationMode = GenerationMode.PREVIEW
     concurrency: int = Field(default=8, ge=1, le=20)
     regenerate_continuity: bool = False
+    resume_existing: bool = True
 
-    @model_validator(mode="after")
-    def validate_primary(self):
-        if len(set(self.model_profile_ids)) != len(self.model_profile_ids):
-            raise ValueError("model_profile_ids cannot contain duplicates")
-        if self.primary_model_profile_id not in self.model_profile_ids:
-            raise ValueError("primary_model_profile_id must be included in model_profile_ids")
-        return self
+
+
+class ImageSpecPresetRequest(BaseModel):
+    name: str
+    kind: ImagePromptPresetKind
+    content: str = ""
+    tag_content: str = ""
+    natural_language_content: str = ""
+    description: str | None = None
+    is_default: bool = False
+
+
+class ImageSpecPresetResponse(ImageSpecPresetRequest):
+    id: int
+    created_at: datetime
+    updated_at: datetime
 
 
 class ContinuityEventEditItem(BaseModel):
@@ -77,14 +87,31 @@ class ContinuityCompilationResponse(BaseModel):
     created_at: datetime
 
 
+class ImageSpecCompilationResponse(BaseModel):
+    id: int
+    task_id: int
+    continuity_compilation_id: int
+    source_hash: str
+    status: str
+    generation_mode: GenerationMode
+    total_pages: int
+    completed_pages: int
+    total_specs: int
+    completed_specs: int
+    failed_pages: list[dict[str, Any]]
+    error_code: str | None
+    error_message: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
 class ImageSpecResponse(BaseModel):
     id: int
     page_id: int
     page_no: int
     snapshot_id: int
     shot_plan_id: int
-    model_profile_id: int
-    model_family: str
+    prompt_type: ImagePromptType
     generation_mode: str
     spec: dict[str, Any]
     positive_prompt: str

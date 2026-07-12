@@ -10,7 +10,6 @@ from backend.models.comic import (
     ComicProject,
     GenerationTask,
     ImageGenerationToolPreset,
-    ImagePromptPreset,
     LLMConfig,
     OutlineCharacter,
     OutlineVersion,
@@ -23,8 +22,8 @@ from backend.models.comic import (
 from backend.models.enums import (
     ComicPageStatus,
     GenerationTaskStatus,
-    ImageGenerationToolKind,
-    ImagePromptPresetKind,
+    ImageGenerationProvider,
+    ImagePromptType,
     LLMProvider,
     OutlineVersionStatus,
     PageScriptReviewStatus,
@@ -1221,18 +1220,6 @@ class ComicRepository:
 
         self.session.commit()
 
-    def update_page_prompt(self, page_id: int, image_prompt: str) -> ComicPage:
-        """保存页面图片 Prompt，并把页面状态推进到 Prompt 已生成。"""
-
-        page = self.session.get(ComicPage, page_id)
-        if page is None:
-            raise ValueError(f"ComicPage not found: {page_id}")
-        page.image_prompt = image_prompt
-        page.status = ComicPageStatus.PROMPT_READY
-        self.session.commit()
-        self.session.refresh(page)
-        return page
-
     def get_page(self, page_id: int) -> ComicPage | None:
         """按主键读取页面，供页面级 Prompt/图片生成操作使用。"""
 
@@ -1248,124 +1235,16 @@ class ComicRepository:
             if not current_value and next_value:
                 setattr(target, field_name, next_value)
 
-    def clear_script_task_image_prompts(self, task_id: int) -> None:
-        """清空某次脚本任务下所有页面的图片 Prompt，重新生成前避免新旧 Prompt 混用。"""
-
-        for page in self.list_script_task_pages(task_id):
-            page.image_prompt = None
-            if page.summary:
-                page.status = ComicPageStatus.SCRIPT_READY
-        self.session.commit()
-
-    def list_image_prompt_presets(
-        self,
-        kind: ImagePromptPresetKind | None = None,
-    ) -> list[ImagePromptPreset]:
-        """读取图片 Prompt 配置列表，可按类型筛选。"""
-
-        statement = select(ImagePromptPreset)
-        if kind is not None:
-            statement = statement.where(ImagePromptPreset.kind == kind)
-        statement = statement.order_by(
-            ImagePromptPreset.kind,
-            ImagePromptPreset.is_default.desc(),
-            ImagePromptPreset.updated_at.desc(),
-            ImagePromptPreset.id.desc(),
-        )
-        return list(self.session.scalars(statement))
-
-    def get_image_prompt_preset(self, preset_id: int) -> ImagePromptPreset | None:
-        """根据主键读取图片 Prompt 配置。"""
-
-        return self.session.get(ImagePromptPreset, preset_id)
-
-    def get_default_image_prompt_preset(
-        self,
-        kind: ImagePromptPresetKind,
-    ) -> ImagePromptPreset | None:
-        """读取某个类型下的默认图片 Prompt 配置。"""
-
-        statement = (
-            select(ImagePromptPreset)
-            .where(
-                ImagePromptPreset.kind == kind,
-                ImagePromptPreset.is_default.is_(True),
-            )
-            .order_by(ImagePromptPreset.updated_at.desc(), ImagePromptPreset.id.desc())
-            .limit(1)
-        )
-        return self.session.scalar(statement)
-
-    def create_image_prompt_preset(
-        self,
-        *,
-        name: str,
-        kind: ImagePromptPresetKind,
-        content: str,
-        description: str | None = None,
-        is_default: bool = False,
-    ) -> ImagePromptPreset:
-        """创建图片 Prompt 配置；默认配置在同类型下保持唯一。"""
-
-        if is_default:
-            self._clear_default_image_prompt_presets(kind)
-        preset = ImagePromptPreset(
-            name=name,
-            description=description,
-            kind=kind,
-            content=content,
-            is_default=is_default,
-        )
-        self.session.add(preset)
-        self.session.commit()
-        self.session.refresh(preset)
-        return preset
-
-    def update_image_prompt_preset(
-        self,
-        *,
-        preset_id: int,
-        name: str,
-        kind: ImagePromptPresetKind,
-        content: str,
-        description: str | None = None,
-        is_default: bool = False,
-    ) -> ImagePromptPreset:
-        """更新图片 Prompt 配置；切换默认时只影响同类型配置。"""
-
-        preset = self.session.get(ImagePromptPreset, preset_id)
-        if preset is None:
-            raise ValueError(f"ImagePromptPreset not found: {preset_id}")
-        if is_default:
-            self._clear_default_image_prompt_presets(kind, except_preset_id=preset_id)
-        preset.name = name
-        preset.description = description
-        preset.kind = kind
-        preset.content = content
-        preset.is_default = is_default
-        self.session.commit()
-        self.session.refresh(preset)
-        return preset
-
-    def delete_image_prompt_preset(self, preset_id: int) -> None:
-        """删除图片 Prompt 配置；已保存到页面的 Prompt 不受影响。"""
-
-        preset = self.session.get(ImagePromptPreset, preset_id)
-        if preset is None:
-            raise ValueError(f"ImagePromptPreset not found: {preset_id}")
-        self.session.delete(preset)
-        self.session.commit()
-
     def list_image_generation_tool_presets(
         self,
         *,
-        kind: ImageGenerationToolKind | None = None,
+        provider: ImageGenerationProvider | None = None,
     ) -> list[ImageGenerationToolPreset]:
         """读取通用生图工具配置，默认配置排在前面。"""
 
         statement = select(ImageGenerationToolPreset)
-        if kind is not None:
-            statement = statement.where(ImageGenerationToolPreset.kind == kind)
+        if provider is not None:
+            statement = statement.where(ImageGenerationToolPreset.provider == provider)
         statement = statement.order_by(
             ImageGenerationToolPreset.is_default.desc(),
             ImageGenerationToolPreset.updated_at.desc(),
@@ -1382,13 +1261,12 @@ class ComicRepository:
         self,
         *,
         name: str,
-        kind: ImageGenerationToolKind,
+        provider: ImageGenerationProvider,
+        prompt_type: ImagePromptType,
         description: str | None = None,
         is_default: bool = False,
-        model_profile_id: int | None = None,
         capabilities_json: str = '{"features":["txt2img"],"limits":{}}',
         bindings_json: str = '{"schema_version":1,"bindings":[]}',
-        runtime_manifest_json: str = "{}",
         comfy_base_url: str | None = None,
         workflow_json: str | None = None,
         positive_node_id: str | None = None,
@@ -1414,12 +1292,11 @@ class ComicRepository:
         preset = ImageGenerationToolPreset(
             name=name,
             description=description,
-            kind=kind,
+            provider=provider,
+            prompt_type=prompt_type,
             is_default=is_default,
-            model_profile_id=model_profile_id,
             capabilities_json=capabilities_json,
             bindings_json=bindings_json,
-            runtime_manifest_json=runtime_manifest_json,
             comfy_base_url=comfy_base_url,
             workflow_json=workflow_json,
             positive_node_id=positive_node_id,
@@ -1448,13 +1325,12 @@ class ComicRepository:
         *,
         preset_id: int,
         name: str,
-        kind: ImageGenerationToolKind,
+        provider: ImageGenerationProvider,
+        prompt_type: ImagePromptType,
         description: str | None = None,
         is_default: bool = False,
-        model_profile_id: int | None = None,
         capabilities_json: str = '{"features":["txt2img"],"limits":{}}',
         bindings_json: str = '{"schema_version":1,"bindings":[]}',
-        runtime_manifest_json: str = "{}",
         comfy_base_url: str | None = None,
         workflow_json: str | None = None,
         positive_node_id: str | None = None,
@@ -1482,12 +1358,11 @@ class ComicRepository:
             self._clear_default_image_generation_tool_presets(except_preset_id=preset_id)
         preset.name = name
         preset.description = description
-        preset.kind = kind
+        preset.provider = provider
+        preset.prompt_type = prompt_type
         preset.is_default = is_default
-        preset.model_profile_id = model_profile_id
         preset.capabilities_json = capabilities_json
         preset.bindings_json = bindings_json
-        preset.runtime_manifest_json = runtime_manifest_json
         preset.comfy_base_url = comfy_base_url
         preset.workflow_json = workflow_json
         preset.positive_node_id = positive_node_id
@@ -1533,13 +1408,15 @@ class ComicRepository:
     def list_comfy_workflow_presets(self) -> list[ImageGenerationToolPreset]:
         """旧接口别名：读取 ComfyUI 类型生图工具。"""
 
-        return self.list_image_generation_tool_presets(kind=ImageGenerationToolKind.COMFYUI)
+        return self.list_image_generation_tool_presets(
+            provider=ImageGenerationProvider.COMFYUI
+        )
 
     def get_comfy_workflow_preset(self, preset_id: int) -> ImageGenerationToolPreset | None:
         """旧接口别名：读取 ComfyUI 类型生图工具。"""
 
         preset = self.get_image_generation_tool_preset(preset_id)
-        if preset is None or preset.kind != ImageGenerationToolKind.COMFYUI:
+        if preset is None or preset.provider != ImageGenerationProvider.COMFYUI:
             return None
         return preset
 
@@ -1562,7 +1439,8 @@ class ComicRepository:
         return self.create_image_generation_tool_preset(
             name=name,
             description=description,
-            kind=ImageGenerationToolKind.COMFYUI,
+            provider=ImageGenerationProvider.COMFYUI,
+            prompt_type=ImagePromptType.NATURAL_LANGUAGE,
             is_default=is_default,
             workflow_json=workflow_json,
             positive_node_id=positive_node_id,
@@ -1594,7 +1472,8 @@ class ComicRepository:
             preset_id=preset_id,
             name=name,
             description=description,
-            kind=ImageGenerationToolKind.COMFYUI,
+            provider=ImageGenerationProvider.COMFYUI,
+            prompt_type=ImagePromptType.NATURAL_LANGUAGE,
             is_default=is_default,
             workflow_json=workflow_json,
             positive_node_id=positive_node_id,
@@ -1609,22 +1488,6 @@ class ComicRepository:
         """旧接口别名：删除 ComfyUI 类型生图工具。"""
 
         self.delete_image_generation_tool_preset(preset_id)
-
-    def _clear_default_image_prompt_presets(
-        self,
-        kind: ImagePromptPresetKind,
-        except_preset_id: int | None = None,
-    ) -> None:
-        """同一类型下只保留一个默认配置。"""
-
-        statement = select(ImagePromptPreset).where(
-            ImagePromptPreset.kind == kind,
-            ImagePromptPreset.is_default.is_(True),
-        )
-        for preset in self.session.scalars(statement):
-            if except_preset_id is not None and preset.id == except_preset_id:
-                continue
-            preset.is_default = False
 
     def add_image(
         self,

@@ -1,12 +1,9 @@
-from typing import Any
-
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from backend.models.comic import (
     ComicImage,
     GenerationRun,
-    GenerationTask,
     ImageGenerationToolPreset,
     ImageSpec,
     VisualStateSnapshot,
@@ -14,6 +11,8 @@ from backend.models.comic import (
 from backend.models.enums import (
     GenerationMode,
     GenerationRunStatus,
+    ImageGenerationProvider,
+    ImagePromptType,
     SeedStrategy,
 )
 from backend.models.time import utc_now
@@ -26,29 +25,23 @@ class GenerationRepository:
         self.session = session
 
     def get_tool_preset(self, preset_id: int) -> ImageGenerationToolPreset | None:
-        return self.session.scalar(
-            select(ImageGenerationToolPreset)
-            .where(ImageGenerationToolPreset.id == preset_id)
-            .options(selectinload(ImageGenerationToolPreset.model_profile))
-        )
+        return self.session.get(ImageGenerationToolPreset, preset_id)
 
     def latest_spec_for_page(
         self,
         *,
         page_id: int,
-        model_profile_id: int | None,
+        prompt_type: ImagePromptType,
         generation_mode: GenerationMode,
     ) -> ImageSpec | None:
         statement = select(ImageSpec).where(
             ImageSpec.page_id == page_id,
             ImageSpec.generation_mode == generation_mode,
         )
-        if model_profile_id is not None:
-            statement = statement.where(ImageSpec.model_profile_id == model_profile_id)
+        statement = statement.where(ImageSpec.prompt_type == prompt_type)
         return self.session.scalar(
             statement
             .options(
-                selectinload(ImageSpec.model_profile),
                 selectinload(ImageSpec.snapshot).selectinload(
                     VisualStateSnapshot.compilation
                 ),
@@ -65,15 +58,14 @@ class GenerationRepository:
         page_id: int,
         image_spec_id: int,
         tool_preset_id: int,
-        model_profile_id: int,
+        provider: ImageGenerationProvider,
+        prompt_type: ImagePromptType,
         candidate_index: int,
         seed: int,
         seed_strategy: SeedStrategy,
         generation_mode: GenerationMode,
         bindings_json: str,
-        model_manifest_json: str,
         resolved_assets_json: str,
-        render_params_json: str,
         degradation_json: str,
         applied_spec_json: str,
     ) -> GenerationRun:
@@ -82,16 +74,15 @@ class GenerationRepository:
             page_id=page_id,
             image_spec_id=image_spec_id,
             tool_preset_id=tool_preset_id,
-            model_profile_id=model_profile_id,
+            provider=provider,
+            prompt_type=prompt_type,
             candidate_index=candidate_index,
             seed=seed,
             seed_strategy=seed_strategy,
             generation_mode=generation_mode,
             status=GenerationRunStatus.PENDING,
             bindings_json=bindings_json,
-            model_manifest_json=model_manifest_json,
             resolved_assets_json=resolved_assets_json,
-            render_params_json=render_params_json,
             degradation_json=degradation_json,
             applied_spec_json=applied_spec_json,
         )
@@ -174,7 +165,6 @@ class GenerationRepository:
             .options(
                 selectinload(GenerationRun.images),
                 selectinload(GenerationRun.image_spec),
-                selectinload(GenerationRun.model_profile),
                 selectinload(GenerationRun.tool_preset),
             )
         )
@@ -183,7 +173,7 @@ class GenerationRepository:
         self,
         *,
         page_id: int,
-        model_profile_id: int,
+        prompt_type: ImagePromptType,
         generation_mode: GenerationMode,
         image_spec_id: int,
     ) -> list[GenerationRun]:
@@ -192,7 +182,7 @@ class GenerationRepository:
                 select(GenerationRun)
                 .where(
                     GenerationRun.page_id == page_id,
-                    GenerationRun.model_profile_id == model_profile_id,
+                    GenerationRun.prompt_type == prompt_type,
                     GenerationRun.generation_mode == generation_mode,
                     GenerationRun.image_spec_id == image_spec_id,
                     GenerationRun.status == GenerationRunStatus.SUCCEEDED,

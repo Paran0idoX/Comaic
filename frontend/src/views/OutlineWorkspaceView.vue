@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { Delete, EditPen, Plus } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { storeToRefs } from 'pinia'
 import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
@@ -23,10 +24,13 @@ import {
   updateProject,
   type Project,
 } from '@/api/projects'
+import { useProjectContextStore } from '@/stores/projectContext'
 
 const { t } = useI18n()
 const route = useRoute()
 const router = useRouter()
+const projectContext = useProjectContextStore()
+const { selectedProjectId } = storeToRefs(projectContext)
 
 const loading = ref(false)
 const loadingProjects = ref(false)
@@ -37,7 +41,6 @@ const projectDialogVisible = ref(false)
 const editingProjectId = ref<number | null>(null)
 const projectTitle = ref('')
 const projects = ref<Project[]>([])
-const selectedProjectId = ref<number | null>(null)
 const threadId = ref('')
 const messages = ref<ConversationMessage[]>([])
 const versions = ref<OutlineVersionItem[]>([])
@@ -89,8 +92,8 @@ const loadOutlineSession = async () => {
       role: message.role,
       content: message.content,
     }))
-  } catch {
-    ElMessage.error(t('outline.errors.loadSession'))
+  } catch (error) {
+    ElMessage.error(apiErrorMessage(error, t, t('outline.errors.loadSession')))
   } finally {
     loading.value = false
   }
@@ -284,8 +287,12 @@ const sendMessage = async (content: string) => {
   }
 }
 
-onMounted(() => {
-  void loadProjects()
+onMounted(async () => {
+  const previousProjectId = selectedProjectId.value
+  await loadProjects()
+  if (selectedProjectId.value !== null && selectedProjectId.value === previousProjectId) {
+    await loadOutlineSession()
+  }
 })
 
 watch(selectedProjectId, (nextProjectId, previousProjectId) => {
@@ -319,7 +326,7 @@ watch(routeProjectId, (nextProjectId) => {
 </script>
 
 <template>
-  <section>
+  <section :aria-busy="loadingProjects || loading">
     <div class="page-header">
       <div class="page-actions">
         <el-select
@@ -381,8 +388,15 @@ watch(routeProjectId, (nextProjectId) => {
       </div>
     </div>
 
+    <el-skeleton
+      v-if="loadingProjects && selectedProjectId === null"
+      class="outline-workspace__loading panel"
+      :rows="9"
+      animated
+    />
+
     <el-empty
-      v-if="selectedProjectId === null"
+      v-else-if="selectedProjectId === null"
       class="outline-workspace__empty panel"
       :description="projects.length === 0 ? t('outline.emptyProjects') : t('outline.errors.missingProject')"
     >
@@ -395,6 +409,7 @@ watch(routeProjectId, (nextProjectId) => {
       <ConversationPanel
         :messages="messages"
         :thread-id="threadId"
+        :loading="loading"
         :streaming="streaming"
         :disabled="isDisabled"
         @send="sendMessage"
@@ -447,6 +462,11 @@ watch(routeProjectId, (nextProjectId) => {
 
 .outline-workspace__empty {
   padding: 56px 18px;
+}
+
+.outline-workspace__loading {
+  min-height: 620px;
+  padding: 32px;
 }
 
 .page-actions {

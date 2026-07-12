@@ -1,6 +1,5 @@
 import { apiHeaders, currentApiLocale, parseApiErrorResponse } from './errors'
 
-export type ModelFamily = 'anima' | 'z_image' | 'generic'
 export type ApprovalStatus = 'draft' | 'approved' | 'archived'
 export type VisualEntityType = 'character' | 'outfit' | 'scene' | 'style' | 'prop' | 'control'
 export type VisualAssetRole =
@@ -19,35 +18,6 @@ export type VisualAssetRole =
   | 'lineart'
   | 'segmentation'
   | 'mask'
-  | 'lora'
-
-export type ModelProfile = {
-  id: number
-  name: string
-  family: ModelFamily
-  variant: string
-  checkpoint_name: string
-  checkpoint_hash: string | null
-  component_manifest: Record<string, unknown>
-  default_render: Record<string, unknown>
-  compiler_key: string
-  compiler_version: string
-  license: string | null
-  commercial_use_allowed: boolean | null
-  paid_service_allowed: boolean | null
-  fine_tuning_allowed: boolean | null
-  redistribution_allowed: boolean | null
-  license_notice: string | null
-  is_enabled: boolean
-  is_default: boolean
-  created_at: string
-  updated_at: string
-}
-
-export type ModelProfilePayload = Omit<
-  ModelProfile,
-  'id' | 'compiler_key' | 'compiler_version' | 'created_at' | 'updated_at'
->
 
 export type OutfitVariant = {
   id: number
@@ -76,12 +46,12 @@ export type StyleProfile = {
   key: string
   version: number
   name: string
-  model_family: ModelFamily
-  positive_tokens: string
-  negative_tokens: string
+  positive_tag: string
+  negative_tag: string
+  positive_natural_language: string
+  negative_natural_language: string
   color_palette: unknown[]
   lighting: string
-  render_defaults: Record<string, unknown>
   status: ApprovalStatus
   approved_at: string | null
   created_at: string
@@ -112,7 +82,6 @@ export type VisualAsset = {
   entity_id: number | null
   entity_key: string | null
   role: VisualAssetRole
-  model_family: ModelFamily
   storage_kind: 'local_file' | 'renderer_locator'
   local_path: string | null
   renderer_locator: string | null
@@ -136,24 +105,6 @@ const requestJson = async <T>(url: string, options: RequestInit = {}): Promise<T
   if (!response.ok) throw await parseApiErrorResponse(response)
   return (await response.json()) as T
 }
-
-export const listModelProfiles = (): Promise<ModelProfile[]> =>
-  requestJson('/api/visual-bible/model-profiles')
-
-export const createModelProfile = (payload: ModelProfilePayload): Promise<ModelProfile> =>
-  requestJson('/api/visual-bible/model-profiles', {
-    method: 'POST',
-    body: JSON.stringify(payload),
-  })
-
-export const updateModelProfile = (
-  id: number,
-  payload: ModelProfilePayload,
-): Promise<ModelProfile> =>
-  requestJson(`/api/visual-bible/model-profiles/${id}`, {
-    method: 'PUT',
-    body: JSON.stringify(payload),
-  })
 
 export const listOutfits = (projectId: number): Promise<OutfitVariant[]> =>
   requestJson(`/api/visual-bible/projects/${projectId}/outfits`)
@@ -242,7 +193,6 @@ export const registerVisualAsset = (
     entity_id: number | null
     entity_key?: string | null
     role: VisualAssetRole
-    model_family: ModelFamily
     renderer_locator: string
     sha256?: string | null
     approve: boolean
@@ -269,7 +219,6 @@ export const promoteGeneratedImage = (
     entity_id: number | null
     entity_key?: string | null
     role: VisualAssetRole
-    model_family: ModelFamily
     approve: boolean
   },
 ): Promise<VisualAsset> =>

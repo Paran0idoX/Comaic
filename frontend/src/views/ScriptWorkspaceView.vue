@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { Delete, Document, EditPen, Plus, Refresh, Tickets, VideoPause, View } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { storeToRefs } from 'pinia'
 import { computed, nextTick, onActivated, onMounted, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
@@ -29,6 +30,7 @@ import {
   type ScriptTask,
 } from '@/api/scripts'
 import { formatLocalDateTime, formatLocalNowTime } from '@/utils/datetime'
+import { useProjectContextStore } from '@/stores/projectContext'
 
 // 组件名用于 AppShell 的 KeepAlive include 精准缓存脚本工作台。
 defineOptions({ name: 'ScriptWorkspaceView' })
@@ -46,6 +48,8 @@ type ProgressEvent = {
 const route = useRoute()
 const router = useRouter()
 const { locale, t } = useI18n()
+const projectContext = useProjectContextStore()
+const { selectedProjectId } = storeToRefs(projectContext)
 
 const projects = ref<Project[]>([])
 const outlineVersions = ref<OutlineVersion[]>([])
@@ -54,7 +58,6 @@ const sections = ref<ScriptSection[]>([])
 const scenes = ref<ScriptScene[]>([])
 const visualCharacters = ref<ScriptCharacter[]>([])
 const pages = ref<ScriptPage[]>([])
-const selectedProjectId = ref<number | null>(null)
 const selectedOutlineVersionId = ref<number | null>(null)
 const selectedTaskId = ref<number | null>(null)
 const selectedSectionNo = ref<number | null>(null)
@@ -335,6 +338,8 @@ const describePayload = (event: string, payload: Record<string, unknown>) => {
       pageStart: String(payload.page_start ?? '-'),
       pageEnd: String(payload.page_end ?? '-'),
       count: String(payload.count ?? '-'),
+      outfitCount: String(payload.outfit_count ?? '-'),
+      sceneCount: String(payload.scene_count ?? '-'),
     })
     if (translated !== key) {
       return translated
@@ -470,9 +475,8 @@ const loadProjects = async () => {
       return
     }
 
-    const firstProject = projects.value[0]
-    if (selectedProjectId.value === null && firstProject !== undefined) {
-      selectedProjectId.value = firstProject.id
+    if (!projects.value.some((project) => project.id === selectedProjectId.value)) {
+      selectedProjectId.value = projects.value[0]?.id ?? null
     }
   } catch {
     ElMessage.error(t('scripts.errors.loadProjects'))
@@ -1077,7 +1081,13 @@ watch(progressEvents, async () => {
 })
 
 onMounted(async () => {
+  const previousProjectId = selectedProjectId.value
   await loadProjects()
+  if (selectedProjectId.value !== null && selectedProjectId.value === previousProjectId) {
+    await loadOutlineVersions(selectedProjectId.value)
+    await loadScriptTasks()
+    syncProjectQuery()
+  }
 })
 
 onActivated(async () => {
@@ -1299,7 +1309,12 @@ onActivated(async () => {
               type="danger"
               plain
               :icon="Delete"
-              :disabled="generatingBatch || continuingBatch"
+              :disabled="
+                selectedTaskId === null ||
+                sections.length === 0 ||
+                generatingBatch ||
+                continuingBatch
+              "
               @click="deleteCurrentTaskSections"
             >
               {{ t('scripts.actions.deleteAllSections') }}
@@ -1341,7 +1356,7 @@ onActivated(async () => {
           </div>
         </section>
 
-        <section class="panel script-results">
+        <section v-loading="loadingPages" class="panel script-results">
           <div class="panel__heading script-results__heading">
             <div class="panel__heading-main">
               <el-icon><Document /></el-icon>
@@ -1361,11 +1376,11 @@ onActivated(async () => {
           </div>
 
           <el-table
-            v-loading="loadingPages"
+            v-if="displayedPages.length > 0"
             :data="displayedPages"
             class="script-results__table"
             height="520"
-            empty-text=""
+            :aria-label="t('scripts.pages.title')"
           >
             <el-table-column prop="page_no" :label="t('scripts.pages.columns.pageNo')" width="88" />
             <el-table-column :label="t('scripts.pages.columns.status')" width="130">
@@ -1404,10 +1419,13 @@ onActivated(async () => {
                 </el-button>
               </template>
             </el-table-column>
-            <template #empty>
-              <el-empty :description="t('scripts.pages.empty')" :image-size="108" />
-            </template>
           </el-table>
+          <el-empty
+            v-else
+            class="script-results__empty"
+            :description="t('scripts.pages.empty')"
+            :image-size="108"
+          />
         </section>
       </div>
 
@@ -1895,6 +1913,10 @@ onActivated(async () => {
 
 .script-results__table {
   width: 100%;
+}
+
+.script-results__empty {
+  min-height: 480px;
 }
 
 .script-results__summary {

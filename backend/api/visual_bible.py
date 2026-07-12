@@ -6,8 +6,6 @@ from fastapi.responses import FileResponse
 from backend.api.schemas.visual_bible import (
     ApprovalRequest,
     AssignOutfitRequest,
-    ModelProfileRequest,
-    ModelProfileResponse,
     OutfitVariantRequest,
     OutfitVariantResponse,
     PromoteImageRequest,
@@ -22,7 +20,6 @@ from backend.api.schemas.visual_bible import (
 from backend.i18n.errors import http_exception
 from backend.i18n.locale import request_locale
 from backend.models.comic import (
-    ModelProfile,
     OutfitVariant,
     SceneVisualVersion,
     StyleProfile,
@@ -31,7 +28,6 @@ from backend.models.comic import (
 from backend.models.database import SessionLocal
 from backend.models.enums import (
     ApprovalStatus,
-    ModelFamily,
     VisualAssetRole,
     VisualEntityType,
 )
@@ -40,31 +36,6 @@ from backend.services.visual_bible_service import MAX_ASSET_BYTES, VisualBibleSe
 
 
 router = APIRouter(prefix="/api/visual-bible", tags=["visual-bible"])
-
-
-def model_profile_response(profile: ModelProfile) -> ModelProfileResponse:
-    return ModelProfileResponse(
-        id=profile.id,
-        name=profile.name,
-        family=profile.family,
-        variant=profile.variant,
-        checkpoint_name=profile.checkpoint_name,
-        checkpoint_hash=profile.checkpoint_hash,
-        component_manifest=json.loads(profile.component_manifest_json),
-        default_render=json.loads(profile.default_render_json),
-        compiler_key=profile.compiler_key,
-        compiler_version=profile.compiler_version,
-        license=profile.license,
-        commercial_use_allowed=profile.commercial_use_allowed,
-        paid_service_allowed=profile.paid_service_allowed,
-        fine_tuning_allowed=profile.fine_tuning_allowed,
-        redistribution_allowed=profile.redistribution_allowed,
-        license_notice=profile.license_notice,
-        is_enabled=profile.is_enabled,
-        is_default=profile.is_default,
-        created_at=profile.created_at,
-        updated_at=profile.updated_at,
-    )
 
 
 def outfit_response(item: OutfitVariant) -> OutfitVariantResponse:
@@ -97,12 +68,12 @@ def style_response(item: StyleProfile) -> StyleProfileResponse:
         key=item.key,
         version=item.version,
         name=item.name,
-        model_family=item.model_family,
-        positive_tokens=item.positive_tokens,
-        negative_tokens=item.negative_tokens,
+        positive_tag=item.positive_tag,
+        negative_tag=item.negative_tag,
+        positive_natural_language=item.positive_natural_language,
+        negative_natural_language=item.negative_natural_language,
         color_palette=json.loads(item.color_palette_json),
         lighting=item.lighting,
-        render_defaults=json.loads(item.render_defaults_json),
         status=item.status,
         approved_at=item.approved_at,
         created_at=item.created_at,
@@ -137,7 +108,6 @@ def asset_response(item: VisualAsset) -> VisualAssetResponse:
         entity_id=item.entity_id,
         entity_key=item.entity_key,
         role=item.role,
-        model_family=item.model_family,
         storage_kind=item.storage_kind.value,
         local_path=item.local_path,
         renderer_locator=item.renderer_locator,
@@ -155,43 +125,6 @@ def asset_response(item: VisualAsset) -> VisualAssetResponse:
         created_at=item.created_at,
         updated_at=item.updated_at,
     )
-
-
-@router.get("/model-profiles", response_model=list[ModelProfileResponse])
-def list_model_profiles() -> list[ModelProfileResponse]:
-    with SessionLocal() as session:
-        service = VisualBibleService(VisualBibleRepository(session))
-        return [model_profile_response(item) for item in service.list_model_profiles()]
-
-
-@router.post(
-    "/model-profiles",
-    response_model=ModelProfileResponse,
-    status_code=status.HTTP_201_CREATED,
-)
-def create_model_profile(payload: ModelProfileRequest, request: Request) -> ModelProfileResponse:
-    with SessionLocal() as session:
-        service = VisualBibleService(VisualBibleRepository(session))
-        try:
-            item = service.create_model_profile(**payload.model_dump())
-        except ValueError as exc:
-            raise http_exception(exc, request_locale(request)) from exc
-        return model_profile_response(item)
-
-
-@router.put("/model-profiles/{profile_id}", response_model=ModelProfileResponse)
-def update_model_profile(
-    profile_id: int,
-    payload: ModelProfileRequest,
-    request: Request,
-) -> ModelProfileResponse:
-    with SessionLocal() as session:
-        service = VisualBibleService(VisualBibleRepository(session))
-        try:
-            item = service.update_model_profile(profile_id=profile_id, **payload.model_dump())
-        except ValueError as exc:
-            raise http_exception(exc, request_locale(request)) from exc
-        return model_profile_response(item)
 
 
 @router.get("/projects/{project_id}/outfits", response_model=list[OutfitVariantResponse])
@@ -390,7 +323,6 @@ async def upload_asset(
     file: UploadFile = File(...),
     entity_type: VisualEntityType = Form(...),
     role: VisualAssetRole = Form(...),
-    model_family: ModelFamily = Form(ModelFamily.GENERIC),
     entity_id: int | None = Form(None),
     entity_key: str | None = Form(None),
     crop_metadata_json: str = Form("{}"),
@@ -411,7 +343,6 @@ async def upload_asset(
                 entity_id=entity_id,
                 entity_key=entity_key,
                 role=role,
-                model_family=model_family,
                 content=content,
                 crop_metadata=crop_metadata,
                 mask_asset_id=mask_asset_id,

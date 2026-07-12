@@ -2,19 +2,23 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 import logging
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from backend.api.image_generation import router as image_generation_router
-from backend.api.image_prompts import router as image_prompts_router
 from backend.api.image_specs import router as image_specs_router
 from backend.api.outline import router as outline_router
 from backend.api.projects import router as projects_router
 from backend.api.scripts import project_pages_router, router as scripts_router
 from backend.api.settings import router as settings_router
 from backend.api.visual_bible import router as visual_bible_router
-from backend.i18n.errors import AppError, error_payload
+from backend.i18n.errors import (
+    AppError,
+    app_error_from_exception,
+    error_payload,
+    log_api_exception,
+)
 from backend.i18n.locale import request_locale
 from backend.models.database import init_db
 from backend.services.task_runtime import start_task_runtime_threads
@@ -42,11 +46,31 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="comaic backend", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def handle_unhandled_api_exception(request: Request, call_next):
+    """兜底记录未进入统一错误转换的异常，并返回稳定的本地化错误结构。"""
+
+    try:
+        return await call_next(request)
+    except Exception as exc:  # noqa: BLE001 - API 最外层必须把未知异常记录并转换为稳定响应
+        error = app_error_from_exception(exc)
+        log_api_exception(
+            exc,
+            error,
+            source=f"http {request.method} {request.url.path}",
+        )
+        return JSONResponse(
+            status_code=error.status_code,
+            content={"detail": error_payload(error, request_locale(request))},
+        )
+
+
 app.include_router(outline_router)
 app.include_router(projects_router)
 app.include_router(scripts_router)
 app.include_router(project_pages_router)
-app.include_router(image_prompts_router)
 app.include_router(image_specs_router)
 app.include_router(image_generation_router)
 app.include_router(settings_router)
@@ -54,9 +78,15 @@ app.include_router(visual_bible_router)
 
 
 @app.exception_handler(RequestValidationError)
-async def validation_exception_handler(request, exc: RequestValidationError) -> JSONResponse:
+async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
     """把 FastAPI 参数校验错误也转换成稳定 code，避免前端解析英文 detail。"""
 
+    logger.warning(
+        "API validation error method=%s path=%s error_count=%s",
+        request.method,
+        request.url.path,
+        len(exc.errors()),
+    )
     error = AppError(
         code="common.validation_error",
         status_code=422,

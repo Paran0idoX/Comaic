@@ -4,15 +4,15 @@ from typing import Any, AsyncIterator
 
 from backend.agents.continuity_event_agent import ContinuityEventAgent
 from backend.agents.shot_planner_agent import ShotPlannerAgent
+from backend.i18n.errors import AppError, app_error_from_exception
 from backend.models.comic import (
     ComicPage,
     ContinuityCompilation,
     ImagePromptPreset,
     ImageSpec,
-    ModelProfile,
+    ImageSpecCompilation,
     OutfitVariant,
     PageShotPlan,
-    ScriptCharacter,
     ScriptScene,
     StyleProfile,
     VisualAsset,
@@ -26,13 +26,13 @@ from backend.models.enums import (
     ContinuityTargetType,
     GenerationMode,
     ImagePromptPresetKind,
-    ModelFamily,
+    ImagePromptType,
     ScriptGenerationTaskStatus,
     VisualAssetRole,
     VisualEntityType,
 )
 from backend.repositories.image_spec_repository import ImageSpecRepository
-from backend.services.image_spec_compilers import compiler_for_family
+from backend.services.image_spec_compilers import compiler_for_prompt_type
 from backend.services.visual_state_reducer import VisualStateReducer
 from backend.utils.json_utils import canonical_hash, canonical_json
 from backend.utils.prompt_loader import PromptLoader
@@ -47,9 +47,10 @@ CONTROL_ROLES = {
 
 
 class ImageSpecService:
-    """编排连续性事件、确定性状态、ShotPlan 和模型专用 ImageSpec。"""
+    """编排连续性事件、确定性状态、ShotPlan 和三类 Prompt ImageSpec。"""
 
     PROMPT_VERSION = "1"
+    CONTINUITY_REDUCER_ATTEMPTS = 3
 
     def __init__(self, repository: ImageSpecRepository):
         self.repository = repository
@@ -70,37 +71,124 @@ class ImageSpecService:
                 )
             )
             self.repository.session.commit()
-        if self.repository.get_default_prompt_preset(ImagePromptPresetKind.NEGATIVE_PROMPT) is None:
+        if self.repository.get_default_prompt_preset(
+            ImagePromptPresetKind.NEGATIVE_PROMPT
+        ) is None:
             self.repository.session.add(
                 ImagePromptPreset(
                     name="Default negative prompt",
                     description="Generic negative prompt for structured comic image generation.",
                     kind=ImagePromptPresetKind.NEGATIVE_PROMPT,
                     content="low quality, blurry, bad anatomy, extra fingers, text, watermark",
+                    tag_content="low quality, blurry, bad anatomy, extra fingers, text, watermark",
+                    natural_language_content=(
+                        "Avoid low quality, blur, incorrect anatomy, extra fingers, text, and watermarks."
+                    ),
                     is_default=True,
                 )
             )
             self.repository.session.commit()
 
+    def list_presets(
+        self,
+        kind: ImagePromptPresetKind | None = None,
+    ) -> list[ImagePromptPreset]:
+        self.ensure_default_presets()
+        return self.repository.list_prompt_presets(kind)
+
+    def create_preset(
+        self,
+        *,
+        name: str,
+        kind: ImagePromptPresetKind,
+        content: str = "",
+        tag_content: str = "",
+        natural_language_content: str = "",
+        description: str | None = None,
+        is_default: bool = False,
+    ) -> ImagePromptPreset:
+        values = self._normalize_preset_values(
+            name=name,
+            kind=kind,
+            content=content,
+            tag_content=tag_content,
+            natural_language_content=natural_language_content,
+            description=description,
+            is_default=is_default,
+        )
+        return self.repository.create_prompt_preset(**values)
+
+    def update_preset(self, *, preset_id: int, **values: Any) -> ImagePromptPreset:
+        current = self.repository.session.get(ImagePromptPreset, preset_id)
+        if current is None:
+            raise ValueError(f"ImagePromptPreset not found: {preset_id}")
+        normalized = self._normalize_preset_values(
+            name=str(values.get("name", current.name)),
+            kind=ImagePromptPresetKind(values.get("kind", current.kind)),
+            content=str(values.get("content", current.content)),
+            tag_content=str(values.get("tag_content", current.tag_content)),
+            natural_language_content=str(
+                values.get("natural_language_content", current.natural_language_content)
+            ),
+            description=values.get("description", current.description),
+            is_default=bool(values.get("is_default", current.is_default)),
+        )
+        return self.repository.update_prompt_preset(preset_id, **normalized)
+
+    def delete_preset(self, preset_id: int) -> None:
+        self.repository.delete_prompt_preset(preset_id)
+
+    @staticmethod
+    def _normalize_preset_values(
+        *,
+        name: str,
+        kind: ImagePromptPresetKind,
+        content: str,
+        tag_content: str,
+        natural_language_content: str,
+        description: str | None,
+        is_default: bool,
+    ) -> dict[str, Any]:
+        normalized_name = name.strip()
+        if not normalized_name:
+            raise ValueError("Prompt preset name is required.")
+        if kind == ImagePromptPresetKind.SHOT_PLANNER_SYSTEM_PROMPT:
+            normalized_content = content.strip()
+            if not normalized_content:
+                raise ValueError("ShotPlanner prompt content is required.")
+            tag_content = ""
+            natural_language_content = ""
+        else:
+            normalized_content = content.strip() or tag_content.strip()
+            if not tag_content.strip() or not natural_language_content.strip():
+                raise ValueError(
+                    "Negative prompt preset requires tag and natural language content."
+                )
+        return {
+            "name": normalized_name,
+            "kind": kind,
+            "content": normalized_content,
+            "tag_content": tag_content.strip(),
+            "natural_language_content": natural_language_content.strip(),
+            "description": description.strip() if description else None,
+            "is_default": is_default,
+        }
     async def stream_compile_task(
         self,
         *,
         task_id: int,
-        model_profile_ids: list[int],
-        primary_model_profile_id: int,
         style_profile_id: int | None,
         shot_planner_preset_id: int | None,
         negative_prompt_preset_id: int | None,
         generation_mode: GenerationMode,
         concurrency: int = 8,
         regenerate_continuity: bool = False,
+        resume_existing: bool = True,
     ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
-        """流式编译完整任务；视觉真值只计算一次，再为多个模型生成规格。"""
+        """流式编译完整任务；视觉真值和镜头计划只计算一次，再生成三类规格。"""
 
         context = self._prepare_context(
             task_id=task_id,
-            model_profile_ids=model_profile_ids,
-            primary_model_profile_id=primary_model_profile_id,
             style_profile_id=style_profile_id,
             shot_planner_preset_id=shot_planner_preset_id,
             negative_prompt_preset_id=negative_prompt_preset_id,
@@ -109,7 +197,7 @@ class ImageSpecService:
         yield "start", {
             "task_id": task_id,
             "total_pages": len(pages),
-            "model_profile_ids": model_profile_ids,
+            "prompt_types": [item.value for item in ImagePromptType],
             "generation_mode": generation_mode.value,
         }
 
@@ -125,6 +213,7 @@ class ImageSpecService:
             "snapshot_count": len(compilation.snapshots),
         }
         snapshots_by_page = {item.page_id: item for item in compilation.snapshots}
+        total_specs = len(pages) * len(ImagePromptType)
         for page in pages:
             snapshot = snapshots_by_page[page.id]
             yield "snapshot", self._snapshot_payload(snapshot, page)
@@ -133,9 +222,18 @@ class ImageSpecService:
         semaphore = asyncio.Semaphore(normalized_concurrency)
         planner = ShotPlannerAgent(system_prompt=context["planner_preset"].content)
 
-        async def plan_page(page: ComicPage) -> tuple[ComicPage, dict[str, Any]]:
+        async def plan_page(
+            page: ComicPage,
+        ) -> tuple[ComicPage, dict[str, Any], PageShotPlan | None]:
             async with semaphore:
                 snapshot = snapshots_by_page[page.id]
+                existing = self._reusable_shot_plan(
+                    page=page,
+                    snapshot=snapshot,
+                    context=context,
+                )
+                if existing is not None:
+                    return page, self._loads_object(existing.plan_json), existing
                 snapshot_data = self._loads_object(snapshot.state_json)
                 page_data = self._page_payload(page)
                 controls = self._available_controls(snapshot_data)
@@ -144,61 +242,431 @@ class ImageSpecService:
                     snapshot=snapshot_data,
                     available_controls=controls,
                 )
-                return page, plan
+                return page, plan, None
 
-        planned = await asyncio.gather(*(plan_page(page) for page in pages))
-        completed_specs = 0
-        total_specs = len(pages) * len(context["profiles"])
-        for page, plan_data in sorted(planned, key=lambda item: item[0].page_no):
-            snapshot = snapshots_by_page[page.id]
-            plan_json = canonical_json(plan_data)
-            shot_plan = self.repository.add_shot_plan(
-                page_id=page.id,
-                snapshot_id=snapshot.id,
-                planner_preset_id=context["planner_preset"].id,
-                plan_json=plan_json,
-                plan_hash=self._shot_plan_source_hash(
-                    plan=plan_data,
-                    planner_preset=context["planner_preset"],
-                    planner_model=context["llm_model"],
-                ),
-                planner_model=context["llm_model"],
-                prompt_version=self.PROMPT_VERSION,
+        reusable = (
+            self._reusable_specs_by_page(
+                context=context,
+                snapshots_by_page=snapshots_by_page,
+                generation_mode=generation_mode,
             )
-            yield "shot_plan", self._shot_plan_payload(shot_plan, page)
+            if resume_existing
+            else {}
+        )
+        completed_pages = len(reusable)
+        completed_specs = completed_pages * len(ImagePromptType)
+        failed_pages: list[dict[str, Any]] = []
+        terminal = False
+        batch = self.repository.create_image_spec_compilation(
+            task_id=task_id,
+            continuity_compilation_id=compilation.id,
+            source_hash=self._image_spec_compilation_source_hash(
+                context=context,
+                compilation=compilation,
+                generation_mode=generation_mode,
+            ),
+            generation_mode=generation_mode,
+            total_pages=len(pages),
+            total_specs=total_specs,
+        )
+        self.repository.update_image_spec_compilation_progress(
+            batch,
+            completed_pages=completed_pages,
+            completed_specs=completed_specs,
+        )
 
-            for profile in context["profiles"]:
-                spec = self._compile_model_spec(
-                    page=page,
-                    snapshot=snapshot,
-                    shot_plan=shot_plan,
-                    model_profile=profile,
+        pending_pages = [page for page in pages if page.id not in reusable]
+        planning_tasks: list[asyncio.Task] = []
+        try:
+            yield "compilation", self._image_spec_compilation_payload(batch)
+            if reusable:
+                yield "resume", {
+                    "compilation_id": batch.id,
+                    "page_nos": sorted(
+                        page.page_no for page in pages if page.id in reusable
+                    ),
+                    "completed_pages": completed_pages,
+                    "completed_specs": completed_specs,
+                }
+            # 按完成顺序逐页落库；单页失败不取消其它页面，断开 SSE 时 finally
+            # 会显式取消并等待所有未完成 Task，避免留下无人接收的模型调用。
+            async def guarded_plan(
+                page: ComicPage,
+            ) -> tuple[ComicPage, dict[str, Any] | None, PageShotPlan | None, Exception | None]:
+                try:
+                    planned_page, plan_data, existing_plan = await plan_page(page)
+                    return planned_page, plan_data, existing_plan, None
+                except Exception as exc:  # 单页模型失败不取消其它页面
+                    return page, None, None, exc
+
+            planning_tasks = [
+                asyncio.create_task(guarded_plan(page)) for page in pending_pages
+            ]
+            for completed_task in asyncio.as_completed(planning_tasks):
+                page, plan_data, existing_plan, plan_error = await completed_task
+                if plan_error is not None or plan_data is None:
+                    failure = self._page_compilation_failure(
+                        page,
+                        plan_error or RuntimeError("ShotPlanner returned no plan."),
+                        default_code="image_spec.shot_plan_invalid",
+                    )
+                    failed_pages.append(failure)
+                    self.repository.update_image_spec_compilation_progress(
+                        batch,
+                        completed_pages=completed_pages,
+                        completed_specs=completed_specs,
+                        failed_pages_json=canonical_json(failed_pages),
+                    )
+                    yield "page_error", self._public_page_failure_payload(failure)
+                    continue
+
+                try:
+                    snapshot = snapshots_by_page[page.id]
+                    shot_plan = existing_plan or self.repository.add_shot_plan(
+                        page_id=page.id,
+                        snapshot_id=snapshot.id,
+                        planner_preset_id=context["planner_preset"].id,
+                        plan_json=canonical_json(plan_data),
+                        plan_hash=self._shot_plan_source_hash(
+                            plan=plan_data,
+                            planner_preset=context["planner_preset"],
+                            planner_model=context["llm_model"],
+                        ),
+                        planner_model=context["llm_model"],
+                        prompt_version=self.PROMPT_VERSION,
+                    )
+                    shot_plan_payload = self._shot_plan_payload(shot_plan, page)
+                    shot_plan_payload["reused"] = existing_plan is not None
+                    yield "shot_plan", shot_plan_payload
+
+                    for prompt_type in ImagePromptType:
+                        spec = self._compile_prompt_spec(
+                            page=page,
+                            snapshot=snapshot,
+                            shot_plan=shot_plan,
+                            prompt_type=prompt_type,
+                            style_profile=context["style"],
+                            style_assets=context["style_assets"],
+                            negative_preset=context["negative_preset"],
+                            generation_mode=generation_mode,
+                        )
+                        completed_specs += 1
+                        yield "image_spec", self._spec_payload(spec, page)
+                        yield "progress", {
+                            "task_id": task_id,
+                            "compilation_id": batch.id,
+                            "completed": completed_specs,
+                            "total": total_specs,
+                        }
+                    self.repository.mark_pages_spec_ready([page.id])
+                    completed_pages += 1
+                    self.repository.update_image_spec_compilation_progress(
+                        batch,
+                        completed_pages=completed_pages,
+                        completed_specs=completed_specs,
+                        failed_pages_json=canonical_json(failed_pages),
+                    )
+                except Exception as exc:
+                    failure = self._page_compilation_failure(page, exc)
+                    failed_pages.append(failure)
+                    self.repository.update_image_spec_compilation_progress(
+                        batch,
+                        completed_pages=completed_pages,
+                        completed_specs=completed_specs,
+                        failed_pages_json=canonical_json(failed_pages),
+                    )
+                    yield "page_error", self._public_page_failure_payload(failure)
+
+            if failed_pages:
+                details = canonical_json(failed_pages)
+                failure_codes = {str(item["code"]) for item in failed_pages}
+                if len(failure_codes) == 1:
+                    batch_error_code = next(iter(failure_codes))
+                elif "image_spec.shot_plan_invalid" in failure_codes:
+                    batch_error_code = "image_spec.shot_plan_invalid"
+                else:
+                    batch_error_code = "image_spec.compilation_failed"
+                self.repository.fail_image_spec_compilation(
+                    batch,
+                    completed_pages=completed_pages,
+                    completed_specs=completed_specs,
+                    failed_pages_json=details,
+                    error_code=batch_error_code,
+                    error_message=details,
+                )
+                terminal = True
+                yield "failed", self._image_spec_compilation_payload(batch)
+                raise AppError(
+                    batch_error_code,
+                    status_code=(
+                        400
+                        if batch_error_code == "image_spec.final_conditions_missing"
+                        else 422
+                    ),
+                    params={"count": len(failed_pages)},
+                    debug_message=(
+                        f"ImageSpec compilation {batch.id} failed on pages "
+                        f"{[item['page_no'] for item in failed_pages]}"
+                    ),
+                )
+
+            self.repository.complete_image_spec_compilation(batch)
+            terminal = True
+            yield "done", {
+                "task_id": task_id,
+                "continuity_compilation_id": compilation.id,
+                "image_spec_compilation_id": batch.id,
+                "total_pages": len(pages),
+                "total_specs": total_specs,
+            }
+        except asyncio.CancelledError:
+            self.repository.fail_image_spec_compilation(
+                batch,
+                completed_pages=completed_pages,
+                completed_specs=completed_specs,
+                failed_pages_json=canonical_json(failed_pages),
+                error_code="image_spec.compilation_interrupted",
+                error_message="ImageSpec compilation stream was cancelled.",
+            )
+            terminal = True
+            raise
+        except AppError:
+            raise
+        except Exception as exc:
+            self.repository.fail_image_spec_compilation(
+                batch,
+                completed_pages=completed_pages,
+                completed_specs=completed_specs,
+                failed_pages_json=canonical_json(failed_pages),
+                error_code="image_spec.compilation_failed",
+                error_message=str(exc),
+            )
+            terminal = True
+            raise AppError(
+                "image_spec.compilation_failed",
+                status_code=500,
+                debug_message=str(exc),
+            ) from exc
+        finally:
+            for task in planning_tasks:
+                if not task.done():
+                    task.cancel()
+            if planning_tasks:
+                await asyncio.gather(*planning_tasks, return_exceptions=True)
+            if not terminal:
+                self.repository.fail_image_spec_compilation(
+                    batch,
+                    completed_pages=completed_pages,
+                    completed_specs=completed_specs,
+                    failed_pages_json=canonical_json(failed_pages),
+                    error_code="image_spec.compilation_interrupted",
+                    error_message="ImageSpec compilation stream ended before completion.",
+                )
+
+    def _reusable_shot_plan(
+        self,
+        *,
+        page: ComicPage,
+        snapshot: VisualStateSnapshot,
+        context: dict[str, Any],
+    ) -> PageShotPlan | None:
+        """Prompt 表达类型或 Preview/Final 改变时复用仍有效的模型无关镜头计划。"""
+
+        for shot_plan in self.repository.list_shot_plans(
+            page_id=page.id,
+            snapshot_id=snapshot.id,
+        ):
+            if shot_plan.planner_preset_id != context["planner_preset"].id:
+                continue
+            plan = self._loads_object(shot_plan.plan_json)
+            current_hash = self._shot_plan_source_hash(
+                plan=plan,
+                planner_preset=context["planner_preset"],
+                planner_model=context["llm_model"],
+            )
+            if shot_plan.plan_hash == current_hash:
+                return shot_plan
+        return None
+
+    def _reusable_specs_by_page(
+        self,
+        *,
+        context: dict[str, Any],
+        snapshots_by_page: dict[int, VisualStateSnapshot],
+        generation_mode: GenerationMode,
+    ) -> dict[int, list[ImageSpec]]:
+        """只复用来源仍完全一致、且三种 Prompt 共用同一 ShotPlan 的页面。"""
+
+        latest = self.repository.list_latest_specs(task_id=context["task"].id)
+        by_key = {
+            (item.page_id, item.prompt_type, item.generation_mode): item
+            for item in latest
+        }
+        reusable: dict[int, list[ImageSpec]] = {}
+        expected_style_id = context["style"].id if context["style"] else None
+        expected_negative_id = (
+            context["negative_preset"].id if context["negative_preset"] else None
+        )
+        expected_planner_id = context["planner_preset"].id
+        for page in context["pages"]:
+            snapshot = snapshots_by_page[page.id]
+            specs = [
+                by_key.get((page.id, prompt_type, generation_mode))
+                for prompt_type in ImagePromptType
+            ]
+            if any(item is None for item in specs):
+                continue
+            typed_specs = [item for item in specs if item is not None]
+            if len({item.shot_plan_id for item in typed_specs}) != 1:
+                continue
+            shot_plan = typed_specs[0].shot_plan
+            if (
+                shot_plan.snapshot_id != snapshot.id
+                or shot_plan.planner_preset_id != expected_planner_id
+            ):
+                continue
+            current_plan_hash = self._shot_plan_source_hash(
+                plan=self._loads_object(shot_plan.plan_json),
+                planner_preset=context["planner_preset"],
+                planner_model=context["llm_model"],
+            )
+            if shot_plan.plan_hash != current_plan_hash:
+                continue
+            valid = True
+            for spec in typed_specs:
+                if (
+                    spec.snapshot_id != snapshot.id
+                    or spec.style_profile_id != expected_style_id
+                    or spec.negative_prompt_preset_id != expected_negative_id
+                ):
+                    valid = False
+                    break
+                expected_source_hash = self._image_spec_source_hash(
+                    snapshot_hash=snapshot.state_hash,
+                    plan_hash=current_plan_hash,
+                    prompt_type=spec.prompt_type,
                     style_profile=context["style"],
                     style_assets=context["style_assets"],
                     negative_preset=context["negative_preset"],
-                    generation_mode=generation_mode,
                 )
-                if profile.id == primary_model_profile_id:
-                    self.repository.update_legacy_prompt_cache(page.id, spec.positive_prompt)
-                completed_specs += 1
-                yield "image_spec", self._spec_payload(spec, page)
-                yield "progress", {
-                    "task_id": task_id,
-                    "completed": completed_specs,
-                    "total": total_specs,
-                }
-        yield "done", {
-            "task_id": task_id,
-            "compilation_id": compilation.id,
-            "total_pages": len(pages),
-            "total_specs": total_specs,
+                if spec.source_hash != expected_source_hash:
+                    valid = False
+                    break
+            if valid:
+                reusable[page.id] = typed_specs
+        return reusable
+
+    def _image_spec_compilation_source_hash(
+        self,
+        *,
+        context: dict[str, Any],
+        compilation: ContinuityCompilation,
+        generation_mode: GenerationMode,
+    ) -> str:
+        """批量任务 Hash 用于审计本次连续性快照、Prompt 与编译器组合。"""
+
+        return canonical_hash(
+            {
+                "schema_version": 1,
+                "continuity_source_hash": compilation.source_hash,
+                "snapshots": [
+                    {
+                        "page_id": item.page_id,
+                        "state_hash": item.state_hash,
+                    }
+                    for item in sorted(compilation.snapshots, key=lambda value: value.page_id)
+                ],
+                "generation_mode": generation_mode.value,
+                "style": (
+                    self._style_payload(context["style"], context["style_assets"])
+                    if context["style"] is not None
+                    else None
+                ),
+                "planner_preset": {
+                    "id": context["planner_preset"].id,
+                    "content_hash": canonical_hash(context["planner_preset"].content),
+                },
+                "negative_prompt": self._negative_prompt_payload(
+                    context["negative_preset"]
+                ),
+                "agent": {
+                    "version": ShotPlannerAgent.VERSION,
+                    "llm_model": context["llm_model"],
+                },
+                "compilers": [
+                    {
+                        "prompt_type": prompt_type.value,
+                        "key": compiler_for_prompt_type(prompt_type).compiler_key,
+                        "version": compiler_for_prompt_type(prompt_type).compiler_version,
+                    }
+                    for prompt_type in ImagePromptType
+                ],
+            }
+        )
+
+    @staticmethod
+    def _page_compilation_failure(
+        page: ComicPage,
+        exc: BaseException,
+        *,
+        default_code: str | None = None,
+    ) -> dict[str, Any]:
+        mapped = app_error_from_exception(
+            exc if isinstance(exc, Exception) else RuntimeError(str(exc))
+        )
+        code = mapped.code
+        if default_code and code.startswith("common."):
+            code = default_code
+        return {
+            "page_id": page.id,
+            "page_no": page.page_no,
+            "code": code,
+            "error_type": type(exc).__name__,
+            "message": str(exc),
         }
+
+    @staticmethod
+    def _public_page_failure_payload(failure: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "code": failure["code"],
+            "page_id": failure["page_id"],
+            "page_no": failure["page_no"],
+            "message": f"Page {failure['page_no']} could not be compiled.",
+        }
+
+    @staticmethod
+    def _image_spec_compilation_payload(item: ImageSpecCompilation) -> dict[str, Any]:
+        return {
+            "id": item.id,
+            "task_id": item.script_task_id,
+            "continuity_compilation_id": item.continuity_compilation_id,
+            "source_hash": item.source_hash,
+            "status": item.status.value,
+            "generation_mode": item.generation_mode.value,
+            "total_pages": item.total_pages,
+            "completed_pages": item.completed_pages,
+            "total_specs": item.total_specs,
+            "completed_specs": item.completed_specs,
+            "failed_pages": ImageSpecService._loads_list(item.failed_pages_json),
+            "error_code": item.error_code,
+            "error_message": item.error_message,
+            "created_at": item.created_at.isoformat(),
+            "updated_at": item.updated_at.isoformat(),
+        }
+
+    def list_image_spec_compilations(self, task_id: int) -> list[dict[str, Any]]:
+        if self.repository.get_script_task(task_id) is None:
+            raise ValueError(f"ScriptGenerationTask not found: {task_id}")
+        return [
+            self._image_spec_compilation_payload(item)
+            for item in self.repository.list_image_spec_compilations(task_id)
+        ]
 
     def list_task_specs(
         self,
         *,
         task_id: int,
-        model_profile_id: int | None = None,
+        prompt_type: ImagePromptType | None = None,
     ) -> list[dict[str, Any]]:
         task = self.repository.get_script_task(task_id)
         if task is None:
@@ -208,7 +676,7 @@ class ImageSpecService:
             self._spec_payload(spec, pages[spec.page_id])
             for spec in self.repository.list_latest_specs(
                 task_id=task_id,
-                model_profile_id=model_profile_id,
+                prompt_type=prompt_type,
             )
         ]
 
@@ -217,29 +685,14 @@ class ImageSpecService:
 
         context = self._prepare_context(
             task_id=task_id,
-            model_profile_ids=[],
-            primary_model_profile_id=None,
             style_profile_id=None,
             shot_planner_preset_id=None,
             negative_prompt_preset_id=None,
-            require_profiles=False,
         )
         return canonical_hash(self._continuity_source_payload(context))
 
     def current_image_spec_source_hash(self, spec: ImageSpec) -> str:
-        """按当前模型/风格/Prompt/编译器配置重算规格来源，用于生成前判定 stale。"""
-
-        profile = self.repository.session.get(ModelProfile, spec.model_profile_id)
-        if profile is None:
-            raise ValueError(f"ModelProfile not found: {spec.model_profile_id}")
-        compiler = compiler_for_family(profile.family)
-        if (
-            profile.compiler_key != compiler.compiler_key
-            or profile.compiler_version != compiler.compiler_version
-        ):
-            raise ValueError(
-                f"ModelProfile compiler does not match family {profile.family.value}."
-            )
+        """按当前 Prompt 类型、风格和预设重算来源，用于生成前判定 stale。"""
         style = self.repository.get_style_profile(spec.style_profile_id)
         style_assets: list[dict[str, Any]] = []
         if style is not None:
@@ -266,7 +719,7 @@ class ImageSpecService:
         return self._image_spec_source_hash(
             snapshot_hash=spec.snapshot.state_hash,
             plan_hash=current_plan_hash,
-            model_profile=profile,
+            prompt_type=spec.prompt_type,
             style_profile=style,
             style_assets=style_assets,
             negative_preset=negative_preset,
@@ -285,12 +738,9 @@ class ImageSpecService:
             raise ValueError(f"ContinuityCompilation not found: {compilation_id}")
         context = self._prepare_context(
             task_id=original.script_task_id,
-            model_profile_ids=[],
-            primary_model_profile_id=None,
             style_profile_id=None,
             shot_planner_preset_id=None,
             negative_prompt_preset_id=None,
-            require_profiles=False,
         )
         # 系统事件来自当前脚本分段和当前获批版本，不能沿用旧 compilation 的快照。
         system_events = self._section_boundary_events(context)
@@ -313,12 +763,9 @@ class ImageSpecService:
         self,
         *,
         task_id: int,
-        model_profile_ids: list[int],
-        primary_model_profile_id: int | None,
         style_profile_id: int | None,
         shot_planner_preset_id: int | None,
         negative_prompt_preset_id: int | None,
-        require_profiles: bool = True,
     ) -> dict[str, Any]:
         self.ensure_default_presets()
         task = self.repository.get_script_task(task_id)
@@ -329,15 +776,6 @@ class ImageSpecService:
         pages = [page for page in self.repository.list_task_pages(task_id) if page.summary]
         if not pages:
             raise ValueError(f"Script pages not found for task: {task_id}")
-        profiles = self.repository.get_model_profiles(model_profile_ids)
-        if require_profiles:
-            if len(profiles) != len(model_profile_ids):
-                raise ValueError("One or more ModelProfile records were not found.")
-            if primary_model_profile_id not in model_profile_ids:
-                raise ValueError("primary_model_profile_id must be included in model_profile_ids.")
-            disabled = [profile.id for profile in profiles if not profile.is_enabled]
-            if disabled:
-                raise ValueError(f"ModelProfile must be enabled before compilation: {disabled}")
         style = self.repository.get_style_profile(style_profile_id)
         if style_profile_id is not None and (
             style is None or style.project_id != task.project_id
@@ -380,7 +818,6 @@ class ImageSpecService:
         return {
             "task": task,
             "pages": pages,
-            "profiles": profiles,
             "style": style,
             "style_assets": style_assets,
             "planner_preset": planner_preset,
@@ -411,37 +848,53 @@ class ImageSpecService:
             )
             if reusable is not None:
                 return reusable, True
-        compilation = self.repository.create_compilation(
-            task_id=context["task"].id,
-            source_hash=source_hash,
-            llm_config_id=context["llm_config_id"],
-            llm_model=context["llm_model"],
-            prompt_version=self.PROMPT_VERSION,
-            reducer_version=VisualStateReducer.VERSION,
-        )
-        try:
-            llm_events = await ContinuityEventAgent().extract(
-                pages=[self._page_payload(page) for page in context["pages"]],
-                characters=self._character_agent_payloads(context["pages"]),
-                scenes=[self._scene_text_payload(scene) for scene in context["scenes"]],
-                outfits=[self._outfit_payload(item, []) for item in context["outfits"]],
-            )
-            system_events = self._section_boundary_events(context)
-            events = self._normalize_events(system_events + llm_events, context=context)
-            completed = self._persist_reduced_compilation(
-                context=context,
+        validation_feedback: str | None = None
+        last_error: Exception | None = None
+        for attempt in range(1, self.CONTINUITY_REDUCER_ATTEMPTS + 1):
+            compilation = self.repository.create_compilation(
+                task_id=context["task"].id,
                 source_hash=source_hash,
-                events=events,
-                existing_compilation=compilation,
+                llm_config_id=context["llm_config_id"],
+                llm_model=context["llm_model"],
+                prompt_version=self.PROMPT_VERSION,
+                reducer_version=VisualStateReducer.VERSION,
             )
-            return completed, False
-        except Exception as exc:
-            self.repository.fail_compilation(
-                compilation,
-                error_code="image_spec.continuity_failed",
-                error_message=str(exc),
-            )
-            raise
+            try:
+                llm_events = await ContinuityEventAgent().extract(
+                    pages=[self._page_payload(page) for page in context["pages"]],
+                    characters=self._character_agent_payloads(context["pages"]),
+                    scenes=[self._scene_text_payload(scene) for scene in context["scenes"]],
+                    outfits=[self._outfit_payload(item, []) for item in context["outfits"]],
+                    validation_feedback=validation_feedback,
+                )
+                system_events = self._section_boundary_events(context)
+                events = self._normalize_events(system_events + llm_events, context=context)
+                completed = self._persist_reduced_compilation(
+                    context=context,
+                    source_hash=source_hash,
+                    events=events,
+                    existing_compilation=compilation,
+                )
+                return completed, False
+            except Exception as exc:
+                last_error = exc
+                validation_feedback = str(exc)
+                self.repository.fail_compilation(
+                    compilation,
+                    error_code="image_spec.continuity_failed",
+                    error_message=(
+                        f"attempt {attempt}/{self.CONTINUITY_REDUCER_ATTEMPTS}: {exc}"
+                    ),
+                )
+
+        raise AppError(
+            "image_spec.continuity_invalid",
+            status_code=400,
+            debug_message=(
+                "Continuity reducer validation failed after "
+                f"{self.CONTINUITY_REDUCER_ATTEMPTS} attempts: {last_error}"
+            ),
+        )
 
     def _persist_reduced_compilation(
         self,
@@ -639,15 +1092,26 @@ class ImageSpecService:
                     else None
                 )
                 outline = character.outline_character
-                effective_hairstyle = character.current_hairstyle or (
-                    outline.default_hairstyle if outline else ""
+                effective_hairstyle = self._stable_section_feature(
+                    character.current_hairstyle,
+                    outline.default_hairstyle if outline else "",
                 )
-                effective_clothing = character.current_clothing or (
-                    outline.default_clothing if outline else ""
-                )
-                effective_accessories = character.current_accessories or (
-                    outline.default_accessories if outline else ""
-                )
+                if outfit is not None:
+                    effective_clothing = ", ".join(
+                        str(value) for value in self._loads_list(outfit.garment_components_json)
+                    ) or outfit.name
+                    effective_accessories = ", ".join(
+                        str(value) for value in self._loads_list(outfit.accessories_json)
+                    )
+                else:
+                    effective_clothing = self._stable_section_feature(
+                        character.current_clothing,
+                        outline.default_clothing if outline else "",
+                    )
+                    effective_accessories = self._stable_section_feature(
+                        character.current_accessories,
+                        outline.default_accessories if outline else "",
+                    )
                 signature = (
                     effective_hairstyle,
                     outfit.id if outfit else None,
@@ -728,6 +1192,33 @@ class ImageSpecService:
                     )
                 )
         return events
+
+    @staticmethod
+    def _stable_section_feature(current: Any, default: Any) -> str:
+        """把湿污、凌乱和持有位置等后缀从基础造型版本中分离。"""
+
+        current_text = str(current or "").strip()
+        default_text = str(default or "").strip()
+        if not current_text:
+            return default_text
+        if not default_text:
+            return current_text
+
+        def head(value: str) -> str:
+            for separator in ("，", ",", "。", "；", ";", "（", "("):
+                value = value.split(separator, 1)[0]
+            return "".join(value.casefold().split())
+
+        current_head = head(current_text)
+        default_head = head(default_text)
+        shorter = min(len(current_head), len(default_head))
+        longer = max(len(current_head), len(default_head), 1)
+        if current_head == default_head or (
+            shorter / longer >= 0.8
+            and (current_head in default_head or default_head in current_head)
+        ):
+            return default_text
+        return current_text
 
     @staticmethod
     def _system_event(
@@ -830,20 +1321,55 @@ class ImageSpecService:
                 item["event_type"],
             )
         )
-        counters: dict[int, int] = defaultdict(int)
+        # 分段锁定值由 system event 表达，同一语义槽位内它优先于人工/LLM；
+        # 其它带不同 condition/object/prop key 的事件仍会完整保留。
+        discriminator_keys = {
+            ContinuityEventType.SET_ACCESSORY.value: "accessory_key",
+            ContinuityEventType.SET_GARMENT_STATE.value: "garment_key",
+            ContinuityEventType.SET_CLOTHING_CONDITION.value: "condition_key",
+            ContinuityEventType.SET_CHARACTER_CONDITION.value: "condition_key",
+            ContinuityEventType.PICK_UP_PROP.value: "prop_key",
+            ContinuityEventType.DROP_PROP.value: "prop_key",
+            ContinuityEventType.TRANSFER_PROP.value: "prop_key",
+            ContinuityEventType.SET_DOOR_STATE.value: "door_key",
+            ContinuityEventType.SET_OBJECT_STATE.value: "object_key",
+            ContinuityEventType.BREAK_OBJECT.value: "object_key",
+        }
+        deduplicated: list[dict[str, Any]] = []
+        seen_slots: set[tuple[Any, ...]] = set()
         for item in normalized:
+            discriminator_key = discriminator_keys.get(item["event_type"])
+            discriminator = (
+                str(item["payload"].get(discriminator_key, "")).strip()
+                if discriminator_key
+                else ""
+            )
+            slot = (
+                item["page_no"],
+                item["timing"],
+                item["event_type"],
+                item["target_type"],
+                item["target_key"],
+                discriminator,
+            )
+            if slot in seen_slots:
+                continue
+            seen_slots.add(slot)
+            deduplicated.append(item)
+        counters: dict[int, int] = defaultdict(int)
+        for item in deduplicated:
             counters[item["page_no"]] += 1
             item["sequence_no"] = counters[item["page_no"]]
-        return normalized
+        return deduplicated
 
-    # Model specs -------------------------------------------------------
-    def _compile_model_spec(
+    # Prompt specs ------------------------------------------------------
+    def _compile_prompt_spec(
         self,
         *,
         page: ComicPage,
         snapshot: VisualStateSnapshot,
         shot_plan: PageShotPlan,
-        model_profile: ModelProfile,
+        prompt_type: ImagePromptType,
         style_profile: StyleProfile | None,
         style_assets: list[dict[str, Any]],
         negative_preset: ImagePromptPreset | None,
@@ -851,7 +1377,6 @@ class ImageSpecService:
     ) -> ImageSpec:
         snapshot_data = self._loads_object(snapshot.state_json)
         plan_data = self._loads_object(shot_plan.plan_json)
-        profile_data = self._model_profile_payload(model_profile)
         style_data = (
             self._style_payload(style_profile, style_assets)
             if style_profile is not None
@@ -860,25 +1385,17 @@ class ImageSpecService:
         combined_source_hash = self._image_spec_source_hash(
             snapshot_hash=snapshot.state_hash,
             plan_hash=shot_plan.plan_hash,
-            model_profile=model_profile,
+            prompt_type=prompt_type,
             style_profile=style_profile,
             style_assets=style_assets,
             negative_preset=negative_preset,
         )
-        compiler = compiler_for_family(model_profile.family)
-        if (
-            model_profile.compiler_key != compiler.compiler_key
-            or model_profile.compiler_version != compiler.compiler_version
-        ):
-            raise ValueError(
-                f"ModelProfile compiler does not match family {model_profile.family.value}."
-            )
+        compiler = compiler_for_prompt_type(prompt_type)
         compiled = compiler.compile(
             snapshot=snapshot_data,
             shot_plan=plan_data,
-            model_profile=profile_data,
             style_profile=style_data,
-            negative_prompt=negative_preset.content if negative_preset else "",
+            negative_prompts=self._negative_prompt_payload(negative_preset),
             generation_mode=generation_mode,
             source_hash=combined_source_hash,
         )
@@ -886,7 +1403,7 @@ class ImageSpecService:
             page_id=page.id,
             snapshot_id=snapshot.id,
             shot_plan_id=shot_plan.id,
-            model_profile_id=model_profile.id,
+            prompt_type=prompt_type,
             style_profile_id=style_profile.id if style_profile else None,
             negative_prompt_preset_id=negative_preset.id if negative_preset else None,
             generation_mode=generation_mode,
@@ -907,19 +1424,19 @@ class ImageSpecService:
         *,
         snapshot_hash: str,
         plan_hash: str,
-        model_profile: ModelProfile,
+        prompt_type: ImagePromptType,
         style_profile: StyleProfile | None,
         style_assets: list[dict[str, Any]],
         negative_preset: ImagePromptPreset | None,
     ) -> str:
-        """完整来源 Hash 包含模型配置、编译器、风格资产和负向 Prompt 版本。"""
+        """完整来源 Hash 包含 Prompt 类型、编译器、风格资产和负向 Prompt 版本。"""
 
-        compiler = compiler_for_family(model_profile.family)
+        compiler = compiler_for_prompt_type(prompt_type)
         return canonical_hash(
             {
                 "snapshot_hash": snapshot_hash,
                 "plan_hash": plan_hash,
-                "model_profile": self._model_profile_payload(model_profile),
+                "prompt_type": prompt_type.value,
                 "compiler": {
                     "key": compiler.compiler_key,
                     "version": compiler.compiler_version,
@@ -933,7 +1450,10 @@ class ImageSpecService:
                     {
                         "id": negative_preset.id,
                         "kind": negative_preset.kind.value,
-                        "content_hash": canonical_hash(negative_preset.content),
+                        "tag_content_hash": canonical_hash(negative_preset.tag_content),
+                        "natural_language_content_hash": canonical_hash(
+                            negative_preset.natural_language_content
+                        ),
                     }
                     if negative_preset is not None
                     else None
@@ -1166,7 +1686,6 @@ class ImageSpecService:
             "entity_id": asset.entity_id,
             "entity_key": asset.entity_key,
             "role": asset.role.value,
-            "model_family": asset.model_family.value,
             "storage_kind": asset.storage_kind.value,
             "local_path": asset.local_path,
             "renderer_locator": asset.renderer_locator,
@@ -1184,28 +1703,25 @@ class ImageSpecService:
             "key": item.key,
             "version": item.version,
             "name": item.name,
-            "model_family": item.model_family.value,
-            "positive_tokens": item.positive_tokens,
-            "negative_tokens": item.negative_tokens,
+            "positive_tag": item.positive_tag,
+            "negative_tag": item.negative_tag,
+            "positive_natural_language": item.positive_natural_language,
+            "negative_natural_language": item.negative_natural_language,
             "color_palette": self._loads_list(item.color_palette_json),
             "lighting": item.lighting,
-            "render_defaults": self._loads_object(item.render_defaults_json),
             "status": item.status.value,
             "assets": assets,
         }
 
-    def _model_profile_payload(self, item: ModelProfile) -> dict[str, Any]:
+    @staticmethod
+    def _negative_prompt_payload(item: ImagePromptPreset | None) -> dict[str, str]:
+        """负向预设按两种基础表达返回；混合型由编译器按固定顺序合并。"""
+
+        if item is None:
+            return {"tag": "", "natural_language": ""}
         return {
-            "id": item.id,
-            "name": item.name,
-            "family": item.family.value,
-            "variant": item.variant,
-            "checkpoint_name": item.checkpoint_name,
-            "checkpoint_hash": item.checkpoint_hash,
-            "component_manifest": self._loads_object(item.component_manifest_json),
-            "default_render": self._loads_object(item.default_render_json),
-            "compiler_key": item.compiler_key,
-            "compiler_version": item.compiler_version,
+            "tag": item.tag_content,
+            "natural_language": item.natural_language_content,
         }
 
     @staticmethod
@@ -1255,8 +1771,7 @@ class ImageSpecService:
             "page_no": page.page_no,
             "snapshot_id": spec.snapshot_id,
             "shot_plan_id": spec.shot_plan_id,
-            "model_profile_id": spec.model_profile_id,
-            "model_family": spec.model_profile.family.value,
+            "prompt_type": spec.prompt_type.value,
             "generation_mode": spec.generation_mode.value,
             "spec": ImageSpecService._loads_object(spec.spec_json),
             "positive_prompt": spec.positive_prompt,

@@ -180,6 +180,46 @@ class OutlineAgent:
         self._ensure_ready()
         logger.info("OutlineAgent loading conversation messages thread_id=%s", thread_id)
         messages = await self._get_thread_messages(thread_id=thread_id)
+        conversation_messages = self._conversation_messages(messages)
+        logger.info(
+            "OutlineAgent loaded conversation messages thread_id=%s count=%s",
+            thread_id,
+            len(conversation_messages),
+        )
+        return conversation_messages
+
+    @classmethod
+    async def load_conversation_messages(
+        cls,
+        *,
+        thread_id: str,
+        memory_path: str | Path = "data/outline_agent_memory.sqlite3",
+    ) -> list[dict[str, str]]:
+        """不创建 LLM Agent，直接读取 checkpoint，避免恢复页面时强制要求 API Key。"""
+
+        checkpoint_path = Path(memory_path)
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        logger.info("Loading OutlineAgent checkpoint messages thread_id=%s", thread_id)
+        async with AsyncSqliteSaver.from_conn_string(str(checkpoint_path)) as checkpointer:
+            checkpoint = await checkpointer.aget(
+                {"configurable": {"thread_id": thread_id}},
+            )
+
+        channel_values = checkpoint.get("channel_values", {}) if checkpoint else {}
+        raw_messages = channel_values.get("messages", []) if isinstance(channel_values, dict) else []
+        messages = [message for message in raw_messages if isinstance(message, BaseMessage)]
+        conversation_messages = cls._conversation_messages(messages)
+        logger.info(
+            "Loaded OutlineAgent checkpoint messages thread_id=%s count=%s",
+            thread_id,
+            len(conversation_messages),
+        )
+        return conversation_messages
+
+    @classmethod
+    def _conversation_messages(cls, messages: list[BaseMessage]) -> list[dict[str, str]]:
+        """把 checkpoint 消息过滤为前端需要的 user/agent 文本。"""
+
         conversation_messages = []
         for message in messages:
             if isinstance(message, HumanMessage):
@@ -189,19 +229,14 @@ class OutlineAgent:
             else:
                 continue
 
-            content = self._message_text(message).strip()
+            content = cls._message_text(message).strip()
             if content:
                 conversation_messages.append(
                     {
                         "role": role,
-                        "content": self._display_message_text(message),
+                        "content": cls._display_message_text(message),
                     }
                 )
-        logger.info(
-            "OutlineAgent loaded conversation messages thread_id=%s count=%s",
-            thread_id,
-            len(conversation_messages),
-        )
         return conversation_messages
 
     async def _update_outline_tool(self, update_reason: str) -> str:
