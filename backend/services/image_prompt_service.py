@@ -363,7 +363,7 @@ class ImagePromptService:
                     task.cancel()
 
     def ensure_default_presets(self) -> None:
-        """初始化两类默认配置，保证新库打开页面即可使用。"""
+        """初始化旧 Prompt 与新 ShotPlanner 配置，保证两个工作台首次打开即可使用。"""
 
         if not self.repository.list_image_prompt_presets(
             ImagePromptPresetKind.SCRIPT_TO_IMAGE_SYSTEM_PROMPT
@@ -381,6 +381,18 @@ class ImagePromptService:
                 description="Generic negative prompt for comic image generation.",
                 kind=ImagePromptPresetKind.NEGATIVE_PROMPT,
                 content="low quality, blurry, bad anatomy, extra fingers, text artifacts, watermark",
+                is_default=True,
+            )
+        if not self.repository.list_image_prompt_presets(
+            ImagePromptPresetKind.SHOT_PLANNER_SYSTEM_PROMPT
+        ):
+            self.repository.create_image_prompt_preset(
+                name="Default shot planner",
+                description=(
+                    "Plan camera, subject regions and controls without rewriting visual identity."
+                ),
+                kind=ImagePromptPresetKind.SHOT_PLANNER_SYSTEM_PROMPT,
+                content=PromptLoader.load("shot_planner_prompt.md"),
                 is_default=True,
             )
 

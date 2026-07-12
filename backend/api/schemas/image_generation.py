@@ -2,7 +2,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field, model_validator
 
-from backend.models.enums import ImageGenerationToolKind
+from backend.models.enums import GenerationMode, ImageGenerationToolKind, SeedStrategy
 
 
 class ImageGenerationToolPresetRequest(BaseModel):
@@ -12,6 +12,14 @@ class ImageGenerationToolPresetRequest(BaseModel):
     kind: ImageGenerationToolKind = ImageGenerationToolKind.COMFYUI
     description: str | None = None
     is_default: bool = False
+    model_profile_id: int | None = Field(default=None, gt=0)
+    capabilities: dict = Field(
+        default_factory=lambda: {"features": ["txt2img"], "limits": {}}
+    )
+    bindings: dict = Field(
+        default_factory=lambda: {"schema_version": 1, "bindings": []}
+    )
+    runtime_manifest: dict = Field(default_factory=dict)
     comfy_base_url: str | None = None
     workflow_json: str | None = None
     positive_node_id: str | None = None
@@ -39,6 +47,10 @@ class ImageGenerationToolPresetResponse(BaseModel):
     kind: ImageGenerationToolKind
     description: str | None
     is_default: bool
+    model_profile_id: int | None
+    capabilities: dict
+    bindings: dict
+    runtime_manifest: dict
     comfy_base_url: str | None
     workflow_json: str | None
     positive_node_id: str | None
@@ -76,6 +88,7 @@ class ComicImageResponse(BaseModel):
 
     id: int
     page_id: int
+    generation_run_id: int | None
     image_url: str | None
     local_path: str | None
     seed: int | None
@@ -83,6 +96,9 @@ class ComicImageResponse(BaseModel):
     prompt: str | None
     negative_prompt: str | None
     score: float | None
+    sha256: str | None
+    width: int | None
+    height: int | None
     is_selected: bool
     created_at: datetime
 
@@ -95,6 +111,9 @@ class ImageGenerationPageResponse(BaseModel):
     image_prompt: str | None
     status: str
     selected_image_id: int | None
+    latest_spec_id: int | None = None
+    spec_warnings: list[dict] = Field(default_factory=list)
+    completed_candidates: int = 0
     images: list[ComicImageResponse]
 
 
@@ -114,6 +133,8 @@ class GenerateImagesRequest(BaseModel):
     poll_interval_seconds: float = Field(default=2.0, ge=0.5, le=20)
     candidates_per_page: int = Field(default=1, ge=1, le=4)
     negative_prompt: str | None = None
+    generation_mode: GenerationMode = GenerationMode.PREVIEW
+    seed_strategy: SeedStrategy = SeedStrategy.PER_PAGE
 
     @model_validator(mode="after")
     def validate_preset_id(self):
@@ -142,3 +163,34 @@ class GenerationTaskResponse(BaseModel):
     error_message: str | None
     created_at: datetime
     updated_at: datetime
+
+
+class GenerationRunResponse(BaseModel):
+    """单候选生成溯源响应；JSON 快照保持原始结构。"""
+
+    id: int
+    generation_task_id: int
+    page_id: int
+    image_spec_id: int
+    tool_preset_id: int
+    model_profile_id: int
+    candidate_index: int
+    seed: int | None
+    seed_applied: bool
+    seed_strategy: str
+    generation_mode: str
+    status: str
+    external_request_id: str | None
+    workflow: dict | None
+    workflow_hash: str | None
+    bindings: dict
+    model_manifest: dict
+    resolved_assets: list
+    render_params: dict
+    degradations: list
+    applied_spec: dict
+    error_code: str | None
+    error_message: str | None
+    created_at: datetime
+    updated_at: datetime
+    finished_at: datetime | None

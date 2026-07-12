@@ -117,6 +117,7 @@ def scene_to_response(scene: ScriptScene) -> ScriptSceneResponse:
         color_palette=scene.color_palette,
         visual_anchors=scene.visual_anchors,
         negative_constraints=scene.negative_constraints,
+        selected_visual_version_id=scene.selected_visual_version_id,
         created_at=scene.created_at,
         updated_at=scene.updated_at,
     )
@@ -133,6 +134,7 @@ def character_to_response(character: ScriptCharacter) -> ScriptCharacterResponse
         section_id=character.section_id,
         section_no=character.section.section_no if character.section is not None else None,
         outline_character_id=character.outline_character_id,
+        outfit_variant_id=character.outfit_variant_id,
         character_key=character.character_key,
         name=character.name,
         section_role=character.section_role,

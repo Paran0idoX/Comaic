@@ -40,6 +40,34 @@ class ComfyUIClient:
         response.raise_for_status()
         return response.json()
 
+    def upload_image(
+        self,
+        *,
+        content: bytes,
+        filename: str,
+        subfolder: str = "comaic",
+        overwrite: bool = False,
+    ) -> str:
+        """上传参考图/控制图，并返回可注入 LoadImage 节点的稳定名称。"""
+
+        response = requests.post(
+            f"{self.base_url}/upload/image",
+            files={"image": (filename, content, "application/octet-stream")},
+            data={
+                "subfolder": subfolder,
+                "overwrite": "true" if overwrite else "false",
+                "type": "input",
+            },
+            timeout=60,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        uploaded_name = payload.get("name")
+        uploaded_subfolder = str(payload.get("subfolder") or subfolder).strip("/")
+        if not uploaded_name:
+            raise ValueError(f"ComfyUI upload response missing name: {payload}")
+        return f"{uploaded_subfolder}/{uploaded_name}" if uploaded_subfolder else str(uploaded_name)
+
     def download_view_image(
         self,
         *,

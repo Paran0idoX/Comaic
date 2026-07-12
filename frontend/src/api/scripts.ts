@@ -61,6 +61,7 @@ export type ScriptScene = {
   color_palette: string
   visual_anchors: string
   negative_constraints: string
+  selected_visual_version_id: number | null
   created_at: string
   updated_at: string
 }
@@ -71,6 +72,7 @@ export type ScriptCharacter = {
   section_id: number
   section_no: number | null
   outline_character_id: number | null
+  outfit_variant_id: number | null
   character_key: string
   name: string
   section_role: string

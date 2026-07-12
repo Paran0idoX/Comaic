@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ChatLineRound, MagicStick, Picture, Tickets } from '@element-plus/icons-vue'
+import { ChatLineRound, Collection, Document, MagicStick, Picture, Tickets } from '@element-plus/icons-vue'
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute } from 'vue-router'
@@ -39,9 +39,17 @@ const activePath = computed(() => route.path)
         <el-icon><Tickets /></el-icon>
         <span>{{ t('nav.scripts') }}</span>
       </el-menu-item>
+      <el-menu-item index="/visual-bible">
+        <el-icon><Collection /></el-icon>
+        <span>{{ t('nav.visualBible') }}</span>
+      </el-menu-item>
       <el-menu-item index="/prompts">
-        <el-icon><MagicStick /></el-icon>
+        <el-icon><Document /></el-icon>
         <span>{{ t('nav.prompts') }}</span>
+      </el-menu-item>
+      <el-menu-item index="/image-specs">
+        <el-icon><MagicStick /></el-icon>
+        <span>{{ t('nav.imageSpecs') }}</span>
       </el-menu-item>
       <el-menu-item index="/image-generation">
         <el-icon><Picture /></el-icon>

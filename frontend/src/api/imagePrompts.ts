@@ -3,6 +3,7 @@ import { ApiError, apiHeaders, normalizeBackendError, parseApiErrorResponse } fr
 
 export const IMAGE_PROMPT_PRESET_KINDS = {
   system: 'script_to_image_system_prompt',
+  shot: 'shot_planner_system_prompt',
   negative: 'negative_prompt',
 } as const
 

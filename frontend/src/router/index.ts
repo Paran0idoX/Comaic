@@ -2,9 +2,11 @@ import { createRouter, createWebHistory } from 'vue-router'
 
 import OutlineWorkspaceView from '@/views/OutlineWorkspaceView.vue'
 import ImagePromptWorkspaceView from '@/views/ImagePromptWorkspaceView.vue'
+import ImageSpecWorkspaceView from '@/views/ImageSpecWorkspaceView.vue'
 import ImageGenerationWorkspaceView from '@/views/ImageGenerationWorkspaceView.vue'
 import SettingsView from '@/views/SettingsView.vue'
 import ScriptWorkspaceView from '@/views/ScriptWorkspaceView.vue'
+import VisualBibleWorkspaceView from '@/views/VisualBibleWorkspaceView.vue'
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
@@ -39,6 +41,22 @@ const router = createRouter({
       component: ImagePromptWorkspaceView,
       meta: {
         titleKey: 'routeTitles.prompts',
+      },
+    },
+    {
+      path: '/visual-bible',
+      name: 'visualBible',
+      component: VisualBibleWorkspaceView,
+      meta: {
+        titleKey: 'routeTitles.visualBible',
+      },
+    },
+    {
+      path: '/image-specs',
+      name: 'imageSpecs',
+      component: ImageSpecWorkspaceView,
+      meta: {
+        titleKey: 'routeTitles.imageSpecs',
       },
     },
     {

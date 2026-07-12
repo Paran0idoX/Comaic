@@ -1385,6 +1385,10 @@ class ComicRepository:
         kind: ImageGenerationToolKind,
         description: str | None = None,
         is_default: bool = False,
+        model_profile_id: int | None = None,
+        capabilities_json: str = '{"features":["txt2img"],"limits":{}}',
+        bindings_json: str = '{"schema_version":1,"bindings":[]}',
+        runtime_manifest_json: str = "{}",
         comfy_base_url: str | None = None,
         workflow_json: str | None = None,
         positive_node_id: str | None = None,
@@ -1412,6 +1416,10 @@ class ComicRepository:
             description=description,
             kind=kind,
             is_default=is_default,
+            model_profile_id=model_profile_id,
+            capabilities_json=capabilities_json,
+            bindings_json=bindings_json,
+            runtime_manifest_json=runtime_manifest_json,
             comfy_base_url=comfy_base_url,
             workflow_json=workflow_json,
             positive_node_id=positive_node_id,
@@ -1443,6 +1451,10 @@ class ComicRepository:
         kind: ImageGenerationToolKind,
         description: str | None = None,
         is_default: bool = False,
+        model_profile_id: int | None = None,
+        capabilities_json: str = '{"features":["txt2img"],"limits":{}}',
+        bindings_json: str = '{"schema_version":1,"bindings":[]}',
+        runtime_manifest_json: str = "{}",
         comfy_base_url: str | None = None,
         workflow_json: str | None = None,
         positive_node_id: str | None = None,
@@ -1472,6 +1484,10 @@ class ComicRepository:
         preset.description = description
         preset.kind = kind
         preset.is_default = is_default
+        preset.model_profile_id = model_profile_id
+        preset.capabilities_json = capabilities_json
+        preset.bindings_json = bindings_json
+        preset.runtime_manifest_json = runtime_manifest_json
         preset.comfy_base_url = comfy_base_url
         preset.workflow_json = workflow_json
         preset.positive_node_id = positive_node_id
