@@ -52,6 +52,21 @@ ERROR_MESSAGES: dict[str, dict[str, str]] = {
         "image_generation.workflow_input_name_empty": "Workflow 输入名不能为空。",
         "image_generation.workflow_input_not_found": "Workflow 节点输入不存在。",
         "image_generation.workflow_seed_required": "Workflow 需要配置 Seed 节点 ID 和 Seed 输入名。",
+        "image_generation.run_not_found": "生成溯源记录不存在。",
+        "visual_bible.model_not_found": "模型 Profile 不存在。",
+        "visual_bible.model_invalid": "模型 Profile 配置不合法。",
+        "visual_bible.config_not_found": "视觉配置不存在。",
+        "visual_bible.asset_not_found": "视觉资产不存在。",
+        "visual_bible.image_not_found": "候选图片文件不存在。",
+        "visual_bible.asset_invalid": "视觉资产文件或归属不合法。",
+        "image_spec.not_found": "当前页面和模型没有可用的 ImageSpec，请先重新编译。",
+        "image_spec.stale": "ImageSpec 已过期，请先重新编译。",
+        "image_spec.profile_disabled": "模型 Profile 尚未启用或未完成本地模型配置。",
+        "image_spec.final_conditions_missing": "Final 模式缺少获批视觉条件，无法提交生成。",
+        "image_spec.continuity_invalid": "连续性事件或视觉状态不合法。",
+        "workflow.binding_invalid": "Workflow 绑定配置不合法。",
+        "workflow.capability_missing": "Workflow 无法覆盖 ImageSpec 所需能力。",
+        "workflow.model_family_mismatch": "Workflow 与模型家族不匹配。",
         "llm.config_not_found": "模型配置不存在。",
         "llm.config_missing": "请先配置模型 API Key。",
         "llm.provider_unsupported": "当前模型服务商暂不支持。",
@@ -100,6 +115,21 @@ ERROR_MESSAGES: dict[str, dict[str, str]] = {
         "image_generation.workflow_input_name_empty": "Workflow input name cannot be empty.",
         "image_generation.workflow_input_not_found": "Workflow node input not found.",
         "image_generation.workflow_seed_required": "Workflow seed node ID and seed input name are required.",
+        "image_generation.run_not_found": "Generation provenance record not found.",
+        "visual_bible.model_not_found": "Model profile not found.",
+        "visual_bible.model_invalid": "The model profile configuration is invalid.",
+        "visual_bible.config_not_found": "Visual configuration not found.",
+        "visual_bible.asset_not_found": "Visual asset not found.",
+        "visual_bible.image_not_found": "Candidate image file not found.",
+        "visual_bible.asset_invalid": "The visual asset file or owner is invalid.",
+        "image_spec.not_found": "No ImageSpec is available for this page and model. Compile it first.",
+        "image_spec.stale": "The ImageSpec is stale. Recompile it first.",
+        "image_spec.profile_disabled": "The model profile is disabled or its local model configuration is incomplete.",
+        "image_spec.final_conditions_missing": "Final mode is missing approved visual conditions and cannot submit generation.",
+        "image_spec.continuity_invalid": "The continuity events or visual state are invalid.",
+        "workflow.binding_invalid": "The workflow binding configuration is invalid.",
+        "workflow.capability_missing": "The workflow cannot satisfy required ImageSpec capabilities.",
+        "workflow.model_family_mismatch": "The workflow model family does not match.",
         "llm.config_not_found": "LLM configuration not found.",
         "llm.config_missing": "Please configure the model API key first.",
         "llm.provider_unsupported": "This model provider is not supported yet.",
@@ -236,11 +266,60 @@ def code_from_message(message: str) -> tuple[str, int]:
         return "image_prompt.preset_not_found", 404
     if "generated image prompt cannot be empty" in lowered:
         return "image_prompt.generated_empty", 400
+    if "generationrun not found" in lowered:
+        return "image_generation.run_not_found", 404
+    if "imagespec is stale" in lowered:
+        return "image_spec.stale", 409
+    if "imagespec not found" in lowered:
+        return "image_spec.not_found", 409
+    if "final image spec is missing canonical conditions" in lowered:
+        return "image_spec.final_conditions_missing", 400
+    if "modelprofile must be enabled" in lowered or "enabled model profile requires" in lowered:
+        return "image_spec.profile_disabled", 400
+    if (
+        "checkpoint hash" in lowered
+        or "model profile name" in lowered
+        or "generic model profiles" in lowered
+        or "modelprofile compiler" in lowered
+    ):
+        return "visual_bible.model_invalid", 400
+    if "modelprofile not found" in lowered or "modelprofile records were not found" in lowered:
+        return "visual_bible.model_not_found", 404
+    if "visual configuration not found" in lowered:
+        return "visual_bible.config_not_found", 404
+    if "visualasset not found" in lowered or "visualasset file not found" in lowered:
+        return "visual_bible.asset_not_found", 404
+    if "comicimage file not found" in lowered:
+        return "visual_bible.image_not_found", 404
+    if (
+        "visual asset" in lowered
+        or "lora assets" in lowered
+        or "outfitvariant not found" in lowered
+        or "styleprofile not found" in lowered
+    ):
+        return "visual_bible.asset_invalid", 400
+    if (
+        "continuity" in lowered
+        or "unknown scene_key" in lowered
+        or "immutable visual fields" in lowered
+        or "does not hold prop" in lowered
+    ):
+        return "image_spec.continuity_invalid", 400
+    if ("compiler" in lowered and "family" in lowered) or "workflow model family" in lowered:
+        return "workflow.model_family_mismatch", 400
+    if (
+        "final workflow cannot satisfy" in lowered
+        or "final prompt-only backend cannot satisfy" in lowered
+        or "workflow capabilit" in lowered
+    ):
+        return "workflow.capability_missing", 400
+    if "workflow binding" in lowered or "imagespec source is missing" in lowered:
+        return "workflow.binding_invalid", 400
     if "image prompts not found" in lowered:
         return "image_generation.prompts_not_found", 404
     if "image prompt not found" in lowered:
         return "image_generation.prompt_missing", 400
-    if "comfyworkflowpreset not found" in lowered:
+    if "comfyworkflowpreset not found" in lowered or "imagegenerationtoolpreset not found" in lowered:
         return "image_generation.workflow_not_found", 404
     if "comfyui generated no images" in lowered or "history contains no images" in lowered:
         return "image_generation.comfyui_no_images", 400

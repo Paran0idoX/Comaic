@@ -1,6 +1,8 @@
 import asyncio
 import base64
 from copy import deepcopy
+import hashlib
+from io import BytesIO
 import json
 import os
 from pathlib import Path
@@ -9,13 +11,32 @@ from typing import Any, AsyncIterator
 from uuid import uuid4
 
 import requests
+from PIL import Image
 
-from backend.models.comic import ComicImage, ComicPage, GenerationTask, ImageGenerationToolPreset, ScriptGenerationTask
-from backend.models.enums import ComicPageStatus, GenerationTaskStatus, ImageGenerationToolKind
+from backend.models.comic import ComicImage, ComicPage, GenerationTask, ImageGenerationToolPreset, ImageSpec, ModelProfile, ScriptGenerationTask
+from backend.models.enums import (
+    ComicPageStatus,
+    GenerationMode,
+    GenerationRunStatus,
+    GenerationTaskStatus,
+    ImageGenerationToolKind,
+    SeedStrategy,
+    WorkflowCapability,
+)
 from backend.repositories.comic_repository import ComicRepository
+from backend.repositories.generation_repository import GenerationRepository
+from backend.repositories.image_spec_repository import ImageSpecRepository
+from backend.services.image_spec_service import ImageSpecService
+from backend.services.renderer_backends import backend_for_preset
 from backend.services.task_runtime import RuntimeTaskType, running_task_registry
 from backend.tools.comfyui_client import ComfyUIClient
 from backend.i18n.errors import app_error_from_exception
+from backend.services.workflow_compiler import (
+    WorkflowBindings,
+    WorkflowCapabilities,
+    WorkflowCompiler,
+)
+from backend.utils.json_utils import canonical_json
 
 
 CandidateSeedPair = tuple[int, int]
@@ -56,6 +77,10 @@ class ImageGenerationService:
         kind: ImageGenerationToolKind,
         description: str | None = None,
         is_default: bool = False,
+        model_profile_id: int | None = None,
+        capabilities: dict[str, Any] | None = None,
+        bindings: dict[str, Any] | None = None,
+        runtime_manifest: dict[str, Any] | None = None,
         comfy_base_url: str | None = None,
         workflow_json: str | None = None,
         positive_node_id: str | None = None,
@@ -78,6 +103,10 @@ class ImageGenerationService:
 
         payload = self._normalize_tool_payload(
             kind=kind,
+            model_profile_id=model_profile_id,
+            capabilities=capabilities,
+            bindings=bindings,
+            runtime_manifest=runtime_manifest,
             comfy_base_url=comfy_base_url,
             workflow_json=workflow_json,
             positive_node_id=positive_node_id,
@@ -112,6 +141,10 @@ class ImageGenerationService:
         kind: ImageGenerationToolKind,
         description: str | None = None,
         is_default: bool = False,
+        model_profile_id: int | None = None,
+        capabilities: dict[str, Any] | None = None,
+        bindings: dict[str, Any] | None = None,
+        runtime_manifest: dict[str, Any] | None = None,
         comfy_base_url: str | None = None,
         workflow_json: str | None = None,
         positive_node_id: str | None = None,
@@ -134,6 +167,10 @@ class ImageGenerationService:
 
         payload = self._normalize_tool_payload(
             kind=kind,
+            model_profile_id=model_profile_id,
+            capabilities=capabilities,
+            bindings=bindings,
+            runtime_manifest=runtime_manifest,
             comfy_base_url=comfy_base_url,
             workflow_json=workflow_json,
             positive_node_id=positive_node_id,
@@ -207,6 +244,8 @@ class ImageGenerationService:
         poll_interval_seconds: float = 2.0,
         candidates_per_page: int = 1,
         negative_prompt: str | None = None,
+        generation_mode: GenerationMode = GenerationMode.PREVIEW,
+        seed_strategy: SeedStrategy = SeedStrategy.PER_PAGE,
     ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
         """按脚本任务批量生成图片；当前实现按页顺序提交，便于稳定暂停。"""
 
@@ -214,6 +253,20 @@ class ImageGenerationService:
         if script_task is None:
             raise ValueError(f"ScriptGenerationTask not found: {task_id}")
         preset = self._get_tool_preset(tool_preset_id)
+        if preset.model_profile_id is not None:
+            pages = self.repository.list_script_task_pages(task_id)
+            async for event, payload in self._stream_generate_structured_pages(
+                script_task=script_task,
+                pages=pages,
+                preset=preset,
+                candidates_per_page=candidates_per_page,
+                poll_interval_seconds=poll_interval_seconds,
+                generation_mode=generation_mode,
+                seed_strategy=seed_strategy,
+                continue_existing=False,
+            ):
+                yield event, payload
+            return
         self._ensure_generation_tool_ready(preset)
         pages = [
             page for page in self.repository.list_script_task_pages(task_id)
@@ -241,6 +294,8 @@ class ImageGenerationService:
         poll_interval_seconds: float = 2.0,
         candidates_per_page: int = 1,
         negative_prompt: str | None = None,
+        generation_mode: GenerationMode = GenerationMode.PREVIEW,
+        seed_strategy: SeedStrategy = SeedStrategy.PER_PAGE,
     ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
         """继续批量图片生成，只为候选图数量不足的页面追加缺失候选。"""
 
@@ -248,6 +303,20 @@ class ImageGenerationService:
         if script_task is None:
             raise ValueError(f"ScriptGenerationTask not found: {task_id}")
         preset = self._get_tool_preset(tool_preset_id)
+        if preset.model_profile_id is not None:
+            pages = self.repository.list_script_task_pages(task_id)
+            async for event, payload in self._stream_generate_structured_pages(
+                script_task=script_task,
+                pages=pages,
+                preset=preset,
+                candidates_per_page=candidates_per_page,
+                poll_interval_seconds=poll_interval_seconds,
+                generation_mode=generation_mode,
+                seed_strategy=seed_strategy,
+                continue_existing=True,
+            ):
+                yield event, payload
+            return
         self._ensure_generation_tool_ready(preset)
         pages = [
             page for page in self.repository.list_script_task_pages(task_id)
@@ -278,13 +347,33 @@ class ImageGenerationService:
         poll_interval_seconds: float = 2.0,
         candidates_per_page: int = 1,
         negative_prompt: str | None = None,
+        generation_mode: GenerationMode = GenerationMode.PREVIEW,
+        seed_strategy: SeedStrategy = SeedStrategy.PER_PAGE,
     ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
         """单页生成图片，供失败页面补跑或追加候选图。"""
 
         page = self._get_page(page_id)
+        preset = self._get_tool_preset(tool_preset_id)
+        if preset.model_profile_id is not None:
+            if page.section is None:
+                raise ValueError(f"ComicPage has no script task: {page_id}")
+            script_task = self.repository.get_script_task(page.section.task_id)
+            if script_task is None:
+                raise ValueError(f"ScriptGenerationTask not found: {page.section.task_id}")
+            async for event, payload in self._stream_generate_structured_pages(
+                script_task=script_task,
+                pages=[page],
+                preset=preset,
+                candidates_per_page=candidates_per_page,
+                poll_interval_seconds=poll_interval_seconds,
+                generation_mode=generation_mode,
+                seed_strategy=seed_strategy,
+                continue_existing=False,
+            ):
+                yield event, payload
+            return
         if not page.image_prompt:
             raise ValueError(f"Image prompt not found for page: {page_id}")
-        preset = self._get_tool_preset(tool_preset_id)
         self._ensure_generation_tool_ready(preset)
         candidate_seed_pairs = self._candidate_seed_pairs(candidates_per_page)
         task = self.repository.create_generation_task(
@@ -350,6 +439,445 @@ class ImageGenerationService:
         if page is None:
             raise ValueError(f"ComicPage not found: {page_id}")
         return page
+
+    async def _stream_generate_structured_pages(
+        self,
+        *,
+        script_task: ScriptGenerationTask,
+        pages: list[ComicPage],
+        preset: ImageGenerationToolPreset,
+        candidates_per_page: int,
+        poll_interval_seconds: float,
+        generation_mode: GenerationMode,
+        seed_strategy: SeedStrategy,
+        continue_existing: bool,
+    ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
+        """新 P0 出图主链路：只读取匹配的 ImageSpec，并为每个候选保存 GenerationRun。"""
+
+        if preset.model_profile_id is None or preset.model_profile is None:
+            raise ValueError("Structured generation tool requires model_profile_id.")
+        if not preset.model_profile.is_enabled:
+            raise ValueError(f"ModelProfile must be enabled: {preset.model_profile_id}")
+        declared_family = json.loads(preset.runtime_manifest_json).get("model_family")
+        if declared_family not in {None, "", preset.model_profile.family.value}:
+            raise ValueError(
+                f"Workflow model family {declared_family} does not match "
+                f"ModelProfile family {preset.model_profile.family.value}."
+            )
+        generation_repository = GenerationRepository(self.repository.session)
+        spec_repository = ImageSpecRepository(self.repository.session)
+        spec_service = ImageSpecService(spec_repository)
+        current_source_hash = spec_service.current_continuity_source_hash(script_task.id)
+        page_specs: dict[int, ImageSpec] = {}
+        for page in pages:
+            spec = generation_repository.latest_spec_for_page(
+                page_id=page.id,
+                model_profile_id=preset.model_profile_id,
+                generation_mode=generation_mode,
+            )
+            if spec is None:
+                raise ValueError(
+                    f"ImageSpec not found for page {page.page_no}, model {preset.model_profile_id}, "
+                    f"mode {generation_mode.value}."
+                )
+            if spec.snapshot.compilation.source_hash != current_source_hash:
+                raise ValueError(f"ImageSpec is stale for page: {page.page_no}")
+            if spec.source_hash != spec_service.current_image_spec_source_hash(spec):
+                raise ValueError(f"ImageSpec is stale for page: {page.page_no}")
+            page_specs[page.id] = spec
+
+        page_seed_pairs = self._structured_seed_pairs(
+            pages=pages,
+            generation_repository=generation_repository,
+            model_profile_id=preset.model_profile_id,
+            generation_mode=generation_mode,
+            image_spec_ids_by_page={
+                page_id: spec.id for page_id, spec in page_specs.items()
+            },
+            candidates_per_page=candidates_per_page,
+            seed_strategy=seed_strategy,
+            continue_existing=continue_existing,
+        )
+        pages_to_generate = [page for page in pages if page_seed_pairs.get(page.id)]
+        batch_size = sum(len(page_seed_pairs.get(page.id, [])) for page in pages_to_generate)
+        batch_task = self.repository.create_generation_task(
+            project_id=script_task.project_id,
+            page_id=None if len(pages_to_generate) != 1 else pages_to_generate[0].id,
+            batch_size=batch_size,
+        )
+        batch_task = self.repository.update_generation_task(
+            task_id=batch_task.id,
+            status=GenerationTaskStatus.RUNNING,
+        )
+        running_task_registry.register(RuntimeTaskType.GENERATION_TASK, batch_task.id)
+        backend = backend_for_preset(preset, default_comfy_client=self.comfy_client)
+        completed = 0
+        succeeded = 0
+        failed = 0
+        try:
+            yield "start", {
+                "task_id": batch_task.id,
+                "script_task_id": script_task.id,
+                "total": len(pages_to_generate),
+                "batch_size": batch_size,
+                "generation_mode": generation_mode.value,
+                "seed_strategy": seed_strategy.value,
+                "model_profile_id": preset.model_profile_id,
+                "status": batch_task.status.value,
+            }
+            if not pages_to_generate:
+                batch_task = self.repository.update_generation_task(
+                    task_id=batch_task.id,
+                    status=GenerationTaskStatus.SUCCEEDED,
+                )
+                yield "done", {
+                    "task_id": batch_task.id,
+                    "status": batch_task.status.value,
+                    "total": 0,
+                    "succeeded": 0,
+                    "failed": 0,
+                }
+                return
+
+            for page in pages_to_generate:
+                if self._is_suspended(batch_task.id):
+                    yield "suspended", {
+                        "task_id": batch_task.id,
+                        "status": GenerationTaskStatus.SUSPENDED.value,
+                    }
+                    return
+                spec = page_specs[page.id]
+                page_task = self.repository.create_generation_task(
+                    project_id=script_task.project_id,
+                    page_id=page.id,
+                    batch_size=len(page_seed_pairs[page.id]),
+                )
+                page_task = self.repository.update_generation_task(
+                    task_id=page_task.id,
+                    status=GenerationTaskStatus.RUNNING,
+                )
+                running_task_registry.register(RuntimeTaskType.GENERATION_TASK, page_task.id)
+                page_failed = False
+                try:
+                    yield "page_task", {
+                        "task_id": batch_task.id,
+                        "page_task_id": page_task.id,
+                        "page_id": page.id,
+                        "page_no": page.page_no,
+                        "image_spec_id": spec.id,
+                        "candidate_count": len(page_seed_pairs[page.id]),
+                        "status": page_task.status.value,
+                    }
+                    for candidate_index, seed in page_seed_pairs[page.id]:
+                        spec_payload = json.loads(spec.spec_json)
+                        spec_degradations = list(spec_payload.get("warnings") or [])
+                        resolved_assets = self._resolved_assets(spec_payload)
+                        run = generation_repository.create_run(
+                            generation_task_id=page_task.id,
+                            page_id=page.id,
+                            image_spec_id=spec.id,
+                            tool_preset_id=preset.id,
+                            model_profile_id=preset.model_profile_id,
+                            candidate_index=candidate_index,
+                            seed=seed,
+                            seed_strategy=seed_strategy,
+                            generation_mode=generation_mode,
+                            bindings_json=preset.bindings_json,
+                            model_manifest_json=canonical_json(
+                                self._model_manifest(preset)
+                            ),
+                            resolved_assets_json=canonical_json(resolved_assets),
+                            render_params_json=canonical_json(
+                                spec_payload.get("render", {})
+                            ),
+                            degradation_json=canonical_json(spec_degradations),
+                            applied_spec_json=canonical_json(spec_payload),
+                        )
+                        try:
+                            submission = await backend.submit(
+                                spec=spec_payload,
+                                seed=seed,
+                                mode=generation_mode,
+                            )
+                            all_degradations = spec_degradations + submission.degradations
+                            generation_repository.update_run(
+                                run_id=run.id,
+                                status=GenerationRunStatus.QUEUED,
+                                external_request_id=submission.external_id,
+                                seed_applied=submission.seed_applied,
+                                workflow_json=(
+                                    canonical_json(submission.workflow)
+                                    if submission.workflow is not None
+                                    else None
+                                ),
+                                workflow_hash=submission.workflow_hash,
+                                degradation_json=canonical_json(
+                                    all_degradations
+                                ),
+                                applied_spec_json=canonical_json(
+                                    submission.applied_spec
+                                ),
+                            )
+                            self.repository.update_generation_task(
+                                task_id=page_task.id,
+                                comfy_prompt_id=submission.external_id,
+                            )
+                            yield "queued", {
+                                "task_id": batch_task.id,
+                                "page_task_id": page_task.id,
+                                "generation_run_id": run.id,
+                                "page_id": page.id,
+                                "page_no": page.page_no,
+                                "external_request_id": submission.external_id,
+                                "candidate_index": candidate_index,
+                                "seed": seed,
+                                "seed_applied": submission.seed_applied,
+                                "degradations": all_degradations,
+                            }
+                            generation_repository.update_run(
+                                run_id=run.id,
+                                status=GenerationRunStatus.RUNNING,
+                            )
+                            artifacts = await backend.wait(
+                                submission,
+                                poll_interval_seconds=poll_interval_seconds,
+                            )
+                            if not artifacts:
+                                raise ValueError(
+                                    f"Renderer generated no images for page: {page.page_no}"
+                                )
+                            for index, artifact in enumerate(artifacts, start=1):
+                                local_path = self._save_image_file(
+                                    project_id=page.project_id,
+                                    page_no=page.page_no,
+                                    prompt_id=submission.external_id,
+                                    index=index,
+                                    filename=artifact.filename,
+                                    content=artifact.content,
+                                )
+                                sha256, width, height = self._image_metadata(
+                                    artifact.content
+                                )
+                                image = generation_repository.add_image(
+                                    run_id=run.id,
+                                    page_id=page.id,
+                                    local_path=str(local_path),
+                                    seed=seed,
+                                    workflow_name=preset.name,
+                                    prompt=spec.positive_prompt,
+                                    negative_prompt=spec.negative_prompt,
+                                    sha256=sha256,
+                                    width=width,
+                                    height=height,
+                                )
+                                yield "image", self._image_payload(image, page)
+                            generation_repository.update_run(
+                                run_id=run.id,
+                                status=GenerationRunStatus.SUCCEEDED,
+                            )
+                        except Exception as exc:
+                            generation_repository.update_run(
+                                run_id=run.id,
+                                status=GenerationRunStatus.FAILED,
+                                error_code=app_error_from_exception(exc).code,
+                                error_message=str(exc),
+                            )
+                            raise
+                    self.repository.update_generation_task(
+                        task_id=page_task.id,
+                        status=GenerationTaskStatus.SUCCEEDED,
+                    )
+                    self.repository.mark_page_image_ready(page.id)
+                    succeeded += 1
+                    yield "page_done", {
+                        "task_id": batch_task.id,
+                        "page_task_id": page_task.id,
+                        "page_id": page.id,
+                        "page_no": page.page_no,
+                        "status": GenerationTaskStatus.SUCCEEDED.value,
+                    }
+                except Exception as exc:  # noqa: BLE001 - 单页失败后继续下一页
+                    page_failed = True
+                    error = app_error_from_exception(exc)
+                    self.repository.update_generation_task(
+                        task_id=page_task.id,
+                        status=GenerationTaskStatus.FAILED,
+                        error_message=str(exc),
+                    )
+                    failed += 1
+                    yield "error", {
+                        "task_id": batch_task.id,
+                        "page_task_id": page_task.id,
+                        "page_id": page.id,
+                        "page_no": page.page_no,
+                        "code": error.code,
+                    }
+                finally:
+                    running_task_registry.unregister(
+                        RuntimeTaskType.GENERATION_TASK,
+                        page_task.id,
+                    )
+                completed += 1
+                yield "progress", {
+                    "task_id": batch_task.id,
+                    "completed": completed,
+                    "succeeded": succeeded,
+                    "failed": failed,
+                    "total": len(pages_to_generate),
+                }
+                if page_failed and len(pages_to_generate) == 1:
+                    # 单页请求仍通过 SSE error 表达，不把批任务误标成功。
+                    self.repository.update_generation_task(
+                        task_id=batch_task.id,
+                        status=GenerationTaskStatus.FAILED,
+                    )
+
+            final_status = (
+                GenerationTaskStatus.FAILED
+                if succeeded == 0 and failed > 0
+                else GenerationTaskStatus.SUCCEEDED
+            )
+            batch_task = self.repository.update_generation_task(
+                task_id=batch_task.id,
+                status=final_status,
+            )
+            yield "done", {
+                "task_id": batch_task.id,
+                "status": batch_task.status.value,
+                "total": len(pages_to_generate),
+                "succeeded": succeeded,
+                "failed": failed,
+            }
+        except Exception as exc:
+            self.repository.update_generation_task(
+                task_id=batch_task.id,
+                status=GenerationTaskStatus.FAILED,
+                error_message=str(exc),
+            )
+            raise
+        finally:
+            running_task_registry.unregister(
+                RuntimeTaskType.GENERATION_TASK,
+                batch_task.id,
+            )
+
+    def _structured_seed_pairs(
+        self,
+        *,
+        pages: list[ComicPage],
+        generation_repository: GenerationRepository,
+        model_profile_id: int,
+        generation_mode: GenerationMode,
+        image_spec_ids_by_page: dict[int, int],
+        candidates_per_page: int,
+        seed_strategy: SeedStrategy,
+        continue_existing: bool,
+    ) -> dict[int, list[CandidateSeedPair]]:
+        """按 GenerationRun 而非图片顺序计算待生成候选及 seed。"""
+
+        existing_by_page: dict[int, dict[int, int]] = {}
+        used_seeds: set[int] = set()
+        shared_seeds: dict[int, int] = {}
+        for page in pages:
+            runs = generation_repository.list_successful_runs(
+                page_id=page.id,
+                model_profile_id=model_profile_id,
+                generation_mode=generation_mode,
+                image_spec_id=image_spec_ids_by_page[page.id],
+            )
+            existing_by_page[page.id] = (
+                {
+                    run.candidate_index: int(run.seed)
+                    for run in runs
+                    if run.seed is not None
+                }
+                if continue_existing
+                else {}
+            )
+            for run in runs:
+                if run.seed is not None:
+                    used_seeds.add(int(run.seed))
+                    if continue_existing:
+                        shared_seeds.setdefault(run.candidate_index, int(run.seed))
+        if seed_strategy == SeedStrategy.SHARED_CANDIDATE:
+            for index in range(1, candidates_per_page + 1):
+                if index not in shared_seeds:
+                    shared_seeds[index] = self._unique_random_seed(used_seeds)
+                    used_seeds.add(shared_seeds[index])
+
+        result: dict[int, list[CandidateSeedPair]] = {}
+        for page in pages:
+            pairs: list[CandidateSeedPair] = []
+            existing = existing_by_page[page.id]
+            for index in range(1, candidates_per_page + 1):
+                if continue_existing and index in existing:
+                    continue
+                seed = (
+                    shared_seeds[index]
+                    if seed_strategy == SeedStrategy.SHARED_CANDIDATE
+                    else self._unique_random_seed(used_seeds)
+                )
+                used_seeds.add(seed)
+                pairs.append((index, seed))
+            result[page.id] = pairs
+        return result
+
+    @staticmethod
+    def _resolved_assets(value: Any) -> list[dict[str, Any]]:
+        assets: dict[int, dict[str, Any]] = {}
+
+        def visit(item: Any) -> None:
+            if isinstance(item, list):
+                for child in item:
+                    visit(child)
+                return
+            if not isinstance(item, dict):
+                return
+            if isinstance(item.get("id"), int) and item.get("role") and item.get(
+                "storage_kind"
+            ):
+                assets[item["id"]] = {
+                    key: item.get(key)
+                    for key in (
+                        "id",
+                        "role",
+                        "model_family",
+                        "storage_kind",
+                        "sha256",
+                        "version",
+                        "renderer_locator",
+                    )
+                }
+            for child in item.values():
+                visit(child)
+
+        visit(value)
+        return [assets[key] for key in sorted(assets)]
+
+    @staticmethod
+    def _model_manifest(preset: ImageGenerationToolPreset) -> dict[str, Any]:
+        profile = preset.model_profile
+        return {
+            "profile_id": profile.id if profile else None,
+            "family": profile.family.value if profile else None,
+            "variant": profile.variant if profile else None,
+            "checkpoint_name": profile.checkpoint_name if profile else None,
+            "checkpoint_hash": profile.checkpoint_hash if profile else None,
+            "components": json.loads(profile.component_manifest_json)
+            if profile
+            else {},
+            "runtime": json.loads(preset.runtime_manifest_json),
+        }
+
+    @staticmethod
+    def _image_metadata(content: bytes) -> tuple[str, int | None, int | None]:
+        digest = hashlib.sha256(content).hexdigest()
+        try:
+            with Image.open(BytesIO(content)) as image:
+                width, height = image.size
+        except Exception:  # noqa: BLE001 - 结果仍可保存，尺寸作为可选溯源
+            return digest, None, None
+        return digest, width, height
 
     async def _generate_page_images(
         self,
@@ -878,6 +1406,10 @@ class ImageGenerationService:
         self,
         *,
         kind: ImageGenerationToolKind,
+        model_profile_id: int | None,
+        capabilities: dict[str, Any] | None,
+        bindings: dict[str, Any] | None,
+        runtime_manifest: dict[str, Any] | None,
         comfy_base_url: str | None,
         workflow_json: str | None,
         positive_node_id: str | None,
@@ -898,29 +1430,87 @@ class ImageGenerationService:
     ) -> dict[str, Any]:
         """按工具类型规范化字段；不属于该工具的字段置空。"""
 
+        profile = None
+        if model_profile_id is not None:
+            profile = self.repository.session.get(ModelProfile, model_profile_id)
+            if profile is None:
+                raise ValueError(f"ModelProfile not found: {model_profile_id}")
+        normalized_runtime_manifest = runtime_manifest or {}
+        declared_family = normalized_runtime_manifest.get("model_family")
+        if profile is not None and declared_family not in {None, "", profile.family.value}:
+            raise ValueError(
+                f"Workflow model family {declared_family} does not match "
+                f"ModelProfile family {profile.family.value}."
+            )
+        capability_model = WorkflowCapabilities.model_validate(
+            capabilities or {"features": ["txt2img"], "limits": {}}
+        )
+        if WorkflowCapability.TXT2IMG not in capability_model.features:
+            raise ValueError("Workflow capabilities must include txt2img.")
+        binding_payload = bindings or {"schema_version": 1, "bindings": []}
+
         if kind == ImageGenerationToolKind.COMFYUI:
             normalized_workflow = self._normalize_workflow_json(
                 self._required_text(workflow_json, "Workflow JSON")
             )
-            normalized_positive_node_id = self._required_text(positive_node_id, "Positive node id")
-            normalized_positive_input_name = self._required_text(
-                positive_input_name,
-                "Positive input name",
+            if not binding_payload.get("bindings"):
+                normalized_positive_node_id = self._required_text(
+                    positive_node_id, "Positive node id"
+                )
+                normalized_positive_input_name = self._required_text(
+                    positive_input_name,
+                    "Positive input name",
+                )
+                legacy_bindings = [
+                    {
+                        "source": "prompt.positive",
+                        "node_id": normalized_positive_node_id,
+                        "input_name": normalized_positive_input_name,
+                    }
+                ]
+                for source, node_id, input_name in (
+                    ("prompt.negative", negative_node_id, negative_input_name),
+                    ("render.seed", seed_node_id, seed_input_name),
+                ):
+                    if self._optional_text(node_id) and self._optional_text(input_name):
+                        legacy_bindings.append(
+                            {
+                                "source": source,
+                                "node_id": self._optional_text(node_id),
+                                "input_name": self._optional_text(input_name),
+                            }
+                        )
+                binding_payload = {"schema_version": 1, "bindings": legacy_bindings}
+            binding_model = WorkflowBindings.model_validate(binding_payload)
+            WorkflowCompiler().validate_configuration(
+                workflow=normalized_workflow,
+                capabilities=capability_model,
+                bindings=binding_model,
             )
-            self._validate_workflow_input(
-                normalized_workflow,
-                normalized_positive_node_id,
-                normalized_positive_input_name,
-            )
+            bindings_by_source = {
+                binding.source: binding for binding in binding_model.bindings
+            }
+            positive_binding = bindings_by_source["prompt.positive"]
+            negative_binding = bindings_by_source.get("prompt.negative")
+            seed_binding = bindings_by_source.get("render.seed")
             return {
+                "model_profile_id": model_profile_id,
+                "capabilities_json": canonical_json(capability_model.model_dump(mode="json")),
+                "bindings_json": canonical_json(binding_model.model_dump(mode="json")),
+                "runtime_manifest_json": canonical_json(normalized_runtime_manifest),
                 "comfy_base_url": self._optional_text(comfy_base_url),
                 "workflow_json": json.dumps(normalized_workflow, ensure_ascii=False),
-                "positive_node_id": normalized_positive_node_id,
-                "positive_input_name": normalized_positive_input_name,
-                "negative_node_id": self._optional_text(negative_node_id),
-                "negative_input_name": self._optional_text(negative_input_name),
-                "seed_node_id": self._optional_text(seed_node_id),
-                "seed_input_name": self._optional_text(seed_input_name),
+                # 旧字段由声明式 binding 投影，避免两套配置产生漂移。
+                "positive_node_id": positive_binding.node_id,
+                "positive_input_name": positive_binding.input_name,
+                "negative_node_id": negative_binding.node_id
+                if negative_binding
+                else None,
+                "negative_input_name": negative_binding.input_name
+                if negative_binding
+                else None,
+                "seed_node_id": seed_binding.node_id if seed_binding else None,
+                "seed_input_name": seed_binding.input_name if seed_binding else None,
                 "api_base_url": None,
                 "endpoint_path": None,
                 "api_key": None,
@@ -940,6 +1530,12 @@ class ImageGenerationService:
                     ensure_ascii=False,
                 )
             return {
+                "model_profile_id": model_profile_id,
+                "capabilities_json": canonical_json(capability_model.model_dump(mode="json")),
+                "bindings_json": canonical_json(
+                    WorkflowBindings.model_validate(binding_payload).model_dump(mode="json")
+                ),
+                "runtime_manifest_json": canonical_json(normalized_runtime_manifest),
                 "comfy_base_url": None,
                 "workflow_json": None,
                 "positive_node_id": None,
@@ -1145,6 +1741,7 @@ class ImageGenerationService:
         return {
             "id": image.id,
             "page_id": image.page_id,
+            "generation_run_id": image.generation_run_id,
             "page_no": page.page_no,
             "image_url": f"/api/image-generation/images/{image.id}/file",
             "local_path": image.local_path,
@@ -1153,6 +1750,9 @@ class ImageGenerationService:
             "prompt": image.prompt,
             "negative_prompt": image.negative_prompt,
             "score": image.score,
+            "sha256": image.sha256,
+            "width": image.width,
+            "height": image.height,
             "is_selected": image.is_selected,
             "created_at": image.created_at.isoformat(),
         }

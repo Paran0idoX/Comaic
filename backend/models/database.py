@@ -23,9 +23,9 @@ class Base(DeclarativeBase):
 
 
 def init_db() -> None:
-    """根据当前 ORM 模型创建数据库表。"""
+    """通过 Alembic 初始化或升级数据库，保留已有本地项目数据。"""
 
-    # 先导入模型模块，确保表定义已经注册到 Base.metadata。
-    import backend.models.comic  # noqa: F401
+    # 延迟导入避免 Alembic env 导入 Base 时形成循环依赖。
+    from backend.migrations.bootstrap import upgrade_database
 
-    Base.metadata.create_all(bind=engine)
+    upgrade_database()

@@ -159,6 +159,7 @@ class ScriptSceneResponse(BaseModel):
     color_palette: str
     visual_anchors: str
     negative_constraints: str
+    selected_visual_version_id: int | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -177,6 +178,7 @@ class ScriptCharacterResponse(BaseModel):
     section_id: int
     section_no: int | None = None
     outline_character_id: int | None = None
+    outfit_variant_id: int | None = None
     character_key: str
     name: str
     section_role: str

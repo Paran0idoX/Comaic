@@ -72,6 +72,7 @@ class ImagePromptPresetKind(str, Enum):
     """图片 Prompt 配置类型，用于区分脚本转图 Prompt 和负向 Prompt。"""
 
     SCRIPT_TO_IMAGE_SYSTEM_PROMPT = "script_to_image_system_prompt"
+    SHOT_PLANNER_SYSTEM_PROMPT = "shot_planner_system_prompt"
     NEGATIVE_PROMPT = "negative_prompt"
 
 
@@ -80,6 +81,160 @@ class ImageGenerationToolKind(str, Enum):
 
     COMFYUI = "comfyui"
     OPENAI_IMAGES_COMPATIBLE = "openai_images_compatible"
+
+
+class WorkflowCapability(str, Enum):
+    """Renderer workflow 可声明并由 ImageSpec 请求的固定能力。"""
+
+    TXT2IMG = "txt2img"
+    IMG2IMG = "img2img"
+    REFERENCE_IMAGE = "reference_image"
+    LORA = "lora"
+    POSE = "pose"
+    DEPTH = "depth"
+    CANNY = "canny"
+    LINEART = "lineart"
+    REGIONAL_CONDITION = "regional_condition"
+    INPAINT = "inpaint"
+
+
+class ModelFamily(str, Enum):
+    """图片底模家族；用于选择确定性的 Prompt 编译器和校验资产兼容性。"""
+
+    ANIMA = "anima"
+    Z_IMAGE = "z_image"
+    GENERIC = "generic"
+
+
+class VisualEntityType(str, Enum):
+    """视觉资产归属的业务实体类型。"""
+
+    CHARACTER = "character"
+    OUTFIT = "outfit"
+    SCENE = "scene"
+    STYLE = "style"
+    PROP = "prop"
+    CONTROL = "control"
+
+
+class VisualAssetRole(str, Enum):
+    """视觉资产在生图条件中的固定用途。"""
+
+    IDENTITY_FACE = "identity_face"
+    IDENTITY_HALF_BODY = "identity_half_body"
+    IDENTITY_FULL_BODY = "identity_full_body"
+    OUTFIT_FRONT = "outfit_front"
+    OUTFIT_BACK = "outfit_back"
+    OUTFIT_DETAIL = "outfit_detail"
+    SCENE_MASTER = "scene_master"
+    STYLE_REFERENCE = "style_reference"
+    PROP_REFERENCE = "prop_reference"
+    POSE = "pose"
+    DEPTH = "depth"
+    CANNY = "canny"
+    LINEART = "lineart"
+    SEGMENTATION = "segmentation"
+    MASK = "mask"
+    LORA = "lora"
+
+
+class VisualAssetSource(str, Enum):
+    """视觉资产的来源。"""
+
+    UPLOAD = "upload"
+    GENERATED_IMAGE = "generated_image"
+    RENDERER_LOCATOR = "renderer_locator"
+
+
+class VisualAssetStorageKind(str, Enum):
+    """视觉资产的存储方式。"""
+
+    LOCAL_FILE = "local_file"
+    RENDERER_LOCATOR = "renderer_locator"
+
+
+class ApprovalStatus(str, Enum):
+    """需要人工确认的视觉配置通用状态。"""
+
+    DRAFT = "draft"
+    APPROVED = "approved"
+    ARCHIVED = "archived"
+
+
+class CompilationStatus(str, Enum):
+    """连续性或视觉规格编译状态。"""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+
+class ContinuityEventType(str, Enum):
+    """允许连续性状态机修改的受控事件类型。"""
+
+    SET_HAIRSTYLE = "set_hairstyle"
+    SET_OUTFIT = "set_outfit"
+    SET_ACCESSORY = "set_accessory"
+    SET_GARMENT_STATE = "set_garment_state"
+    SET_CLOTHING_CONDITION = "set_clothing_condition"
+    SET_CHARACTER_CONDITION = "set_character_condition"
+    PICK_UP_PROP = "pick_up_prop"
+    DROP_PROP = "drop_prop"
+    TRANSFER_PROP = "transfer_prop"
+    SET_LIGHT_STATE = "set_light_state"
+    SET_DOOR_STATE = "set_door_state"
+    SET_OBJECT_STATE = "set_object_state"
+    BREAK_OBJECT = "break_object"
+    SET_WEATHER = "set_weather"
+    ADVANCE_TIME = "advance_time"
+
+
+class ContinuityTargetType(str, Enum):
+    """连续性事件的目标类型。"""
+
+    CHARACTER = "character"
+    SCENE = "scene"
+    PROP = "prop"
+
+
+class ContinuityEventTiming(str, Enum):
+    """事件相对于当前页面状态快照的生效时机。"""
+
+    BEFORE_PAGE = "before_page"
+    AFTER_PAGE = "after_page"
+
+
+class ContinuityEventSource(str, Enum):
+    """连续性事件由谁产生。"""
+
+    LLM = "llm"
+    MANUAL = "manual"
+    SYSTEM = "system"
+
+
+class GenerationMode(str, Enum):
+    """图片规格和生成的一致性严格程度。"""
+
+    PREVIEW = "preview"
+    FINAL = "final"
+
+
+class SeedStrategy(str, Enum):
+    """批量出图时的 seed 分配策略。"""
+
+    PER_PAGE = "per_page"
+    SHARED_CANDIDATE = "shared_candidate"
+
+
+class GenerationRunStatus(str, Enum):
+    """单次候选图外部请求的状态。"""
+
+    PENDING = "pending"
+    QUEUED = "queued"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
 
 
 class LLMProvider(str, Enum):
