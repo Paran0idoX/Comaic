@@ -4,13 +4,15 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 import json
 from pathlib import Path
+from time import monotonic
 from typing import Any, Protocol
 from uuid import uuid4
 
 import requests
 
+from backend.i18n.errors import AppError
 from backend.models.comic import ImageGenerationToolPreset
-from backend.models.enums import GenerationMode, ImageGenerationToolKind
+from backend.models.enums import GenerationMode, ImageGenerationProvider
 from backend.services.workflow_compiler import (
     WorkflowCompiler,
     parse_bindings,
@@ -51,6 +53,7 @@ class RendererBackend(Protocol):
         submission: RendererSubmission,
         *,
         poll_interval_seconds: float,
+        timeout_seconds: float,
     ) -> list[RenderedArtifact]: ...
 
 
@@ -108,7 +111,9 @@ class ComfyUIBackend:
         submission: RendererSubmission,
         *,
         poll_interval_seconds: float,
+        timeout_seconds: float,
     ) -> list[RenderedArtifact]:
+        deadline = monotonic() + max(0.01, timeout_seconds)
         while True:
             history = await asyncio.to_thread(
                 self.client.get_history,
@@ -117,7 +122,30 @@ class ComfyUIBackend:
             images = self.client.extract_output_images(history, submission.external_id)
             if images:
                 break
-            await asyncio.sleep(poll_interval_seconds)
+            execution_error = self.client.extract_execution_error(
+                history,
+                submission.external_id,
+            )
+            if execution_error:
+                raise AppError(
+                    "image_generation.comfyui_execution_failed",
+                    status_code=502,
+                    debug_message=(
+                        f"ComfyUI prompt {submission.external_id} failed: "
+                        f"{execution_error}"
+                    ),
+                )
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                raise AppError(
+                    "image_generation.comfyui_timeout",
+                    status_code=504,
+                    debug_message=(
+                        f"ComfyUI prompt {submission.external_id} did not finish within "
+                        f"{timeout_seconds:g} seconds."
+                    ),
+                )
+            await asyncio.sleep(min(poll_interval_seconds, remaining))
         result: list[RenderedArtifact] = []
         for image in images:
             content = await asyncio.to_thread(
@@ -220,8 +248,9 @@ class OpenAIImagesBackend:
         submission: RendererSubmission,
         *,
         poll_interval_seconds: float,
+        timeout_seconds: float,
     ) -> list[RenderedArtifact]:
-        del poll_interval_seconds
+        del poll_interval_seconds, timeout_seconds
         image_items = submission.context.get("response", {}).get("data")
         if not isinstance(image_items, list) or not image_items:
             raise ValueError("Image generation API returned no images.")
@@ -292,8 +321,8 @@ def backend_for_preset(
     *,
     default_comfy_client: ComfyUIClient,
 ) -> RendererBackend:
-    if preset.kind == ImageGenerationToolKind.COMFYUI:
+    if preset.provider == ImageGenerationProvider.COMFYUI:
         return ComfyUIBackend(preset, default_comfy_client)
-    if preset.kind == ImageGenerationToolKind.OPENAI_IMAGES_COMPATIBLE:
+    if preset.provider == ImageGenerationProvider.OPENAI_IMAGES_COMPATIBLE:
         return OpenAIImagesBackend(preset)
-    raise ValueError(f"Unsupported image generation tool kind: {preset.kind.value}")
+    raise ValueError(f"Unsupported image generation provider: {preset.provider.value}")

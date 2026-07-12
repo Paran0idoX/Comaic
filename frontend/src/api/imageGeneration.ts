@@ -1,18 +1,17 @@
 import type { ScriptTask } from './scripts'
 import { ApiError, apiHeaders, normalizeBackendError, parseApiErrorResponse } from './errors'
 
-export type ComfyWorkflowPreset = {
+export type ImageGenerationTool = {
   id: number
   name: string
-  kind: 'comfyui' | 'openai_images_compatible'
+  provider: 'comfyui' | 'openai_images_compatible'
+  prompt_type: 'tag' | 'natural_language' | 'hybrid'
   description: string | null
   comfy_base_url: string | null
   workflow_json: string | null
   is_default: boolean
-  model_profile_id: number | null
   capabilities: { features?: string[]; limits?: Record<string, number> }
   bindings: { schema_version?: number; bindings?: Array<{ source: string; node_id: string; input_name: string }> }
-  runtime_manifest: Record<string, unknown>
   positive_node_id: string | null
   positive_input_name: string | null
   negative_node_id: string | null
@@ -32,15 +31,14 @@ export type ComfyWorkflowPreset = {
   updated_at: string
 }
 
-export type ComfyWorkflowPresetPayload = {
+export type ImageGenerationToolPayload = {
   name: string
-  kind: 'comfyui' | 'openai_images_compatible'
+  provider: 'comfyui' | 'openai_images_compatible'
+  prompt_type: 'tag' | 'natural_language' | 'hybrid'
   description?: string | null
   is_default: boolean
-  model_profile_id?: number | null
   capabilities?: Record<string, unknown>
   bindings?: Record<string, unknown>
-  runtime_manifest?: Record<string, unknown>
   comfy_base_url?: string | null
   workflow_json?: string | null
   positive_node_id?: string | null
@@ -81,7 +79,8 @@ export type GeneratedImage = {
 export type ImageGenerationPage = {
   page_id: number
   page_no: number
-  image_prompt: string | null
+  prompt_type: 'tag' | 'natural_language' | 'hybrid' | null
+  positive_prompt: string | null
   status: string
   selected_image_id: number | null
   latest_spec_id: number | null
@@ -93,8 +92,8 @@ export type ImageGenerationPage = {
 export type GenerateImagesPayload = {
   tool_preset_id: number
   poll_interval_seconds: number
+  wait_timeout_seconds: number
   candidates_per_page: number
-  negative_prompt?: string | null
   generation_mode: 'preview' | 'final'
   seed_strategy: 'per_page' | 'shared_candidate'
 }
@@ -105,7 +104,8 @@ export type GenerationRun = {
   page_id: number
   image_spec_id: number
   tool_preset_id: number
-  model_profile_id: number
+  provider: 'comfyui' | 'openai_images_compatible'
+  prompt_type: 'tag' | 'natural_language' | 'hybrid'
   candidate_index: number
   seed: number | null
   seed_applied: boolean
@@ -116,9 +116,7 @@ export type GenerationRun = {
   workflow: Record<string, unknown> | null
   workflow_hash: string | null
   bindings: Record<string, unknown>
-  model_manifest: Record<string, unknown>
   resolved_assets: unknown[]
-  render_params: Record<string, unknown>
   degradations: unknown[]
   applied_spec: Record<string, unknown>
   error_code: string | null
@@ -167,39 +165,42 @@ const requestJson = async <T>(url: string, options: RequestInit = {}): Promise<T
   return (await response.json()) as T
 }
 
-export const listComfyWorkflows = async (): Promise<ComfyWorkflowPreset[]> => {
-  const result = await requestJson<{ items: ComfyWorkflowPreset[] }>('/api/image-generation/tools')
+export const listImageGenerationTools = async (): Promise<ImageGenerationTool[]> => {
+  const result = await requestJson<{ items: ImageGenerationTool[] }>('/api/image-generation/tools')
   return result.items
 }
 
-export const createComfyWorkflow = (
-  payload: ComfyWorkflowPresetPayload,
-): Promise<ComfyWorkflowPreset> =>
-  requestJson<ComfyWorkflowPreset>('/api/image-generation/tools', {
+export const createImageGenerationTool = (
+  payload: ImageGenerationToolPayload,
+): Promise<ImageGenerationTool> =>
+  requestJson<ImageGenerationTool>('/api/image-generation/tools', {
     method: 'POST',
     body: JSON.stringify(payload),
   })
 
-export const updateComfyWorkflow = (
-  workflowId: number,
-  payload: ComfyWorkflowPresetPayload,
-): Promise<ComfyWorkflowPreset> =>
-  requestJson<ComfyWorkflowPreset>(`/api/image-generation/tools/${workflowId}`, {
+export const updateImageGenerationTool = (
+  toolId: number,
+  payload: ImageGenerationToolPayload,
+): Promise<ImageGenerationTool> =>
+  requestJson<ImageGenerationTool>(`/api/image-generation/tools/${toolId}`, {
     method: 'PUT',
     body: JSON.stringify(payload),
   })
 
-export const deleteComfyWorkflow = (workflowId: number): Promise<void> =>
-  requestJson<void>(`/api/image-generation/tools/${workflowId}`, {
+export const deleteImageGenerationTool = (toolId: number): Promise<void> =>
+  requestJson<void>(`/api/image-generation/tools/${toolId}`, {
     method: 'DELETE',
   })
 
 export const listImageGenerationPages = async (
   taskId: number,
-  options: { modelProfileId?: number | null; generationMode?: 'preview' | 'final' } = {},
+  options: {
+    promptType?: 'tag' | 'natural_language' | 'hybrid'
+    generationMode?: 'preview' | 'final'
+  } = {},
 ): Promise<ImageGenerationPage[]> => {
   const params = new URLSearchParams()
-  if (options.modelProfileId != null) params.set('model_profile_id', String(options.modelProfileId))
+  if (options.promptType) params.set('prompt_type', options.promptType)
   if (options.generationMode) params.set('generation_mode', options.generationMode)
   const query = params.size ? `?${params.toString()}` : ''
   const result = await requestJson<{ items: ImageGenerationPage[] }>(

@@ -22,9 +22,15 @@ class ScriptCharacterItem(BaseModel):
     character_key: str = Field(description="稳定角色 key，必须优先复用大纲角色基准中的 key。")
     name: str = Field(description="角色名称。")
     section_role: str = Field(description="该角色在当前分段中的叙事功能或状态。")
-    current_hairstyle: str = Field(description="当前分段内的发型；未变化时沿用大纲默认值。")
-    current_clothing: str = Field(description="当前分段内的服装；未变化时沿用大纲默认值。")
-    current_accessories: str = Field(description="当前分段内的配件；未变化时沿用大纲默认值。")
+    current_hairstyle: str = Field(
+        description="当前分段的基础发型版本；未改变发型时原样沿用默认值，湿乱等写 temporary_changes。"
+    )
+    current_clothing: str = Field(
+        description="当前分段的基础服装版本；未换装时原样沿用大纲默认值，湿污破损等写 temporary_changes。"
+    )
+    current_accessories: str = Field(
+        description="当前分段的基础配件版本；手持/收起等位置状态写 temporary_changes。"
+    )
     current_state: str = Field(description="当前分段内的身体状态、伤痕、疲惫程度等。")
     emotion: str = Field(description="当前分段的主要情绪状态。")
     temporary_changes: str = Field(description="只在当前分段出现的临时变化；没有则写“无”。")

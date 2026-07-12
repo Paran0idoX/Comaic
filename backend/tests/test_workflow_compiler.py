@@ -43,7 +43,6 @@ def _spec(required: list[str] | None = None) -> dict:
         "subjects": [{"identity": {"references": [{"renderer_name": "alice.png"}]}}],
         "scene": {},
         "style": {},
-        "model_profile": {"family": "anima"},
         "required_capabilities": required or ["txt2img", "reference_image"],
     }
 
@@ -157,6 +156,30 @@ def test_binding_rejects_jsonpath_and_duplicate_targets() -> None:
     with pytest.raises(ValidationError):
         WorkflowBindings.model_validate(
             {"bindings": [{"source": "$.prompt.positive", "node_id": "1", "input_name": "text"}]}
+        )
+    with pytest.raises(ValidationError):
+        WorkflowBindings.model_validate(
+            {
+                "bindings": [
+                    {
+                        "source": "model_profile.family",
+                        "node_id": "1",
+                        "input_name": "text",
+                    }
+                ]
+            }
+        )
+    with pytest.raises(ValidationError, match="inside the ComfyUI workflow"):
+        WorkflowBindings.model_validate(
+            {
+                "bindings": [
+                    {
+                        "source": "subjects[0].identity.loras",
+                        "node_id": "1",
+                        "input_name": "text",
+                    }
+                ]
+            }
         )
     with pytest.raises(ValidationError):
         WorkflowBindings.model_validate(

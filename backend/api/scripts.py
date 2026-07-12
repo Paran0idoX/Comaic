@@ -92,7 +92,6 @@ def page_to_response(page: ComicPage) -> ScriptPageResponse:
         composition=page.composition,
         character_action=page.character_action,
         dialogue=page.dialogue,
-        image_prompt=page.image_prompt,
         status=page.status.value,
         script_review_status=page.script_review_status.value,
         script_review_error=page.script_review_error,

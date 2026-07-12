@@ -29,10 +29,10 @@ from backend.models.enums import (
     GenerationMode,
     GenerationRunStatus,
     GenerationTaskStatus,
-    ImageGenerationToolKind,
+    ImageGenerationProvider,
+    ImagePromptType,
     ImagePromptPresetKind,
     LLMProvider,
-    ModelFamily,
     OutlineVersionStatus,
     PageScriptReviewStatus,
     SeedStrategy,
@@ -117,7 +117,7 @@ class ComicProject(TimestampMixin, Base):
 
 
 class ImagePromptPreset(TimestampMixin, Base):
-    """图片 Prompt 通用配置表：维护脚本转图 SystemPrompt 和文生图 Negative Prompt。"""
+    """视觉规格 Prompt 配置：维护 ShotPlanner 与不同表达类型的负向 Prompt。"""
 
     __tablename__ = "image_prompt_preset"
 
@@ -126,36 +126,9 @@ class ImagePromptPreset(TimestampMixin, Base):
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     kind: Mapped[ImagePromptPresetKind] = enum_column(ImagePromptPresetKind, index=True)
     content: Mapped[str] = mapped_column(Text)
+    tag_content: Mapped[str] = mapped_column(Text, default="")
+    natural_language_content: Mapped[str] = mapped_column(Text, default="")
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
-
-
-class ModelProfile(TimestampMixin, Base):
-    """图片底模配置：固定模型家族、组件溯源、编译器和默认渲染参数。"""
-
-    __tablename__ = "model_profile"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    name: Mapped[str] = mapped_column(String(255))
-    family: Mapped[ModelFamily] = enum_column(ModelFamily, index=True)
-    variant: Mapped[str] = mapped_column(String(255), default="")
-    checkpoint_name: Mapped[str] = mapped_column(String(1024), default="")
-    checkpoint_hash: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
-    component_manifest_json: Mapped[str] = mapped_column(Text, default="{}")
-    compiler_key: Mapped[str] = mapped_column(String(120))
-    compiler_version: Mapped[str] = mapped_column(String(64), default="1")
-    default_render_json: Mapped[str] = mapped_column(Text, default="{}")
-    license: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    commercial_use_allowed: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
-    paid_service_allowed: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
-    fine_tuning_allowed: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
-    redistribution_allowed: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
-    license_notice: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    is_enabled: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
-    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
-
-    tool_presets: Mapped[list["ImageGenerationToolPreset"]] = relationship(
-        back_populates="model_profile"
-    )
 
 
 class ImageGenerationToolPreset(TimestampMixin, Base):
@@ -166,21 +139,20 @@ class ImageGenerationToolPreset(TimestampMixin, Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(255))
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    kind: Mapped[ImageGenerationToolKind] = enum_column(
-        ImageGenerationToolKind,
+    provider: Mapped[ImageGenerationProvider] = enum_column(
+        ImageGenerationProvider,
         index=True,
-        default=ImageGenerationToolKind.COMFYUI,
+        default=ImageGenerationProvider.COMFYUI,
+    )
+    prompt_type: Mapped[ImagePromptType] = enum_column(
+        ImagePromptType,
+        index=True,
+        default=ImagePromptType.NATURAL_LANGUAGE,
     )
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
-    model_profile_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("model_profile.id"),
-        nullable=True,
-        index=True,
-    )
     # 新版 workflow 通过能力声明和通用 binding 注入；旧三节点字段保留一版兼容。
     capabilities_json: Mapped[str] = mapped_column(Text, default='{"features":["txt2img"],"limits":{}}')
     bindings_json: Mapped[str] = mapped_column(Text, default='{"schema_version":1,"bindings":[]}')
-    runtime_manifest_json: Mapped[str] = mapped_column(Text, default="{}")
 
     # ComfyUI 配置。comfy_base_url 为空时回退到 COMFYUI_BASE_URL。
     comfy_base_url: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
@@ -202,11 +174,6 @@ class ImageGenerationToolPreset(TimestampMixin, Base):
     seed_field_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     negative_prompt_field_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     extra_body_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-
-    model_profile: Mapped[Optional["ModelProfile"]] = relationship(
-        back_populates="tool_presets"
-    )
-
 
 class LLMConfig(TimestampMixin, Base):
     """全局 LLM 配置表：一组 LangChain Provider/API Key 下维护多个模型名。"""
@@ -373,7 +340,7 @@ class OutfitVariant(TimestampMixin, Base):
 
 
 class StyleProfile(TimestampMixin, Base):
-    """项目级版本化风格设定，供不同底模编译为各自 Prompt。"""
+    """项目级版本化风格设定，分别保存 tag 与自然语言表达。"""
 
     __tablename__ = "style_profile"
     __table_args__ = (
@@ -385,15 +352,12 @@ class StyleProfile(TimestampMixin, Base):
     key: Mapped[str] = mapped_column(String(120), index=True)
     version: Mapped[int] = mapped_column(Integer, default=1)
     name: Mapped[str] = mapped_column(String(255), default="")
-    model_family: Mapped[ModelFamily] = enum_column(
-        ModelFamily,
-        default=ModelFamily.GENERIC,
-    )
-    positive_tokens: Mapped[str] = mapped_column(Text, default="")
-    negative_tokens: Mapped[str] = mapped_column(Text, default="")
+    positive_tag: Mapped[str] = mapped_column(Text, default="")
+    negative_tag: Mapped[str] = mapped_column(Text, default="")
+    positive_natural_language: Mapped[str] = mapped_column(Text, default="")
+    negative_natural_language: Mapped[str] = mapped_column(Text, default="")
     color_palette_json: Mapped[str] = mapped_column(Text, default="[]")
     lighting: Mapped[str] = mapped_column(Text, default="")
-    render_defaults_json: Mapped[str] = mapped_column(Text, default="{}")
     status: Mapped[ApprovalStatus] = enum_column(
         ApprovalStatus,
         default=ApprovalStatus.DRAFT,
@@ -460,10 +424,6 @@ class VisualAsset(TimestampMixin, Base):
     entity_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
     entity_key: Mapped[Optional[str]] = mapped_column(String(120), nullable=True, index=True)
     role: Mapped[VisualAssetRole] = enum_column(VisualAssetRole, index=True)
-    model_family: Mapped[ModelFamily] = enum_column(
-        ModelFamily,
-        default=ModelFamily.GENERIC,
-    )
     storage_kind: Mapped[VisualAssetStorageKind] = enum_column(VisualAssetStorageKind)
     local_path: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     renderer_locator: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -494,7 +454,7 @@ class VisualAsset(TimestampMixin, Base):
 
 
 class ComicPage(TimestampMixin, Base):
-    """漫画页面表：保存单页脚本、图片 Prompt 和最终选择的生成图片。"""
+    """漫画页面表：保存单页脚本和最终选择的生成图片。"""
 
     __tablename__ = "comic_page"
 
@@ -518,7 +478,6 @@ class ComicPage(TimestampMixin, Base):
     composition: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     character_action: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     dialogue: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    image_prompt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     status: Mapped[ComicPageStatus] = enum_column(
         ComicPageStatus,
         default=ComicPageStatus.DRAFT,
@@ -656,6 +615,10 @@ class ScriptGenerationTask(TimestampMixin, Base):
         cascade="all, delete-orphan",
     )
     continuity_compilations: Mapped[list["ContinuityCompilation"]] = relationship(
+        back_populates="script_task",
+        cascade="all, delete-orphan",
+    )
+    image_spec_compilations: Mapped[list["ImageSpecCompilation"]] = relationship(
         back_populates="script_task",
         cascade="all, delete-orphan",
     )
@@ -803,6 +766,49 @@ class ContinuityCompilation(TimestampMixin, Base):
         back_populates="compilation",
         cascade="all, delete-orphan",
     )
+    image_spec_compilations: Mapped[list["ImageSpecCompilation"]] = relationship(
+        back_populates="continuity_compilation",
+        cascade="all, delete-orphan",
+    )
+
+
+class ImageSpecCompilation(TimestampMixin, Base):
+    """一次全任务 ImageSpec 编译尝试，持久保存部分进度和失败页。"""
+
+    __tablename__ = "image_spec_compilation"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    script_task_id: Mapped[int] = mapped_column(
+        ForeignKey("script_generation_task.id"), index=True
+    )
+    continuity_compilation_id: Mapped[int] = mapped_column(
+        ForeignKey("continuity_compilation.id"), index=True
+    )
+    source_hash: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[CompilationStatus] = enum_column(
+        CompilationStatus,
+        default=CompilationStatus.PENDING,
+        index=True,
+    )
+    generation_mode: Mapped[GenerationMode] = enum_column(
+        GenerationMode,
+        default=GenerationMode.PREVIEW,
+        index=True,
+    )
+    total_pages: Mapped[int] = mapped_column(Integer, default=0)
+    completed_pages: Mapped[int] = mapped_column(Integer, default=0)
+    total_specs: Mapped[int] = mapped_column(Integer, default=0)
+    completed_specs: Mapped[int] = mapped_column(Integer, default=0)
+    failed_pages_json: Mapped[str] = mapped_column(Text, default="[]")
+    error_code: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    script_task: Mapped["ScriptGenerationTask"] = relationship(
+        back_populates="image_spec_compilations"
+    )
+    continuity_compilation: Mapped["ContinuityCompilation"] = relationship(
+        back_populates="image_spec_compilations"
+    )
 
 
 class ContinuityEvent(Base):
@@ -901,7 +907,7 @@ class PageShotPlan(Base):
 
 
 class ImageSpec(Base):
-    """模型专用结构化生成规格；正向 Prompt 只是其中的编译产物。"""
+    """按 Prompt 表达类型保存的结构化生成规格。"""
 
     __tablename__ = "image_spec"
 
@@ -913,8 +919,9 @@ class ImageSpec(Base):
     shot_plan_id: Mapped[int] = mapped_column(
         ForeignKey("page_shot_plan.id"), index=True
     )
-    model_profile_id: Mapped[int] = mapped_column(
-        ForeignKey("model_profile.id"), index=True
+    prompt_type: Mapped[ImagePromptType] = enum_column(
+        ImagePromptType,
+        index=True,
     )
     style_profile_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("style_profile.id"), nullable=True
@@ -941,7 +948,6 @@ class ImageSpec(Base):
     page: Mapped["ComicPage"] = relationship()
     snapshot: Mapped["VisualStateSnapshot"] = relationship()
     shot_plan: Mapped["PageShotPlan"] = relationship(back_populates="image_specs")
-    model_profile: Mapped["ModelProfile"] = relationship()
     style_profile: Mapped[Optional["StyleProfile"]] = relationship()
     generation_runs: Mapped[list["GenerationRun"]] = relationship(
         back_populates="image_spec"
@@ -962,8 +968,13 @@ class GenerationRun(TimestampMixin, Base):
     tool_preset_id: Mapped[int] = mapped_column(
         ForeignKey("image_generation_tool_preset.id"), index=True
     )
-    model_profile_id: Mapped[int] = mapped_column(
-        ForeignKey("model_profile.id"), index=True
+    provider: Mapped[ImageGenerationProvider] = enum_column(
+        ImageGenerationProvider,
+        index=True,
+    )
+    prompt_type: Mapped[ImagePromptType] = enum_column(
+        ImagePromptType,
+        index=True,
     )
     candidate_index: Mapped[int] = mapped_column(Integer)
     seed: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
@@ -987,9 +998,7 @@ class GenerationRun(TimestampMixin, Base):
     workflow_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     workflow_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     bindings_json: Mapped[str] = mapped_column(Text, default="{}")
-    model_manifest_json: Mapped[str] = mapped_column(Text, default="{}")
     resolved_assets_json: Mapped[str] = mapped_column(Text, default="[]")
-    render_params_json: Mapped[str] = mapped_column(Text, default="{}")
     degradation_json: Mapped[str] = mapped_column(Text, default="[]")
     applied_spec_json: Mapped[str] = mapped_column(Text, default="{}")
     error_code: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
@@ -1002,5 +1011,4 @@ class GenerationRun(TimestampMixin, Base):
     page: Mapped["ComicPage"] = relationship()
     image_spec: Mapped["ImageSpec"] = relationship(back_populates="generation_runs")
     tool_preset: Mapped["ImageGenerationToolPreset"] = relationship()
-    model_profile: Mapped["ModelProfile"] = relationship()
     images: Mapped[list["ComicImage"]] = relationship(back_populates="generation_run")

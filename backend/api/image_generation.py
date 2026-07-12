@@ -22,7 +22,7 @@ from backend.api.schemas.image_generation import (
 from backend.api.scripts import SSE_HEADERS, sse_event
 from backend.models.comic import ComicImage, ComicPage, GenerationRun, GenerationTask, ImageGenerationToolPreset
 from backend.models.database import SessionLocal
-from backend.models.enums import GenerationMode
+from backend.models.enums import GenerationMode, ImagePromptType
 from backend.repositories.comic_repository import ComicRepository
 from backend.repositories.generation_repository import GenerationRepository
 from backend.i18n.errors import AppError, http_exception, sse_error_payload
@@ -39,13 +39,12 @@ def tool_to_response(preset: ImageGenerationToolPreset) -> ImageGenerationToolPr
     return ImageGenerationToolPresetResponse(
         id=preset.id,
         name=preset.name,
-        kind=preset.kind,
+        provider=preset.provider,
+        prompt_type=preset.prompt_type,
         description=preset.description,
         is_default=preset.is_default,
-        model_profile_id=preset.model_profile_id,
         capabilities=json.loads(preset.capabilities_json),
         bindings=json.loads(preset.bindings_json),
-        runtime_manifest=json.loads(preset.runtime_manifest_json),
         comfy_base_url=preset.comfy_base_url,
         workflow_json=preset.workflow_json,
         positive_node_id=preset.positive_node_id,
@@ -97,38 +96,37 @@ def page_to_response(
     page: ComicPage,
     repo: ComicRepository,
     *,
-    model_profile_id: int | None = None,
+    prompt_type: ImagePromptType = ImagePromptType.NATURAL_LANGUAGE,
     generation_mode: GenerationMode = GenerationMode.PREVIEW,
 ) -> ImageGenerationPageResponse:
     """把页面和其生成图片列表转换为图片生成页面响应。"""
 
     spec = GenerationRepository(repo.session).latest_spec_for_page(
         page_id=page.id,
-        model_profile_id=model_profile_id,
+        prompt_type=prompt_type,
         generation_mode=generation_mode,
     )
     images = repo.list_page_images(page.id)
-    completed_candidates = len(images)
-    if model_profile_id is not None:
-        completed_candidates = (
-            len(
-                {
-                    run.candidate_index
-                    for run in GenerationRepository(repo.session).list_successful_runs(
-                        page_id=page.id,
-                        model_profile_id=model_profile_id,
-                        generation_mode=generation_mode,
-                        image_spec_id=spec.id,
-                    )
-                }
-            )
-            if spec is not None
-            else 0
+    completed_candidates = (
+        len(
+            {
+                run.candidate_index
+                for run in GenerationRepository(repo.session).list_successful_runs(
+                    page_id=page.id,
+                    prompt_type=prompt_type,
+                    generation_mode=generation_mode,
+                    image_spec_id=spec.id,
+                )
+            }
         )
+        if spec is not None
+        else 0
+    )
     return ImageGenerationPageResponse(
         page_id=page.id,
         page_no=page.page_no,
-        image_prompt=page.image_prompt,
+        prompt_type=spec.prompt_type if spec else None,
+        positive_prompt=spec.positive_prompt if spec else None,
         status=page.status.value,
         selected_image_id=page.selected_image_id,
         latest_spec_id=spec.id if spec else None,
@@ -163,7 +161,8 @@ def run_to_response(run: GenerationRun) -> GenerationRunResponse:
         page_id=run.page_id,
         image_spec_id=run.image_spec_id,
         tool_preset_id=run.tool_preset_id,
-        model_profile_id=run.model_profile_id,
+        provider=run.provider,
+        prompt_type=run.prompt_type,
         candidate_index=run.candidate_index,
         seed=run.seed,
         seed_applied=run.seed_applied,
@@ -174,9 +173,7 @@ def run_to_response(run: GenerationRun) -> GenerationRunResponse:
         workflow=json.loads(run.workflow_json) if run.workflow_json else None,
         workflow_hash=run.workflow_hash,
         bindings=json.loads(run.bindings_json),
-        model_manifest=json.loads(run.model_manifest_json),
         resolved_assets=json.loads(run.resolved_assets_json),
-        render_params=json.loads(run.render_params_json),
         degradations=json.loads(run.degradation_json),
         applied_spec=json.loads(run.applied_spec_json),
         error_code=run.error_code,
@@ -316,7 +313,7 @@ def delete_workflow(workflow_id: int, http_request: Request) -> Response:
 def list_generation_pages(
     task_id: int,
     http_request: Request,
-    model_profile_id: int | None = None,
+    prompt_type: ImagePromptType = ImagePromptType.NATURAL_LANGUAGE,
     generation_mode: GenerationMode = GenerationMode.PREVIEW,
 ) -> ImageGenerationPageListResponse:
     """读取脚本任务下的图片生成页面状态和已有图片。"""
@@ -336,7 +333,7 @@ def list_generation_pages(
                 page_to_response(
                     page,
                     repo,
-                    model_profile_id=model_profile_id,
+                    prompt_type=prompt_type,
                     generation_mode=generation_mode,
                 )
                 for page in pages
@@ -362,8 +359,8 @@ def stream_generate_for_script_task(
                     task_id=task_id,
                     tool_preset_id=request.effective_tool_preset_id,
                     poll_interval_seconds=request.poll_interval_seconds,
+                    wait_timeout_seconds=request.wait_timeout_seconds,
                     candidates_per_page=request.candidates_per_page,
-                    negative_prompt=request.negative_prompt,
                     generation_mode=request.generation_mode,
                     seed_strategy=request.seed_strategy,
                 ):
@@ -392,8 +389,8 @@ def stream_continue_for_script_task(
                     task_id=task_id,
                     tool_preset_id=request.effective_tool_preset_id,
                     poll_interval_seconds=request.poll_interval_seconds,
+                    wait_timeout_seconds=request.wait_timeout_seconds,
                     candidates_per_page=request.candidates_per_page,
-                    negative_prompt=request.negative_prompt,
                     generation_mode=request.generation_mode,
                     seed_strategy=request.seed_strategy,
                 ):
@@ -422,8 +419,8 @@ def stream_generate_for_page(
                     page_id=page_id,
                     tool_preset_id=request.effective_tool_preset_id,
                     poll_interval_seconds=request.poll_interval_seconds,
+                    wait_timeout_seconds=request.wait_timeout_seconds,
                     candidates_per_page=request.candidates_per_page,
-                    negative_prompt=request.negative_prompt,
                     generation_mode=request.generation_mode,
                     seed_strategy=request.seed_strategy,
                 ):

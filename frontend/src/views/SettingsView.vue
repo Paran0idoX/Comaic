@@ -328,7 +328,7 @@ onMounted(() => {
         </button>
       </aside>
 
-      <main class="settings-content">
+      <div class="settings-content">
         <section v-if="activeSettingsTab === 'general'" class="panel settings-card">
           <header class="panel-header">
             <div>
@@ -343,6 +343,7 @@ onMounted(() => {
                   v-model="appSettings.script_section_max_concurrency"
                   :min="1"
                   :max="20"
+                  :aria-label="t('settings.generation.scriptSectionMaxConcurrency')"
                 />
                 <p class="form-hint">{{ t('settings.generation.scriptSectionMaxConcurrencyHint') }}</p>
               </el-form-item>
@@ -433,10 +434,14 @@ onMounted(() => {
 
               <el-form label-position="top" class="settings-form">
                 <el-form-item :label="t('settings.llm.name')">
-                  <el-input v-model="form.name" />
+                  <el-input v-model="form.name" :aria-label="t('settings.llm.name')" />
                 </el-form-item>
                 <el-form-item :label="t('settings.llm.provider')">
-                  <el-select v-model="form.provider" @change="onProviderChange">
+                  <el-select
+                    v-model="form.provider"
+                    :aria-label="t('settings.llm.provider')"
+                    @change="onProviderChange"
+                  >
                     <el-option
                       v-for="provider in providerOptions"
                       :key="provider.value"
@@ -449,7 +454,11 @@ onMounted(() => {
                   v-if="selectedProviderRequiresBaseUrl"
                   :label="t('settings.llm.baseUrl')"
                 >
-                  <el-input v-model="form.base_url" placeholder="https://api.openai.com/v1" />
+                  <el-input
+                    v-model="form.base_url"
+                    :aria-label="t('settings.llm.baseUrl')"
+                    placeholder="https://api.openai.com/v1"
+                  />
                   <p class="form-hint">{{ t('settings.llm.baseUrlRequiredHint') }}</p>
                 </el-form-item>
                 <el-form-item :label="t('settings.llm.apiKey')">
@@ -459,6 +468,7 @@ onMounted(() => {
                     show-password
                     :disabled="form.clear_api_key"
                     :placeholder="t('settings.llm.newKeyPlaceholder')"
+                    :aria-label="t('settings.llm.apiKey')"
                   />
                   <p class="form-hint">{{ t('settings.llm.apiKeyVisibleHint') }}</p>
                 </el-form-item>
@@ -483,6 +493,7 @@ onMounted(() => {
                       <el-input
                         v-model="modelDraft"
                         :placeholder="t('settings.llm.modelPlaceholder')"
+                        :aria-label="t('settings.llm.modelNames')"
                         @keyup.enter="addModelName"
                       />
                       <el-button :icon="Plus" @click="addModelName">
@@ -492,7 +503,10 @@ onMounted(() => {
                   </div>
                 </el-form-item>
                 <el-form-item :label="t('settings.llm.defaultModel')">
-                  <el-select v-model="form.default_model">
+                  <el-select
+                    v-model="form.default_model"
+                    :aria-label="t('settings.llm.defaultModel')"
+                  >
                     <el-option
                       v-for="modelName in form.model_names"
                       :key="modelName"
@@ -538,7 +552,7 @@ onMounted(() => {
             </section>
           </div>
         </template>
-      </main>
+      </div>
     </div>
   </section>
 </template>

@@ -2,12 +2,13 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Check, Plus, UploadFilled } from '@element-plus/icons-vue'
+import { storeToRefs } from 'pinia'
 import { useI18n } from 'vue-i18n'
 
 import { apiErrorMessage } from '@/api/errors'
-import { listCompletedScriptTasks } from '@/api/imagePrompts'
 import { listProjects, type Project } from '@/api/projects'
 import {
+  listProjectScriptTasks,
   listScriptTaskCharacters,
   listScriptTaskScenes,
   type ScriptCharacter,
@@ -19,7 +20,6 @@ import {
   createOutfit,
   createSceneVersion,
   createStyle,
-  listModelProfiles,
   listOutfits,
   listSceneVersions,
   listStyles,
@@ -28,10 +28,7 @@ import {
   selectSceneVisualVersion,
   setConfigurationStatus,
   setVisualAssetStatus,
-  updateModelProfile,
   uploadVisualAsset,
-  type ModelFamily,
-  type ModelProfile,
   type OutfitVariant,
   type SceneVisualVersion,
   type StyleProfile,
@@ -39,8 +36,11 @@ import {
   type VisualAssetRole,
   type VisualEntityType,
 } from '@/api/visualBible'
+import { useProjectContextStore } from '@/stores/projectContext'
 
 const { t } = useI18n()
+const projectContext = useProjectContextStore()
+const { selectedProjectId } = storeToRefs(projectContext)
 const projects = ref<Project[]>([])
 const tasks = ref<ScriptTask[]>([])
 const characters = ref<ScriptCharacter[]>([])
@@ -49,8 +49,6 @@ const outfits = ref<OutfitVariant[]>([])
 const styles = ref<StyleProfile[]>([])
 const sceneVersions = ref<SceneVisualVersion[]>([])
 const assets = ref<VisualAsset[]>([])
-const modelProfiles = ref<ModelProfile[]>([])
-const selectedProjectId = ref<number | null>(null)
 const selectedTaskId = ref<number | null>(null)
 const loading = ref(false)
 
@@ -58,8 +56,6 @@ const outfitDialog = ref(false)
 const styleDialog = ref(false)
 const sceneDialog = ref(false)
 const assetDialog = ref(false)
-const modelDialog = ref(false)
-const editingModel = ref<ModelProfile | null>(null)
 const selectedFile = ref<File | null>(null)
 
 const assetRolesByEntity: Record<VisualEntityType, VisualAssetRole[]> = {
@@ -73,9 +69,8 @@ const assetRolesByEntity: Record<VisualEntityType, VisualAssetRole[]> = {
     'lineart',
     'segmentation',
     'mask',
-    'lora',
   ],
-  outfit: ['outfit_front', 'outfit_back', 'outfit_detail', 'mask', 'lora'],
+  outfit: ['outfit_front', 'outfit_back', 'outfit_detail', 'mask'],
   scene: [
     'scene_master',
     'prop_reference',
@@ -84,9 +79,8 @@ const assetRolesByEntity: Record<VisualEntityType, VisualAssetRole[]> = {
     'lineart',
     'segmentation',
     'mask',
-    'lora',
   ],
-  style: ['style_reference', 'lora'],
+  style: ['style_reference'],
   prop: ['prop_reference', 'mask'],
   control: ['pose', 'depth', 'canny', 'lineart', 'segmentation', 'mask'],
 }
@@ -104,9 +98,10 @@ const outfitForm = reactive({
 const styleForm = reactive({
   key: '',
   name: '',
-  model_family: 'generic' as ModelFamily,
-  positive_tokens: '',
-  negative_tokens: '',
+  positive_tag: '',
+  negative_tag: '',
+  positive_natural_language: '',
+  negative_natural_language: '',
   color_palette: '',
   lighting: '',
 })
@@ -123,29 +118,10 @@ const assetForm = reactive({
   entity_id: null as number | null,
   entity_key: '',
   role: 'identity_face' as VisualAssetRole,
-  model_family: 'generic' as ModelFamily,
   renderer_locator: '',
   sha256: '',
   approve: false,
 })
-const modelForm = reactive({
-  name: '',
-  family: 'anima' as ModelFamily,
-  variant: '',
-  checkpoint_name: '',
-  checkpoint_hash: '',
-  component_manifest: '{}',
-  default_render: '{}',
-  license: '',
-  license_notice: '',
-  commercial_use_allowed: null as boolean | null,
-  paid_service_allowed: null as boolean | null,
-  fine_tuning_allowed: null as boolean | null,
-  redistribution_allowed: null as boolean | null,
-  is_enabled: false,
-  is_default: false,
-})
-
 const splitValues = (value: string) =>
   value
     .split(',')
@@ -210,7 +186,7 @@ const loadProjectData = async () => {
   try {
     ;[tasks.value, outfits.value, styles.value, sceneVersions.value, assets.value] =
       await Promise.all([
-        listCompletedScriptTasks(selectedProjectId.value),
+        listProjectScriptTasks(selectedProjectId.value, { status: 'succeeded' }),
         listOutfits(selectedProjectId.value),
         listStyles(selectedProjectId.value),
         listSceneVersions(selectedProjectId.value),
@@ -273,12 +249,12 @@ const saveStyle = async () => {
     await createStyle(selectedProjectId.value, {
       key: styleForm.key,
       name: styleForm.name,
-      model_family: styleForm.model_family,
-      positive_tokens: styleForm.positive_tokens,
-      negative_tokens: styleForm.negative_tokens,
+      positive_tag: styleForm.positive_tag,
+      negative_tag: styleForm.negative_tag,
+      positive_natural_language: styleForm.positive_natural_language,
+      negative_natural_language: styleForm.negative_natural_language,
       color_palette: splitValues(styleForm.color_palette),
       lighting: styleForm.lighting,
-      render_defaults: {},
     })
     styleDialog.value = false
     await loadProjectData()
@@ -323,7 +299,6 @@ const saveAsset = async () => {
       if (assetForm.entity_id !== null) form.append('entity_id', String(assetForm.entity_id))
       if (assetForm.entity_key.trim()) form.append('entity_key', assetForm.entity_key.trim())
       form.append('role', assetForm.role)
-      form.append('model_family', assetForm.model_family)
       form.append('approve', String(assetForm.approve))
       await uploadVisualAsset(selectedProjectId.value, form)
     } else {
@@ -332,7 +307,6 @@ const saveAsset = async () => {
         entity_id: assetForm.entity_id,
         entity_key: assetForm.entity_key.trim() || null,
         role: assetForm.role,
-        model_family: assetForm.model_family,
         renderer_locator: assetForm.renderer_locator,
         sha256: assetForm.sha256.trim() || null,
         approve: assetForm.approve,
@@ -393,55 +367,6 @@ const handleCharacterOutfitChange = (character: ScriptCharacter, value: unknown)
 const handleSceneVersionChange = (scene: ScriptScene, value: unknown) =>
   assignSceneVersion(scene, typeof value === 'number' ? value : null)
 
-const openModel = (profile: ModelProfile) => {
-  editingModel.value = profile
-  Object.assign(modelForm, {
-    name: profile.name,
-    family: profile.family,
-    variant: profile.variant,
-    checkpoint_name: profile.checkpoint_name,
-    checkpoint_hash: profile.checkpoint_hash ?? '',
-    component_manifest: JSON.stringify(profile.component_manifest, null, 2),
-    default_render: JSON.stringify(profile.default_render, null, 2),
-    license: profile.license ?? '',
-    license_notice: profile.license_notice ?? '',
-    commercial_use_allowed: profile.commercial_use_allowed,
-    paid_service_allowed: profile.paid_service_allowed,
-    fine_tuning_allowed: profile.fine_tuning_allowed,
-    redistribution_allowed: profile.redistribution_allowed,
-    is_enabled: profile.is_enabled,
-    is_default: profile.is_default,
-  })
-  modelDialog.value = true
-}
-
-const saveModel = async () => {
-  if (editingModel.value === null) return
-  try {
-    await updateModelProfile(editingModel.value.id, {
-      name: modelForm.name,
-      family: modelForm.family,
-      variant: modelForm.variant,
-      checkpoint_name: modelForm.checkpoint_name,
-      checkpoint_hash: modelForm.checkpoint_hash || null,
-      component_manifest: parseObject(modelForm.component_manifest, 'component_manifest'),
-      default_render: parseObject(modelForm.default_render, 'default_render'),
-      license: modelForm.license || null,
-      commercial_use_allowed: modelForm.commercial_use_allowed,
-      paid_service_allowed: modelForm.paid_service_allowed,
-      fine_tuning_allowed: modelForm.fine_tuning_allowed,
-      redistribution_allowed: modelForm.redistribution_allowed,
-      license_notice: modelForm.license_notice || null,
-      is_enabled: modelForm.is_enabled,
-      is_default: modelForm.is_default,
-    })
-    modelDialog.value = false
-    modelProfiles.value = await listModelProfiles()
-  } catch (error) {
-    ElMessage.error(apiErrorMessage(error, t, t('visualBible.errors.save')))
-  }
-}
-
 watch(selectedProjectId, loadProjectData)
 watch(selectedTaskId, loadTaskVisuals)
 watch(
@@ -452,23 +377,16 @@ watch(
     assetForm.role = assetRolesByEntity[assetForm.entity_type][0] ?? 'identity_face'
   },
 )
-watch(
-  () => assetForm.role,
-  (role) => {
-    if (role === 'lora') {
-      assetForm.mode = 'locator'
-      if (assetForm.model_family === 'generic') assetForm.model_family = 'anima'
-    }
-  },
-)
-
 onMounted(async () => {
   try {
-    ;[projects.value, modelProfiles.value] = await Promise.all([
-      listProjects(),
-      listModelProfiles(),
-    ])
-    selectedProjectId.value = projects.value[0]?.id ?? null
+    const previousProjectId = selectedProjectId.value
+    projects.value = await listProjects()
+    if (!projects.value.some((project) => project.id === selectedProjectId.value)) {
+      selectedProjectId.value = projects.value[0]?.id ?? null
+    }
+    if (selectedProjectId.value !== null && selectedProjectId.value === previousProjectId) {
+      await loadProjectData()
+    }
   } catch (error) {
     ElMessage.error(apiErrorMessage(error, t, t('visualBible.errors.load')))
   }
@@ -476,7 +394,7 @@ onMounted(async () => {
 </script>
 
 <template>
-  <main class="visual-bible-page" v-loading="loading">
+  <div class="visual-bible-page" v-loading="loading">
     <div class="page-header">
       <div class="selectors">
         <el-select v-model="selectedProjectId" filterable :placeholder="t('visualBible.project')">
@@ -509,37 +427,6 @@ onMounted(async () => {
       </div>
     </div>
 
-    <section class="panel">
-      <header class="panel__heading">
-        <div>
-          <h2>{{ t('visualBible.models.title') }}</h2>
-          <p>{{ t('visualBible.models.hint') }}</p>
-        </div>
-      </header>
-      <div class="panel__body">
-        <div class="cards">
-          <article
-            v-for="profile in modelProfiles"
-            :key="profile.id"
-            class="card"
-            @click="openModel(profile)"
-          >
-            <strong>{{ profile.name }}</strong>
-            <el-tag :type="profile.is_enabled ? 'success' : 'info'"
-              >{{ profile.family }} ·
-              {{
-                profile.is_enabled
-                  ? t('visualBible.models.enabledStatus')
-                  : t('visualBible.models.disabledStatus')
-              }}</el-tag
-            >
-            <p>{{ profile.checkpoint_name || t('visualBible.models.notConfigured') }}</p>
-            <small>{{ profile.license || t('visualBible.models.licenseUnknown') }}</small>
-          </article>
-        </div>
-      </div>
-    </section>
-
     <section v-if="selectedTaskId" class="panel">
       <header class="panel__heading">
         <div>
@@ -566,11 +453,11 @@ onMounted(async () => {
                 <el-option
                   v-for="outfit in outfits.filter(
                     (item) =>
-                      item.status === 'approved' &&
-                      item.outline_character_id === character.outline_character_id,
+                      item.outline_character_id === character.outline_character_id &&
+                      (item.status === 'approved' || item.id === character.outfit_variant_id),
                   )"
                   :key="outfit.id"
-                  :label="`${outfit.name} v${outfit.version}`"
+                  :label="`${outfit.name} v${outfit.version} · ${t(`visualBible.status.${outfit.status}`)}`"
                   :value="outfit.id"
                 />
               </el-select>
@@ -588,10 +475,12 @@ onMounted(async () => {
               >
                 <el-option
                   v-for="version in sceneVersions.filter(
-                    (item) => item.status === 'approved' && item.script_scene_id === scene.id,
+                    (item) =>
+                      item.script_scene_id === scene.id &&
+                      (item.status === 'approved' || item.id === scene.selected_visual_version_id),
                   )"
                   :key="version.id"
-                  :label="`v${version.version}`"
+                  :label="`v${version.version} · ${t(`visualBible.status.${version.status}`)}`"
                   :value="version.id"
                 />
               </el-select>
@@ -669,7 +558,7 @@ onMounted(async () => {
           <div v-for="item in styles" :key="item.id" class="row">
             <div>
               <strong>{{ item.key }} v{{ item.version }} · {{ item.name }}</strong>
-              <p>{{ item.positive_tokens }}</p>
+              <p>{{ item.positive_natural_language || item.positive_tag }}</p>
             </div>
             <el-button
               v-if="item.status === 'draft'"
@@ -766,17 +655,14 @@ onMounted(async () => {
             ><el-input v-model="styleForm.name"
           /></el-form-item>
         </div>
-        <el-form-item :label="t('visualBible.modelFamily')"
-          ><el-select v-model="styleForm.model_family"
-            ><el-option label="Generic" value="generic" /><el-option
-              label="Anima"
-              value="anima" /><el-option
-              label="Z-Image"
-              value="z_image" /></el-select></el-form-item
-        ><el-form-item :label="t('visualBible.positive')"
-          ><el-input v-model="styleForm.positive_tokens" type="textarea" /></el-form-item
-        ><el-form-item :label="t('visualBible.negative')"
-          ><el-input v-model="styleForm.negative_tokens" type="textarea" /></el-form-item
+        <el-form-item :label="t('visualBible.styles.positiveTag')"
+          ><el-input v-model="styleForm.positive_tag" type="textarea" :rows="4" /></el-form-item
+        ><el-form-item :label="t('visualBible.styles.negativeTag')"
+          ><el-input v-model="styleForm.negative_tag" type="textarea" :rows="3" /></el-form-item
+        ><el-form-item :label="t('visualBible.styles.positiveNaturalLanguage')"
+          ><el-input v-model="styleForm.positive_natural_language" type="textarea" :rows="5" /></el-form-item
+        ><el-form-item :label="t('visualBible.styles.negativeNaturalLanguage')"
+          ><el-input v-model="styleForm.negative_natural_language" type="textarea" :rows="4" /></el-form-item
         ><el-form-item :label="t('visualBible.lighting')"
           ><el-input v-model="styleForm.lighting" /></el-form-item
       ></el-form>
@@ -837,21 +723,13 @@ onMounted(async () => {
               :placeholder="t('visualBible.stableEntityKey')"
           /></el-form-item>
         </div>
-        <div class="form-grid">
-          <el-form-item :label="t('visualBible.role')"
+        <el-form-item :label="t('visualBible.role')"
             ><el-select v-model="assetForm.role" filterable
               ><el-option
                 v-for="value in assetRoleOptions"
                 :key="value"
                 :label="value"
-                :value="value" /></el-select></el-form-item
-          ><el-form-item :label="t('visualBible.modelFamily')"
-            ><el-select v-model="assetForm.model_family"
-              ><el-option label="Generic" value="generic" /><el-option
-                label="Anima"
-                value="anima" /><el-option label="Z-Image" value="z_image" /></el-select
-          ></el-form-item>
-        </div>
+                :value="value" /></el-select></el-form-item>
         <el-form-item v-if="assetForm.mode === 'upload'" :label="t('visualBible.image')"
           ><input
             type="file"
@@ -872,66 +750,7 @@ onMounted(async () => {
       >
     </el-dialog>
 
-    <el-dialog v-model="modelDialog" :title="t('visualBible.models.edit')" width="760px">
-      <el-form label-position="top">
-        <div class="form-grid">
-          <el-form-item :label="t('visualBible.name')"
-            ><el-input v-model="modelForm.name"
-          /></el-form-item>
-          <el-form-item :label="t('visualBible.models.variant')"
-            ><el-input v-model="modelForm.variant"
-          /></el-form-item>
-        </div>
-        <el-form-item :label="t('visualBible.models.checkpointLocator')"
-          ><el-input v-model="modelForm.checkpoint_name"
-        /></el-form-item>
-        <el-form-item :label="t('visualBible.models.checkpointHash')"
-          ><el-input v-model="modelForm.checkpoint_hash"
-        /></el-form-item>
-        <el-form-item :label="t('visualBible.models.componentManifest')"
-          ><el-input v-model="modelForm.component_manifest" type="textarea" :rows="5"
-        /></el-form-item>
-        <el-form-item :label="t('visualBible.models.defaultRender')"
-          ><el-input v-model="modelForm.default_render" type="textarea" :rows="4"
-        /></el-form-item>
-        <div class="form-grid">
-          <el-form-item :label="t('visualBible.models.license')"
-            ><el-input v-model="modelForm.license"
-          /></el-form-item>
-          <el-form-item :label="t('visualBible.models.licenseNotice')"
-            ><el-input v-model="modelForm.license_notice"
-          /></el-form-item>
-        </div>
-        <div class="license-grid">
-          <el-form-item
-            v-for="field in [
-              'commercial_use_allowed',
-              'paid_service_allowed',
-              'fine_tuning_allowed',
-              'redistribution_allowed',
-            ]"
-            :key="field"
-            :label="t(`visualBible.models.${field}`)"
-          >
-            <el-select v-model="modelForm[field as keyof typeof modelForm]" clearable>
-              <el-option :label="t('visualBible.models.allowed')" :value="true" />
-              <el-option :label="t('visualBible.models.notAllowed')" :value="false" />
-            </el-select>
-          </el-form-item>
-        </div>
-        <el-checkbox v-model="modelForm.is_enabled">{{
-          t('visualBible.models.enabled')
-        }}</el-checkbox>
-        <el-checkbox v-model="modelForm.is_default">{{
-          t('visualBible.models.default')
-        }}</el-checkbox>
-      </el-form>
-      <template #footer
-        ><el-button @click="modelDialog = false">{{ t('projects.cancel') }}</el-button
-        ><el-button type="primary" @click="saveModel">{{ t('projects.save') }}</el-button></template
-      >
-    </el-dialog>
-  </main>
+  </div>
 </template>
 
 <style scoped>
@@ -1017,6 +836,10 @@ onMounted(async () => {
   gap: 12px;
 }
 
+.model-profile-alert {
+  margin-bottom: 14px;
+}
+
 .card {
   display: grid;
   align-content: start;
@@ -1026,6 +849,9 @@ onMounted(async () => {
   border: 1px solid var(--panel-border);
   border-radius: 8px;
   background: #f8fbff;
+  color: inherit;
+  font: inherit;
+  text-align: left;
   cursor: pointer;
   transition:
     border-color 0.2s ease,
@@ -1033,10 +859,22 @@ onMounted(async () => {
     transform 0.2s ease;
 }
 
-.card:hover {
+.card:hover,
+.card:focus-visible {
   border-color: rgba(23, 109, 255, 0.38);
   box-shadow: 0 10px 24px rgba(23, 109, 255, 0.1);
   transform: translateY(-1px);
+}
+
+.card:focus-visible {
+  outline: 3px solid rgba(23, 109, 255, 0.2);
+  outline-offset: 2px;
+}
+
+.card__action {
+  color: var(--brand);
+  font-size: 13px;
+  font-weight: 700;
 }
 
 .card p,

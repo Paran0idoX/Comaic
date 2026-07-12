@@ -8,7 +8,6 @@ from sqlalchemy.pool import StaticPool
 from backend.models.comic import (
     ComicPage,
     ComicProject,
-    ModelProfile,
     OutlineCharacter,
     OutlineVersion,
     OutfitVariant,
@@ -26,7 +25,6 @@ from backend.models.enums import (
     ApprovalStatus,
     ComicPageStatus,
     GenerationMode,
-    ModelFamily,
     OutlineVersionStatus,
     ScriptGenerationMode,
     ScriptGenerationTaskStatus,
@@ -39,6 +37,7 @@ from backend.models.enums import (
 )
 from backend.repositories.image_spec_repository import ImageSpecRepository
 from backend.services.image_spec_service import ImageSpecService
+from backend.i18n.errors import AppError
 
 
 class FakeContinuityEventAgent:
@@ -242,46 +241,21 @@ def _seed_project(session):
         key="comic",
         version=1,
         name="Comic",
-        model_family=ModelFamily.GENERIC,
-        positive_tokens="clean comic line art",
-        negative_tokens="photorealistic",
+        positive_tag="clean comic line art",
+        negative_tag="photorealistic",
+        positive_natural_language="Use clean comic line art.",
+        negative_natural_language="Do not use photorealistic rendering.",
         color_palette_json="[]",
         lighting="cinematic contrast",
-        render_defaults_json='{"width":1024,"height":1536}',
         status=ApprovalStatus.APPROVED,
     )
-    anima = ModelProfile(
-        name="Anima local",
-        family=ModelFamily.ANIMA,
-        variant="local",
-        checkpoint_name="anima.safetensors",
-        compiler_key="anima_v1",
-        compiler_version="1",
-        component_manifest_json="{}",
-        default_render_json='{"steps":28}',
-        is_enabled=True,
-        is_default=True,
-    )
-    z_image = ModelProfile(
-        name="Z-Image local",
-        family=ModelFamily.Z_IMAGE,
-        variant="local",
-        checkpoint_name="z-image.safetensors",
-        compiler_key="z_image_v1",
-        compiler_version="1",
-        component_manifest_json="{}",
-        default_render_json='{"steps":30}',
-        is_enabled=True,
-        is_default=True,
-    )
-    session.add_all([character, *pages, scene_version, style, anima, z_image])
+    session.add_all([character, *pages, scene_version, style])
     session.flush()
 
     def asset(
         entity_type,
         entity_id,
         role,
-        family=ModelFamily.GENERIC,
         *,
         entity_key=None,
     ):
@@ -292,10 +266,9 @@ def _seed_project(session):
                 entity_id=entity_id,
                 entity_key=entity_key,
                 role=role,
-                model_family=family,
                 storage_kind=VisualAssetStorageKind.RENDERER_LOCATOR,
-                renderer_locator=f"{role.value}-{family.value}",
-                sha256=(role.value + family.value).encode().hex().ljust(64, "0")[:64],
+                renderer_locator=role.value,
+                sha256=role.value.encode().hex().ljust(64, "0")[:64],
                 version=1,
                 status=ApprovalStatus.APPROVED,
                 source=VisualAssetSource.RENDERER_LOCATOR,
@@ -303,12 +276,6 @@ def _seed_project(session):
         )
 
     asset(VisualEntityType.CHARACTER, outline_character.id, VisualAssetRole.IDENTITY_FACE)
-    asset(
-        VisualEntityType.CHARACTER,
-        outline_character.id,
-        VisualAssetRole.LORA,
-        ModelFamily.Z_IMAGE,
-    )
     asset(VisualEntityType.OUTFIT, outfit.id, VisualAssetRole.OUTFIT_FRONT)
     asset(VisualEntityType.SCENE, scene_version.id, VisualAssetRole.SCENE_MASTER)
     asset(VisualEntityType.STYLE, style.id, VisualAssetRole.STYLE_REFERENCE)
@@ -319,11 +286,26 @@ def _seed_project(session):
         entity_key="brass_key",
     )
     session.commit()
-    return task, pages, style, anima, z_image
+    return task, pages, style
+
+
+def test_page_compilation_failure_preserves_final_readiness_code() -> None:
+    session = _session()
+    _task, pages, _style = _seed_project(session)
+
+    failure = ImageSpecService._page_compilation_failure(
+        pages[0],
+        ValueError(
+            "Final image spec is missing canonical conditions: "
+            "image_spec.identity_asset_missing"
+        ),
+    )
+
+    assert failure["code"] == "image_spec.final_conditions_missing"
 
 
 @pytest.mark.asyncio
-async def test_full_compile_uses_current_visual_truth_and_model_compatible_assets(
+async def test_full_compile_generates_three_prompt_specs_from_shared_visual_truth(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
@@ -335,15 +317,13 @@ async def test_full_compile_uses_current_visual_truth_and_model_compatible_asset
         FakeShotPlannerAgent,
     )
     session = _session()
-    task, pages, style, anima, z_image = _seed_project(session)
+    task, pages, style = _seed_project(session)
     service = ImageSpecService(ImageSpecRepository(session))
 
     events = [
         item
         async for item in service.stream_compile_task(
             task_id=task.id,
-            model_profile_ids=[anima.id, z_image.id],
-            primary_model_profile_id=anima.id,
             style_profile_id=style.id,
             shot_planner_preset_id=None,
             negative_prompt_preset_id=None,
@@ -353,26 +333,31 @@ async def test_full_compile_uses_current_visual_truth_and_model_compatible_asset
     ]
 
     assert events[-1][0] == "done"
-    assert events[-1][1]["total_specs"] == 4
+    assert events[-1][1]["total_specs"] == 6
     specs = service.list_task_specs(task_id=task.id)
-    assert len(specs) == 4
+    assert len(specs) == 6
     page_two_specs = [item for item in specs if item["page_no"] == 2]
-    anima_spec = next(item for item in page_two_specs if item["model_family"] == "anima")
-    z_image_spec = next(item for item in page_two_specs if item["model_family"] == "z_image")
+    tag_spec = next(item for item in page_two_specs if item["prompt_type"] == "tag")
+    natural_spec = next(
+        item for item in page_two_specs if item["prompt_type"] == "natural_language"
+    )
+    hybrid_spec = next(item for item in page_two_specs if item["prompt_type"] == "hybrid")
 
-    assert "free text that must not override" not in anima_spec["positive_prompt"]
-    assert "navy repair coat" in anima_spec["positive_prompt"]
-    assert "holding brass_key" in anima_spec["positive_prompt"]
-    assert "object north_door open" in anima_spec["positive_prompt"]
-    assert "never change eye color" in anima_spec["negative_prompt"]
-    assert "no red coat" in anima_spec["negative_prompt"]
-    assert "no extra windows" in anima_spec["negative_prompt"]
-    assert anima_spec["spec"]["subjects"][0]["identity"]["loras"] == []
-    assert len(z_image_spec["spec"]["subjects"][0]["identity"]["loras"]) == 1
-    assert "lora" not in anima_spec["required_capabilities"]
-    assert "lora" in z_image_spec["required_capabilities"]
-    assert anima_spec["spec"]["subjects"][0]["props"][0]["prop_key"] == "brass_key"
-    assert pages[0].image_prompt
+    assert "free text that must not override" not in tag_spec["positive_prompt"]
+    assert "navy repair coat" in tag_spec["positive_prompt"]
+    assert "holding brass_key" in tag_spec["positive_prompt"]
+    assert "object north_door open" in tag_spec["positive_prompt"]
+    assert "never change eye color" in tag_spec["negative_prompt"]
+    assert "no red coat" in tag_spec["negative_prompt"]
+    assert "no extra windows" in tag_spec["negative_prompt"]
+    assert "lora" not in tag_spec["required_capabilities"]
+    assert tag_spec["spec"]["subjects"][0]["props"][0]["prop_key"] == "brass_key"
+    assert hybrid_spec["positive_prompt"] == (
+        f"{natural_spec['positive_prompt']}\n{tag_spec['positive_prompt']}"
+    )
+    assert len({item["shot_plan_id"] for item in page_two_specs}) == 1
+    session.refresh(pages[0])
+    assert pages[0].status == ComicPageStatus.SPEC_READY
 
     compilation = service.repository.list_compilations(task.id)[0]
     page_states = {
@@ -395,12 +380,10 @@ async def test_manual_event_revision_recomputes_current_system_events(monkeypatc
         FakeShotPlannerAgent,
     )
     session = _session()
-    task, _pages, style, anima, _z_image = _seed_project(session)
+    task, _pages, style = _seed_project(session)
     service = ImageSpecService(ImageSpecRepository(session))
     async for _event in service.stream_compile_task(
         task_id=task.id,
-        model_profile_ids=[anima.id],
-        primary_model_profile_id=anima.id,
         style_profile_id=style.id,
         shot_planner_preset_id=None,
         negative_prompt_preset_id=None,
@@ -417,3 +400,176 @@ async def test_manual_event_revision_recomputes_current_system_events(monkeypatc
     state = json.loads(first_snapshot.state_json)
 
     assert state["characters"][0]["conditions"]["section_state"] == "calm"
+
+
+@pytest.mark.asyncio
+async def test_continuity_reducer_failure_retries_with_persisted_audit(monkeypatch) -> None:
+    class RetryContinuityAgent:
+        VERSION = "test"
+        calls = 0
+
+        async def extract(self, **_kwargs):
+            type(self).calls += 1
+            if type(self).calls == 1:
+                return [
+                    {
+                        "page_no": 1,
+                        "sequence_no": 1,
+                        "event_type": "drop_prop",
+                        "target_type": "character",
+                        "target_key": "alice",
+                        "timing": "before_page",
+                        "payload": {"prop_key": "brass_key"},
+                    }
+                ]
+            return []
+
+    monkeypatch.setattr(
+        "backend.services.image_spec_service.ContinuityEventAgent",
+        RetryContinuityAgent,
+    )
+    monkeypatch.setattr(
+        "backend.services.image_spec_service.ShotPlannerAgent",
+        FakeShotPlannerAgent,
+    )
+    session = _session()
+    task, _pages, style = _seed_project(session)
+    service = ImageSpecService(ImageSpecRepository(session))
+
+    events = [
+        item
+        async for item in service.stream_compile_task(
+            task_id=task.id,
+            style_profile_id=style.id,
+            shot_planner_preset_id=None,
+            negative_prompt_preset_id=None,
+            generation_mode=GenerationMode.PREVIEW,
+        )
+    ]
+
+    assert events[-1][0] == "done"
+    attempts = service.repository.list_compilations(task.id)
+    assert [item.status.value for item in attempts[:2]] == ["succeeded", "failed"]
+    assert "does not hold prop" in (attempts[1].error_message or "")
+    assert RetryContinuityAgent.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_partial_shot_plans_are_persisted_and_next_compile_resumes(monkeypatch) -> None:
+    class PartialShotPlanner(FakeShotPlannerAgent):
+        async def plan(self, *, page, **kwargs):
+            if page["page_no"] == 2:
+                raise ValueError("simulated page two planning failure")
+            return await super().plan(**kwargs)
+
+    class CountingShotPlanner(FakeShotPlannerAgent):
+        calls: list[int] = []
+
+        async def plan(self, *, page, **kwargs):
+            type(self).calls.append(page["page_no"])
+            return await super().plan(**kwargs)
+
+    monkeypatch.setattr(
+        "backend.services.image_spec_service.ContinuityEventAgent",
+        FakeContinuityEventAgent,
+    )
+    monkeypatch.setattr(
+        "backend.services.image_spec_service.ShotPlannerAgent",
+        PartialShotPlanner,
+    )
+    session = _session()
+    task, _pages, style = _seed_project(session)
+    service = ImageSpecService(ImageSpecRepository(session))
+
+    first_events = []
+    with pytest.raises(AppError, match="ImageSpec compilation"):
+        async for item in service.stream_compile_task(
+            task_id=task.id,
+            style_profile_id=style.id,
+            shot_planner_preset_id=None,
+            negative_prompt_preset_id=None,
+            generation_mode=GenerationMode.PREVIEW,
+            concurrency=2,
+        ):
+            first_events.append(item)
+    assert len(service.list_task_specs(task_id=task.id)) == 3
+    first_attempt = service.list_image_spec_compilations(task.id)[0]
+    assert first_attempt["status"] == "failed"
+    assert first_attempt["completed_pages"] == 1
+    assert [item["page_no"] for item in first_attempt["failed_pages"]] == [2]
+    assert any(event == "page_error" for event, _payload in first_events)
+
+    monkeypatch.setattr(
+        "backend.services.image_spec_service.ShotPlannerAgent",
+        CountingShotPlanner,
+    )
+    second_events = [
+        item
+        async for item in service.stream_compile_task(
+            task_id=task.id,
+            style_profile_id=style.id,
+            shot_planner_preset_id=None,
+            negative_prompt_preset_id=None,
+            generation_mode=GenerationMode.PREVIEW,
+            concurrency=2,
+        )
+    ]
+
+    assert CountingShotPlanner.calls == [2]
+    assert any(
+        event == "resume" and payload["page_nos"] == [1]
+        for event, payload in second_events
+    )
+    assert len(service.list_task_specs(task_id=task.id)) == 6
+    assert service.list_image_spec_compilations(task.id)[0]["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_prompt_mode_change_reuses_model_independent_shot_plans(monkeypatch) -> None:
+    class CountingShotPlanner(FakeShotPlannerAgent):
+        calls: list[int] = []
+
+        async def plan(self, *, page, **kwargs):
+            type(self).calls.append(page["page_no"])
+            return await super().plan(**kwargs)
+
+    monkeypatch.setattr(
+        "backend.services.image_spec_service.ContinuityEventAgent",
+        FakeContinuityEventAgent,
+    )
+    monkeypatch.setattr(
+        "backend.services.image_spec_service.ShotPlannerAgent",
+        CountingShotPlanner,
+    )
+    session = _session()
+    task, _pages, style = _seed_project(session)
+    service = ImageSpecService(ImageSpecRepository(session))
+
+    async for _event in service.stream_compile_task(
+        task_id=task.id,
+        style_profile_id=style.id,
+        shot_planner_preset_id=None,
+        negative_prompt_preset_id=None,
+        generation_mode=GenerationMode.PREVIEW,
+    ):
+        pass
+    assert sorted(CountingShotPlanner.calls) == [1, 2]
+    CountingShotPlanner.calls.clear()
+
+    final_events = [
+        item
+        async for item in service.stream_compile_task(
+            task_id=task.id,
+            style_profile_id=style.id,
+            shot_planner_preset_id=None,
+            negative_prompt_preset_id=None,
+            generation_mode=GenerationMode.FINAL,
+        )
+    ]
+
+    assert CountingShotPlanner.calls == []
+    reused_plans = [
+        payload for event, payload in final_events if event == "shot_plan"
+    ]
+    assert len(reused_plans) == 2
+    assert all(item["reused"] for item in reused_plans)

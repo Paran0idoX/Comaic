@@ -32,19 +32,25 @@ class ContinuityEventAgent:
         characters: list[dict],
         scenes: list[dict],
         outfits: list[dict],
+        validation_feedback: str | None = None,
     ) -> list[dict]:
+        message_parts = [
+            "已知角色：\n" + canonical_json(characters),
+            "已知场景：\n" + canonical_json(scenes),
+            "已知服装版本：\n" + canonical_json(outfits),
+            "完整分页脚本：\n" + canonical_json(pages),
+        ]
+        if validation_feedback:
+            message_parts.append(
+                "上一轮事件通过结构校验后未能通过确定性状态机校验。"
+                "请依据以下错误重新生成完整 events，不要只返回局部修补：\n"
+                + validation_feedback
+            )
         response = await ainvoke_structured_with_retries(
             self._agent,
             messages=[
                 HumanMessage(
-                    content="\n\n".join(
-                        [
-                            "已知角色：\n" + canonical_json(characters),
-                            "已知场景：\n" + canonical_json(scenes),
-                            "已知服装版本：\n" + canonical_json(outfits),
-                            "完整分页脚本：\n" + canonical_json(pages),
-                        ]
-                    )
+                    content="\n\n".join(message_parts)
                 )
             ],
             response_model=ContinuityEventResponse,
