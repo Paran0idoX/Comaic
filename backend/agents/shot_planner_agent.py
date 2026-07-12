@@ -53,14 +53,6 @@ class ShotPlannerAgent:
             missing = known_character_keys - planned_character_keys
             if missing:
                 raise ValueError(f"shot plan omits page characters: {sorted(missing)}")
-            requested = {
-                requirement
-                for subject in response.subjects
-                for requirement in subject.control_requirements
-            } | set(response.scene.control_requirements)
-            unsupported = requested - set(available_controls)
-            if unsupported:
-                raise ValueError(f"shot plan requests unavailable controls: {sorted(unsupported)}")
 
         response = await ainvoke_structured_with_retries(
             self._agent,
@@ -80,7 +72,39 @@ class ShotPlannerAgent:
             max_retries=self.max_structured_retries,
             validator=validate,
         )
-        return response.model_dump(mode="json")
+        plan = response.model_dump(mode="json")
+        available = {str(value).strip() for value in available_controls if str(value).strip()}
+        dropped: set[str] = set()
+
+        # 模型偶尔会无视 Prompt 请求 ControlNet 等当前页面并不存在的控制图。
+        # 这些要求不是镜头语义本身，确定性剔除后保留告警，比重复调用模型更可靠。
+        for subject in plan.get("subjects", []):
+            requested = {
+                str(value).strip()
+                for value in subject.get("control_requirements", [])
+                if str(value).strip()
+            }
+            dropped.update(requested - available)
+            subject["control_requirements"] = sorted(requested & available)
+        scene = plan.get("scene") or {}
+        requested = {
+            str(value).strip()
+            for value in scene.get("control_requirements", [])
+            if str(value).strip()
+        }
+        dropped.update(requested - available)
+        scene["control_requirements"] = sorted(requested & available)
+        if dropped:
+            controls = ", ".join(sorted(dropped))
+            plan["warnings"] = [
+                {
+                    "code": "shot_plan.control_unavailable",
+                    "message": f"Dropped unavailable shot controls: {controls}.",
+                }
+            ]
+        else:
+            plan["warnings"] = []
+        return plan
 
     @staticmethod
     def _default_llm() -> Any:

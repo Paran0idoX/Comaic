@@ -102,40 +102,40 @@ async def resolve_outline_session(
 ) -> ResolveOutlineSessionResponse:
     """复用项目最近的大纲会话；没有会话时创建一个新的。"""
 
+    locale = request_locale(http_request)
     with SessionLocal() as db_session:
         service = OutlineService(ComicRepository(db_session))
         try:
             session = service.get_or_create_outline_session(project_id=request.project_id)
             versions = service.list_outline_versions(session_id=session.id)
-        except ValueError as exc:
-            raise http_exception(exc, request_locale(http_request)) from exc
 
-        async with OutlineAgent() as agent:
-            history_messages = await agent.get_conversation_messages(
+            history_messages = await OutlineAgent.load_conversation_messages(
                 thread_id=session.thread_id,
             )
 
-        return ResolveOutlineSessionResponse(
-            session_id=session.id,
-            project_id=session.project_id,
-            thread_id=session.thread_id,
-            purpose=session.purpose.value,
-            outline_versions=[
-                outline_version_to_response(version)
-                for version in sorted(
-                    versions,
-                    key=lambda item: item.version_no,
-                    reverse=True,
-                )
-            ],
-            messages=[
-                OutlineMessageResponse(
-                    role=message["role"],
-                    content=message["content"],
-                )
-                for message in history_messages
-            ],
-        )
+            return ResolveOutlineSessionResponse(
+                session_id=session.id,
+                project_id=session.project_id,
+                thread_id=session.thread_id,
+                purpose=session.purpose.value,
+                outline_versions=[
+                    outline_version_to_response(version)
+                    for version in sorted(
+                        versions,
+                        key=lambda item: item.version_no,
+                        reverse=True,
+                    )
+                ],
+                messages=[
+                    OutlineMessageResponse(
+                        role=message["role"],
+                        content=message["content"],
+                    )
+                    for message in history_messages
+                ],
+            )
+        except Exception as exc:  # noqa: BLE001 - Agent/记忆初始化错误也必须转成稳定 API 错误
+            raise http_exception(exc, locale) from exc
 
 
 @router.post("/chat/stream")

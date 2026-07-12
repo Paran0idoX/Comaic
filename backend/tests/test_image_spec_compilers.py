@@ -1,9 +1,11 @@
 import pytest
 
-from backend.models.enums import GenerationMode
+from backend.models.enums import GenerationMode, ImagePromptType
 from backend.services.image_spec_compilers import (
-    AnimaImageSpecCompiler,
-    ZImageImageSpecCompiler,
+    HybridImageSpecCompiler,
+    NaturalLanguageImageSpecCompiler,
+    TagImageSpecCompiler,
+    compiler_for_prompt_type,
 )
 
 
@@ -16,18 +18,20 @@ def _snapshot() -> dict:
                 "identity": {
                     "appearance": "young mechanic with amber eyes",
                     "visual_anchors": "small scar under left eyebrow",
+                    "negative_constraints": "never change eye color",
                 },
                 "hairstyle": "short black bob",
                 "outfit": {
                     "variant_id": 7,
                     "description": "navy repair coat with brass buttons",
                     "assets": [
-                        {"role": "outfit_front", "model_family": "generic", "storage_kind": "local_file"}
+                        {"id": 2, "role": "outfit_front", "storage_kind": "local_file"}
                     ],
                 },
                 "accessories": {"description": "red tool belt"},
                 "identity_assets": [
-                    {"role": "identity_face", "model_family": "generic", "storage_kind": "local_file"}
+                    {"id": 1, "role": "identity_face", "storage_kind": "local_file"},
+                    {"id": 99, "role": "lora", "storage_kind": "renderer_locator"},
                 ],
             }
         ],
@@ -40,7 +44,7 @@ def _snapshot() -> dict:
             "lighting": "warm desk lamp",
             "weather": "rain",
             "assets": [
-                {"role": "scene_master", "model_family": "generic", "storage_kind": "local_file"}
+                {"id": 3, "role": "scene_master", "storage_kind": "local_file"}
             ],
         },
     }
@@ -68,33 +72,33 @@ def _style() -> dict:
     return {
         "id": 3,
         "status": "approved",
-        "model_family": "generic",
-        "positive_tokens": "clean anime line art",
-        "negative_tokens": "photorealistic",
+        "positive_tag": "clean anime line art",
+        "negative_tag": "photorealistic",
+        "positive_natural_language": "Use clean graphic line art.",
+        "negative_natural_language": "Do not use photorealistic rendering.",
         "lighting": "cinematic warm/cool contrast",
-        "render_defaults": {"width": 1024, "height": 1536},
         "assets": [
-            {"role": "style_reference", "model_family": "generic", "storage_kind": "local_file"}
+            {"id": 4, "role": "style_reference", "storage_kind": "local_file"}
         ],
     }
 
 
 @pytest.mark.parametrize(
-    ("compiler", "family"),
-    [(AnimaImageSpecCompiler(), "anima"), (ZImageImageSpecCompiler(), "z_image")],
+    "prompt_type",
+    [ImagePromptType.TAG, ImagePromptType.NATURAL_LANGUAGE, ImagePromptType.HYBRID],
 )
-def test_compilers_are_deterministic_and_ignore_visual_overrides(compiler, family: str) -> None:
+def test_compilers_are_deterministic_and_ignore_visual_overrides(
+    prompt_type: ImagePromptType,
+) -> None:
+    compiler = compiler_for_prompt_type(prompt_type)
     kwargs = {
         "snapshot": _snapshot(),
         "shot_plan": _shot_plan(),
-        "model_profile": {
-            "id": 1,
-            "family": family,
-            "variant": "local",
-            "default_render": {"steps": 28},
-        },
         "style_profile": _style(),
-        "negative_prompt": "text, watermark",
+        "negative_prompts": {
+            "tag": "text, watermark",
+            "natural_language": "Avoid text and watermarks.",
+        },
         "generation_mode": GenerationMode.FINAL,
         "source_hash": "source-v1",
     }
@@ -107,29 +111,36 @@ def test_compilers_are_deterministic_and_ignore_visual_overrides(compiler, famil
     assert "navy repair coat" in first.positive_prompt
     assert "EVIL OVERRIDE" not in first.positive_prompt
     assert "EVIL OUTFIT" not in first.positive_prompt
+    assert all(
+        asset["role"] != "lora"
+        for asset in first.spec["subjects"][0]["identity_assets"]
+    )
+    assert "lora" not in first.required_capabilities
 
 
-def test_anima_and_z_image_share_truth_but_compile_different_prompts() -> None:
+def test_three_prompt_types_share_truth_and_hybrid_preserves_both_forms() -> None:
     common = {
         "snapshot": _snapshot(),
         "shot_plan": _shot_plan(),
         "style_profile": _style(),
-        "negative_prompt": "text",
+        "negative_prompts": {
+            "tag": "text",
+            "natural_language": "Avoid text.",
+        },
         "generation_mode": GenerationMode.FINAL,
         "source_hash": "same-source",
     }
-    anima = AnimaImageSpecCompiler().compile(
-        **common,
-        model_profile={"id": 1, "family": "anima", "default_render": {}},
-    )
-    z_image = ZImageImageSpecCompiler().compile(
-        **common,
-        model_profile={"id": 2, "family": "z_image", "default_render": {}},
-    )
+    tag = TagImageSpecCompiler().compile(**common)
+    natural = NaturalLanguageImageSpecCompiler().compile(**common)
+    hybrid = HybridImageSpecCompiler().compile(**common)
 
-    assert anima.positive_prompt != z_image.positive_prompt
-    assert anima.spec["subjects"][0]["identity"] == z_image.spec["subjects"][0]["identity"]
-    assert anima.spec["scene"]["visual_version_id"] == z_image.spec["scene"]["visual_version_id"]
+    assert tag.positive_prompt != natural.positive_prompt
+    assert tag.spec["subjects"] == natural.spec["subjects"] == hybrid.spec["subjects"]
+    assert hybrid.spec["prompt"]["tag_text"] == tag.positive_prompt
+    assert hybrid.spec["prompt"]["natural_language_text"] == natural.positive_prompt
+    assert hybrid.positive_prompt == f"{natural.positive_prompt}\n{tag.positive_prompt}"
+    assert hybrid.negative_prompt.startswith(natural.negative_prompt)
+    assert "\n" in hybrid.negative_prompt
 
 
 def test_final_rejects_missing_canonical_assets_but_preview_warns() -> None:
@@ -138,12 +149,17 @@ def test_final_rejects_missing_canonical_assets_but_preview_warns() -> None:
     kwargs = {
         "snapshot": snapshot,
         "shot_plan": _shot_plan(),
-        "model_profile": {"id": 1, "family": "anima", "default_render": {}},
         "style_profile": _style(),
-        "negative_prompt": "",
+        "negative_prompts": {"tag": "", "natural_language": ""},
         "source_hash": "source",
     }
-    preview = AnimaImageSpecCompiler().compile(**kwargs, generation_mode=GenerationMode.PREVIEW)
+    preview = TagImageSpecCompiler().compile(
+        **kwargs,
+        generation_mode=GenerationMode.PREVIEW,
+    )
     assert any(item["code"] == "image_spec.identity_asset_missing" for item in preview.warnings)
     with pytest.raises(ValueError, match="missing canonical conditions"):
-        AnimaImageSpecCompiler().compile(**kwargs, generation_mode=GenerationMode.FINAL)
+        TagImageSpecCompiler().compile(
+            **kwargs,
+            generation_mode=GenerationMode.FINAL,
+        )

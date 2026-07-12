@@ -6,7 +6,7 @@ class ComicPageStatus(str, Enum):
 
     DRAFT = "draft"
     SCRIPT_READY = "script_ready"
-    PROMPT_READY = "prompt_ready"
+    SPEC_READY = "spec_ready"
     IMAGE_READY = "image_ready"
     IMAGE_SELECTED = "image_selected"
 
@@ -69,18 +69,25 @@ class OutlineVersionStatus(str, Enum):
 
 
 class ImagePromptPresetKind(str, Enum):
-    """图片 Prompt 配置类型，用于区分脚本转图 Prompt 和负向 Prompt。"""
+    """视觉规格配置类型。"""
 
-    SCRIPT_TO_IMAGE_SYSTEM_PROMPT = "script_to_image_system_prompt"
     SHOT_PLANNER_SYSTEM_PROMPT = "shot_planner_system_prompt"
     NEGATIVE_PROMPT = "negative_prompt"
 
 
-class ImageGenerationToolKind(str, Enum):
-    """图片生成工具类型。"""
+class ImageGenerationProvider(str, Enum):
+    """图片生成执行端类型；只描述调用协议，不描述具体底模。"""
 
     COMFYUI = "comfyui"
     OPENAI_IMAGES_COMPATIBLE = "openai_images_compatible"
+
+
+class ImagePromptType(str, Enum):
+    """ImageSpec 的 Prompt 表达类型。"""
+
+    TAG = "tag"
+    NATURAL_LANGUAGE = "natural_language"
+    HYBRID = "hybrid"
 
 
 class WorkflowCapability(str, Enum):
@@ -96,14 +103,6 @@ class WorkflowCapability(str, Enum):
     LINEART = "lineart"
     REGIONAL_CONDITION = "regional_condition"
     INPAINT = "inpaint"
-
-
-class ModelFamily(str, Enum):
-    """图片底模家族；用于选择确定性的 Prompt 编译器和校验资产兼容性。"""
-
-    ANIMA = "anima"
-    Z_IMAGE = "z_image"
-    GENERIC = "generic"
 
 
 class VisualEntityType(str, Enum):

@@ -74,7 +74,6 @@ class ScriptPageResponse(BaseModel):
     composition: str | None
     character_action: str | None
     dialogue: str | None
-    image_prompt: str | None
     status: str
     script_review_status: str
     script_review_error: str | None = None

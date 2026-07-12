@@ -26,7 +26,12 @@ from backend.models.enums import (
     ScriptSectionStatus,
 )
 from backend.repositories.comic_repository import ComicRepository
+from backend.repositories.visual_bible_repository import VisualBibleRepository
 from backend.services.task_runtime import RuntimeTaskType, running_task_registry
+from backend.services.visual_bible_service import (
+    VisualBibleDraftSummary,
+    VisualBibleService,
+)
 
 
 AgentResultT = TypeVar("AgentResultT")
@@ -404,7 +409,6 @@ class ScriptService:
         """执行批量脚本任务；新建和继续生成共用这一条 section 编排链路。"""
 
         total_pages = task.total_pages
-        project_id = task.project_id
         yield "task", {"task_id": task.id, "status": task.status.value}
         yield "phase", {
             "code": "script.continue.started" if is_continue else "script.planning.started"
@@ -470,11 +474,16 @@ class ScriptService:
                     outline_version_id=outline_version.id,
                     normalized_sections=normalized_sections,
                 )
+            visual_bible_summary = self._ensure_task_visual_bible_drafts(task.id)
             yield "section_plan", {
                 "sections": [self._section_to_payload(section) for section in persisted_sections]
             }
             for section in persisted_sections:
                 yield "section", self._section_to_payload(section)
+            yield "phase", {
+                "code": "script.visual_bible.drafts_ready",
+                **visual_bible_summary.event_payload(),
+            }
             yield "phase", {"code": "script.planning.locked"}
 
             async for event_name, payload in self._stream_concurrent_sections(
@@ -1741,8 +1750,8 @@ class ScriptService:
         outline_version_id: int,
         scenes: list,
         characters: list,
-    ) -> None:
-        """保存规划阶段锁定的场景圣经和当前分段角色设定。"""
+    ) -> VisualBibleDraftSummary:
+        """保存锁定视觉设定，并同步生成可审核的视觉圣经草稿。"""
 
         scene_payloads = [
             self._normalize_scene_payload(scene)
@@ -1762,10 +1771,13 @@ class ScriptService:
             character.character_key: character
             for character in self.repository.list_outline_characters(outline_version_id)
         }
-        for scene in scene_payloads:
+        persisted_scenes = [
             self.repository.upsert_script_scene(task_id=task_id, **scene)
+            for scene in scene_payloads
+        ]
+        persisted_characters = []
         for character in character_payloads:
-            self.repository.upsert_script_section_character(
+            persisted_character = self.repository.upsert_script_section_character(
                 section_id=section_id,
                 outline_character_id=(
                     outline_characters_by_key[character["character_key"]].id
@@ -1775,6 +1787,30 @@ class ScriptService:
                 task_id=task_id,
                 **character,
             )
+            persisted_characters.append(persisted_character)
+        task = self.get_script_task(task_id)
+        return VisualBibleService(
+            VisualBibleRepository(self.repository.session)
+        ).derive_script_visual_drafts(
+            project_id=task.project_id,
+            scenes=persisted_scenes,
+            characters=persisted_characters,
+        )
+
+    def _ensure_task_visual_bible_drafts(
+        self,
+        task_id: int,
+    ) -> VisualBibleDraftSummary:
+        """为旧任务续跑补齐草稿；派生服务会保留所有已有人工绑定。"""
+
+        task = self.get_script_task(task_id)
+        return VisualBibleService(
+            VisualBibleRepository(self.repository.session)
+        ).derive_script_visual_drafts(
+            project_id=task.project_id,
+            scenes=self.repository.list_script_scenes(task_id),
+            characters=self.repository.list_script_characters(task_id),
+        )
 
     def _visual_settings_for_section(
         self,
@@ -2387,7 +2423,6 @@ class ScriptService:
             "composition": page.composition,
             "character_action": page.character_action,
             "dialogue": page.dialogue,
-            "image_prompt": page.image_prompt,
             "status": page.status.value,
             "script_review_status": page.script_review_status.value,
             "script_review_error": page.script_review_error,

@@ -1,7 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
 
 import OutlineWorkspaceView from '@/views/OutlineWorkspaceView.vue'
-import ImagePromptWorkspaceView from '@/views/ImagePromptWorkspaceView.vue'
 import ImageSpecWorkspaceView from '@/views/ImageSpecWorkspaceView.vue'
 import ImageGenerationWorkspaceView from '@/views/ImageGenerationWorkspaceView.vue'
 import SettingsView from '@/views/SettingsView.vue'
@@ -33,14 +32,6 @@ const router = createRouter({
       component: ScriptWorkspaceView,
       meta: {
         titleKey: 'routeTitles.scripts',
-      },
-    },
-    {
-      path: '/prompts',
-      name: 'prompts',
-      component: ImagePromptWorkspaceView,
-      meta: {
-        titleKey: 'routeTitles.prompts',
       },
     },
     {

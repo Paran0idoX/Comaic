@@ -1,7 +1,7 @@
 import json
 from types import SimpleNamespace
 
-from backend.models.enums import ImageGenerationToolKind
+from backend.models.enums import ImageGenerationProvider, ImagePromptType
 from backend.services.image_generation_service import ImageGenerationService
 
 
@@ -25,7 +25,8 @@ def test_explicit_bindings_are_the_truth_for_legacy_node_columns() -> None:
 
     service.create_tool_preset(
         name="Structured",
-        kind=ImageGenerationToolKind.COMFYUI,
+        provider=ImageGenerationProvider.COMFYUI,
+        prompt_type=ImagePromptType.HYBRID,
         workflow_json=json.dumps(workflow),
         capabilities={"features": ["txt2img"], "limits": {}},
         bindings={
@@ -43,3 +44,4 @@ def test_explicit_bindings_are_the_truth_for_legacy_node_columns() -> None:
     assert repository.values["positive_input_name"] == "text"
     assert repository.values["seed_node_id"] == "2"
     assert repository.values["seed_input_name"] == "seed"
+    assert repository.values["prompt_type"] == ImagePromptType.HYBRID

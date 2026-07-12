@@ -17,7 +17,6 @@ export type ScriptPage = {
   composition: string | null
   character_action: string | null
   dialogue: string | null
-  image_prompt: string | null
   status: string
   script_review_status: string
   script_review_error: string | null

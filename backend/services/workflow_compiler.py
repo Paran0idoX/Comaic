@@ -11,7 +11,7 @@ from backend.models.enums import GenerationMode, WorkflowCapability
 SOURCE_PATH_RE = re.compile(
     r"^[A-Za-z_][A-Za-z0-9_]*(?:(?:\.[A-Za-z_][A-Za-z0-9_]*)|(?:\[[0-9]+\]))*$"
 )
-ALLOWED_SOURCE_ROOTS = {"prompt", "render", "model_profile", "subjects", "scene", "style"}
+ALLOWED_SOURCE_ROOTS = {"prompt", "render", "subjects", "scene", "style"}
 
 
 class WorkflowBinding(BaseModel):
@@ -27,6 +27,10 @@ class WorkflowBinding(BaseModel):
             raise ValueError(f"Unsupported workflow binding source path: {self.source}")
         if self.source.split(".", 1)[0].split("[", 1)[0] not in ALLOWED_SOURCE_ROOTS:
             raise ValueError(f"Unsupported workflow binding source root: {self.source}")
+        if ".loras" in self.source:
+            raise ValueError(
+                "LoRA is configured inside the ComfyUI workflow, not through ImageSpec bindings."
+            )
         if not self.node_id.strip() or not self.input_name.strip():
             raise ValueError("Workflow binding node_id and input_name are required")
         return self
@@ -167,9 +171,7 @@ class WorkflowCompiler:
             outfit = subject.get("outfit") or {}
             for field_name, values in (
                 ("identity.references", identity.get("references", [])),
-                ("identity.loras", identity.get("loras", [])),
                 ("outfit.references", outfit.get("references", [])),
-                ("outfit.loras", outfit.get("loras", [])),
             ):
                 if values:
                     require_prefix(
@@ -194,7 +196,7 @@ class WorkflowCompiler:
                 )
         for owner_name in ("scene", "style"):
             owner = applied_spec.get(owner_name) or {}
-            for field_name in ("references", "loras"):
+            for field_name in ("references",):
                 if owner.get(field_name):
                     require_prefix(
                         f"{owner_name}.{field_name}",
@@ -276,8 +278,6 @@ class WorkflowCompiler:
     def _binding_capability(source: str) -> WorkflowCapability | None:
         """从受限源路径推导显式能力，保存 preset 时即可发现声明/绑定矛盾。"""
 
-        if ".loras" in source:
-            return WorkflowCapability.LORA
         if ".references" in source:
             return WorkflowCapability.REFERENCE_IMAGE
         if ".shot.region" in source:

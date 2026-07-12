@@ -1,6 +1,23 @@
 import { ApiError, apiHeaders, normalizeBackendError, parseApiErrorResponse } from './errors'
 
 export type GenerationMode = 'preview' | 'final'
+export type ImagePromptType = 'tag' | 'natural_language' | 'hybrid'
+export type ImageSpecPresetKind = 'shot_planner_system_prompt' | 'negative_prompt'
+
+export type ImageSpecPreset = {
+  id: number
+  name: string
+  kind: ImageSpecPresetKind
+  content: string
+  tag_content: string
+  natural_language_content: string
+  description: string | null
+  is_default: boolean
+  created_at: string
+  updated_at: string
+}
+
+export type ImageSpecPresetPayload = Omit<ImageSpecPreset, 'id' | 'created_at' | 'updated_at'>
 
 export type ContinuityEvent = {
   id: number
@@ -35,14 +52,36 @@ export type ContinuityCompilation = {
   created_at: string
 }
 
+export type ImageSpecCompilation = {
+  id: number
+  task_id: number
+  continuity_compilation_id: number
+  source_hash: string
+  status: 'pending' | 'running' | 'succeeded' | 'failed'
+  generation_mode: GenerationMode
+  total_pages: number
+  completed_pages: number
+  total_specs: number
+  completed_specs: number
+  failed_pages: Array<{
+    page_id: number
+    page_no: number
+    error_type?: string
+    message?: string
+  }>
+  error_code: string | null
+  error_message: string | null
+  created_at: string
+  updated_at: string
+}
+
 export type ImageSpec = {
   id: number
   page_id: number
   page_no: number
   snapshot_id: number
   shot_plan_id: number
-  model_profile_id: number
-  model_family: string
+  prompt_type: ImagePromptType
   generation_mode: GenerationMode
   spec: Record<string, unknown>
   positive_prompt: string
@@ -57,27 +96,53 @@ export type ImageSpec = {
 }
 
 export type CompileImageSpecsPayload = {
-  model_profile_ids: number[]
-  primary_model_profile_id: number
   style_profile_id: number | null
   shot_planner_preset_id: number | null
   negative_prompt_preset_id: number | null
   generation_mode: GenerationMode
   concurrency: number
   regenerate_continuity: boolean
+  resume_existing: boolean
 }
 
 const requestJson = async <T>(url: string, options: RequestInit = {}): Promise<T> => {
   const response = await fetch(url, { ...options, headers: apiHeaders(options.headers) })
   if (!response.ok) throw await parseApiErrorResponse(response)
+  if (response.status === 204) return undefined as T
   return (await response.json()) as T
 }
 
 export const listImageSpecs = (taskId: number): Promise<ImageSpec[]> =>
   requestJson(`/api/image-specs/script-tasks/${taskId}`)
 
+export const listImageSpecPresets = (): Promise<ImageSpecPreset[]> =>
+  requestJson('/api/image-specs/presets')
+
+export const createImageSpecPreset = (
+  payload: ImageSpecPresetPayload,
+): Promise<ImageSpecPreset> =>
+  requestJson('/api/image-specs/presets', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+
+export const updateImageSpecPreset = (
+  id: number,
+  payload: ImageSpecPresetPayload,
+): Promise<ImageSpecPreset> =>
+  requestJson(`/api/image-specs/presets/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  })
+
+export const deleteImageSpecPreset = (id: number): Promise<void> =>
+  requestJson(`/api/image-specs/presets/${id}`, { method: 'DELETE' })
+
 export const listContinuityCompilations = (taskId: number): Promise<ContinuityCompilation[]> =>
   requestJson(`/api/image-specs/script-tasks/${taskId}/continuity`)
+
+export const listImageSpecCompilations = (taskId: number): Promise<ImageSpecCompilation[]> =>
+  requestJson(`/api/image-specs/script-tasks/${taskId}/compilations`)
 
 export const replaceContinuityEvents = (
   compilationId: number,

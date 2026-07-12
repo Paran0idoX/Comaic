@@ -13,6 +13,7 @@ export type ConversationMessage = {
 const props = defineProps<{
   messages: ConversationMessage[]
   threadId: string
+  loading: boolean
   streaming: boolean
   disabled: boolean
 }>()
@@ -104,14 +105,23 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="conversation-panel panel" :style="panelStyle">
+  <section
+    v-loading="loading"
+    class="conversation-panel panel"
+    :style="panelStyle"
+    :aria-busy="loading"
+  >
     <header class="conversation-panel__header">
       <div>
         <h3>{{ t('outline.conversation.title') }}</h3>
         <p>{{ t('outline.conversation.description') }}</p>
       </div>
-      <el-tag type="info" effect="plain">
-        {{ threadId || t('outline.conversation.noThread') }}
+      <el-tag type="info" effect="plain" aria-live="polite">
+        {{
+          loading
+            ? t('outline.conversation.loadingSession')
+            : threadId || t('outline.conversation.noThread')
+        }}
       </el-tag>
     </header>
 
@@ -119,7 +129,9 @@ onBeforeUnmount(() => {
       <div class="conversation-panel__messages">
         <el-empty
           v-if="messages.length === 0"
-          :description="t('outline.conversation.empty')"
+          :description="
+            loading ? t('outline.conversation.loadingDescription') : t('outline.conversation.empty')
+          "
         />
         <div
           v-for="message in messages"
