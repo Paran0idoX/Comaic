@@ -230,6 +230,7 @@ def test_script_visual_settings_create_and_reuse_visual_bible_drafts() -> None:
             {
                 **_character_payload("深蓝风衣，衣角被雨水打湿并沾有灰尘"),
                 "current_accessories": "银色怀表（此时握在手中）",
+                "negative_constraints": "不要显示追踪者正脸",
             }
         ],
     )
@@ -241,6 +242,7 @@ def test_script_visual_settings_create_and_reuse_visual_bible_drafts() -> None:
     }
     assert assigned_outfit_ids == {outfit.id}
     assert len(session.scalars(select(OutfitVariant)).all()) == 1
+    assert outfit.negative_constraints == "不要改变眼睛颜色"
 
 
 def test_continue_backfill_preserves_manual_bindings_and_skips_unmapped_character() -> None:

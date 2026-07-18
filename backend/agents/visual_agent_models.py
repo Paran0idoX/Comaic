@@ -102,10 +102,12 @@ class ContinuityEventItem(BaseModel):
             present(key) for key in ("outfit_variant_id", "outfit_key", "description")
         ):
             raise ValueError("set_outfit requires an outfit id, key, or description")
-        if self.event_type == ContinuityEventType.SET_ACCESSORY and not any(
-            present(key) for key in ("accessory_key", "value")
-        ):
-            raise ValueError("set_accessory requires accessory_key or value")
+        if self.event_type == ContinuityEventType.SET_ACCESSORY:
+            missing = [key for key in ("accessory_key", "value") if not present(key)]
+            if missing:
+                raise ValueError(
+                    "set_accessory requires a stable accessory_key and value"
+                )
         return self
 
 

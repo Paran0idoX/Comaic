@@ -28,6 +28,12 @@ class ContinueBatchScriptRequest(BaseModel):
     user_requirement: str | None = None
 
 
+class ReviewScriptPagesRequest(BaseModel):
+    """复审已落库页面；不传页码时只审查当前未通过页面。"""
+
+    page_nos: list[int] | None = None
+
+
 class CreatePageScriptRequest(BaseModel):
     """人工新增页面脚本请求体。"""
 

@@ -1,6 +1,15 @@
 from types import SimpleNamespace
 
-from backend.models.enums import GenerationMode, ImagePromptType, SeedStrategy
+import pytest
+
+from backend.i18n.errors import AppError
+from backend.models.enums import (
+    GenerationMode,
+    ImagePromptType,
+    PageScriptReviewStatus,
+    ScriptGenerationTaskStatus,
+    SeedStrategy,
+)
 from backend.services.image_generation_service import ImageGenerationService
 
 
@@ -76,3 +85,32 @@ def test_continue_uses_successful_generation_run_slots() -> None:
     assert result[2] == []
     assert result[1][0][1] not in {101, 201, 202}
     assert repository.calls == [(1, 11), (2, 12)]
+
+
+def test_generation_rejects_unreviewed_requested_pages() -> None:
+    pages = [
+        SimpleNamespace(page_no=1, script_review_status=PageScriptReviewStatus.PASSED),
+        SimpleNamespace(page_no=2, script_review_status=PageScriptReviewStatus.UNREVIEWED),
+    ]
+
+    with pytest.raises(AppError) as exc_info:
+        ImageGenerationService._ensure_pages_reviewed(pages)
+
+    assert exc_info.value.code == "script.pages_not_reviewed"
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.params == {"pages": "2"}
+
+
+def test_generation_rejects_script_task_that_is_not_succeeded() -> None:
+    repository = SimpleNamespace(
+        get_script_task=lambda _task_id: SimpleNamespace(
+            status=ScriptGenerationTaskStatus.RUNNING
+        )
+    )
+    service = ImageGenerationService(repository=repository)
+
+    with pytest.raises(AppError) as exc_info:
+        service._get_script_task(7)
+
+    assert exc_info.value.code == "script.task_not_succeeded"
+    assert exc_info.value.status_code == 409
