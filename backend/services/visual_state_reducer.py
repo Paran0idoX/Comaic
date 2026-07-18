@@ -24,7 +24,7 @@ IMMUTABLE_PAYLOAD_KEYS = {
 class VisualStateReducer:
     """把受控事件归约为逐页视觉状态；相同输入必须产生相同快照。"""
 
-    VERSION = "1"
+    VERSION = "2"
 
     def __init__(
         self,
@@ -188,17 +188,25 @@ class VisualStateReducer:
                 ).strip()
             return
         if event_type == ContinuityEventType.SET_ACCESSORY:
-            accessory_key = str(payload.get("accessory_key") or payload.get("value") or "").strip()
+            accessories = state.setdefault("accessories", {})
+            accessory_key = str(payload.get("accessory_key") or "").strip()
+            value = str(payload.get("value", "")).strip()
             if not accessory_key:
-                raise ValueError("set_accessory requires accessory_key")
-            if accessory_key == "__description__":
-                state.setdefault("accessories", {})["description"] = str(
-                    payload.get("value", "")
-                ).strip()
+                # 兼容旧事件：只有 value 时把它当作整组配件描述替换，不能把描述
+                # 当作新配件 key 累积，否则同一件怀表会被解释成多个同时存在的物体。
+                if not value:
+                    raise ValueError("set_accessory requires accessory_key or value")
+                accessories["description"] = value
+                accessories["states"] = {}
                 return
-            state.setdefault("accessories", {}).setdefault("states", {})[accessory_key] = str(
-                payload.get("state", "present")
-            )
+            if accessory_key == "__description__":
+                accessories["description"] = value
+                # 分段边界的权威描述会重置上一段临时状态，避免状态跨段泄漏。
+                accessories["states"] = {}
+                return
+            accessories.setdefault("states", {})[accessory_key] = str(
+                payload.get("value", payload.get("state", "present"))
+            ).strip()
             return
         if event_type == ContinuityEventType.SET_GARMENT_STATE:
             garment_key = str(payload.get("garment_key", "")).strip()

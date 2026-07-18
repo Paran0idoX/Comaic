@@ -127,6 +127,18 @@ class PageScriptWriterAgent:
     ) -> str:
         """构造单页脚本输入；用自然语言说明替代原始 JSON。"""
 
+        allowed_scene_keys = [
+            str(scene.get("scene_key", "")).strip()
+            for scene in section_scenes
+            if isinstance(scene, dict) and str(scene.get("scene_key", "")).strip()
+        ]
+        allowed_character_keys = [
+            str(character.get("character_key", "")).strip()
+            for character in section_characters
+            if isinstance(character, dict)
+            and str(character.get("character_key", "")).strip()
+        ]
+
         if is_revision:
             mode_text = "监督修订：只输出当前目标页的修订稿。"
             current_pages_text = (
@@ -148,6 +160,10 @@ class PageScriptWriterAgent:
                 f"当前模式：{mode_text}",
                 f"本次唯一允许输出页码：{target_page_no}",
                 f"总页数：{total_pages}",
+                "本页 scene_key 允许值（只能逐字复制其中一个）："
+                + ("、".join(allowed_scene_keys) or "无"),
+                "本页 character_keys 允许值（只能逐字复制，或无角色时返回空数组）："
+                + ("、".join(allowed_character_keys) or "无"),
                 "当前需要生成的已锁定分段：",
                 format_section(current_section),
                 "当前分段可引用的中心化场景设定：",

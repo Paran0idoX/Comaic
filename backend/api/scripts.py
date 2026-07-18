@@ -9,6 +9,7 @@ from backend.api.schemas.script import (
     CreatePageScriptRequest,
     GenerateBatchScriptRequest,
     GenerateSinglePageScriptRequest,
+    ReviewScriptPagesRequest,
     ScriptPageListResponse,
     ScriptPageResponse,
     ScriptCharacterListResponse,
@@ -274,6 +275,32 @@ def stream_continue_batch_script_generation(
                     yield sse_event(event, payload)
             except Exception as exc:
                 logger.exception("Unhandled script continue SSE error task_id=%s", task_id)
+                yield sse_event("error", sse_error_payload(exc, locale))
+
+    return EventSourceResponse(event_generator(), headers=SSE_HEADERS, ping=5)
+
+
+@router.post("/tasks/{task_id}/review/stream")
+def stream_review_script_pages(
+    task_id: int,
+    request: ReviewScriptPagesRequest,
+    http_request: Request,
+) -> EventSourceResponse:
+    """复审已落库脚本；不会调用 Writer 或覆盖人工编辑。"""
+
+    locale = request_locale(http_request)
+
+    async def event_generator():
+        with SessionLocal() as db_session:
+            service = ScriptService(ComicRepository(db_session))
+            try:
+                async for event, payload in service.stream_review_script_pages(
+                    task_id=task_id,
+                    page_nos=request.page_nos,
+                ):
+                    yield sse_event(event, payload)
+            except Exception as exc:
+                logger.exception("Unhandled script review SSE error task_id=%s", task_id)
                 yield sse_event("error", sse_error_payload(exc, locale))
 
     return EventSourceResponse(event_generator(), headers=SSE_HEADERS, ping=5)

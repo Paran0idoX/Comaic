@@ -914,6 +914,13 @@ class ComicRepository:
             raise ValueError(f"ScriptGenerationTask not found: {task_id}")
         if status is not None:
             task.status = status
+            # 继续执行或最终成功代表旧错误已被恢复；若不清空，前端会在成功任务上
+            # 继续展示上一轮失败原因，造成状态与错误信息互相矛盾。
+            if status in {
+                ScriptGenerationTaskStatus.RUNNING,
+                ScriptGenerationTaskStatus.SUCCEEDED,
+            }:
+                task.error_message = None
             if status == ScriptGenerationTaskStatus.RUNNING:
                 task.heartbeat_at = heartbeat_at or utc_now()
         if section_plan is not None:
@@ -1062,8 +1069,28 @@ class ComicRepository:
         if page is None:
             page = ComicPage(project_id=project_id, page_no=page_no, section_id=section_id)
             self.session.add(page)
-        elif section_id is not None:
-            page.section_id = section_id
+            script_changed = False
+        else:
+            script_changed = any(
+                current != incoming
+                for current, incoming in (
+                    (page.summary, summary),
+                    (page.characters, characters),
+                    (page.clothing, clothing),
+                    (page.scene, scene),
+                    (page.composition, composition),
+                    (page.character_action, character_action),
+                    (page.dialogue, dialogue),
+                )
+            )
+            if section_id is not None:
+                script_changed = script_changed or page.section_id != section_id
+                page.section_id = section_id
+            if scene_id is not None:
+                script_changed = script_changed or page.scene_id != scene_id
+            if character_ids is not None:
+                current_character_ids = sorted(character.id for character in page.visual_characters)
+                script_changed = script_changed or current_character_ids != sorted(character_ids)
 
         page.summary = summary
         page.characters = characters
@@ -1072,13 +1099,21 @@ class ComicRepository:
         page.composition = composition
         page.character_action = character_action
         page.dialogue = dialogue
-        page.scene_id = scene_id
+        # 人工编辑接口只更新结构化文本，不会重新提交 scene_key；此时必须保留
+        # 原有中心化场景绑定，否则一次文案修订就会让后续视觉链路失去场景真值。
+        if scene_id is not None:
+            page.scene_id = scene_id
         if character_ids is not None:
             page.visual_characters = list(
                 self.session.scalars(
                     select(ScriptCharacter).where(ScriptCharacter.id.in_(character_ids))
                 )
             )
+        if script_changed:
+            # 脚本或视觉绑定变化后，旧候选图仍保留作历史比较，但不能继续冒充当前脚本的最终图。
+            page.selected_image_id = None
+            for candidate in page.images:
+                candidate.is_selected = False
         page.status = ComicPageStatus.SCRIPT_READY
         page.script_review_status = script_review_status
         page.script_review_error = script_review_error
@@ -1623,6 +1658,13 @@ class ComicRepository:
             raise ValueError(f"GenerationTask not found: {task_id}")
         if status is not None:
             task.status = status
+            # 重试和成功状态都不应携带历史 ComfyUI 错误；新的失败信息仍由下方
+            # error_message 参数显式覆盖。
+            if status in {
+                GenerationTaskStatus.RUNNING,
+                GenerationTaskStatus.SUCCEEDED,
+            }:
+                task.error_message = None
             if status == GenerationTaskStatus.RUNNING:
                 task.heartbeat_at = heartbeat_at or utc_now()
         if comfy_prompt_id is not None:

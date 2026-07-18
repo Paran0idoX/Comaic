@@ -22,6 +22,7 @@ import {
   suspendScriptTask,
   streamBatchScriptGeneration,
   streamContinueScriptGeneration,
+  streamReviewScriptPages,
   updatePageScript,
   type ScriptPage,
   type ScriptCharacter,
@@ -90,6 +91,7 @@ const loadingPages = ref(false)
 const generatingBatch = ref(false)
 const suspendingBatch = ref(false)
 const continuingBatch = ref(false)
+const reviewingPages = ref(false)
 const needsOutline = ref(false)
 const eventSequence = ref(1)
 
@@ -170,7 +172,8 @@ const canGenerate = computed(
     isSelectedOutlineConfirmed.value &&
     !needsOutline.value &&
     !generatingBatch.value &&
-    !continuingBatch.value,
+    !continuingBatch.value &&
+    !reviewingPages.value,
 )
 
 const generationDisabled = computed(() => !canGenerate.value)
@@ -179,16 +182,32 @@ const canEditScripts = computed(
     selectedProjectId.value !== null &&
     selectedTaskId.value !== null &&
     !generatingBatch.value &&
-    !continuingBatch.value,
+    !continuingBatch.value &&
+    !reviewingPages.value,
 )
 const canDeleteAllScripts = computed(() => canEditScripts.value && pages.value.length > 0)
+const pendingReviewCount = computed(
+  () =>
+    pages.value.filter(
+      (page) => page.summary !== null && page.script_review_status !== 'passed',
+    ).length,
+)
+const canReviewPages = computed(
+  () =>
+    currentTask.value?.status === 'succeeded' &&
+    pendingReviewCount.value > 0 &&
+    !generatingBatch.value &&
+    !continuingBatch.value &&
+    !reviewingPages.value,
+)
 const canContinueBatch = computed(
   () =>
     currentTask.value !== null &&
     currentTask.value.mode === 'batch' &&
     ['suspended', 'failed'].includes(currentTask.value.status) &&
     !generatingBatch.value &&
-    !continuingBatch.value,
+    !continuingBatch.value &&
+    !reviewingPages.value,
 )
 
 const formatDateTime = (value: string) => {
@@ -839,6 +858,77 @@ const continueBatch = async () => {
   }
 }
 
+const reviewPendingPages = async () => {
+  if (selectedTaskId.value === null || !canReviewPages.value) {
+    ElMessage.warning(t('scripts.errors.noPagesToReview'))
+    return
+  }
+
+  try {
+    await ElMessageBox.confirm(
+      t('scripts.messages.reviewConfirm', { count: pendingReviewCount.value }),
+      t('scripts.actions.reviewPending'),
+      {
+        type: 'warning',
+        confirmButtonText: t('scripts.actions.reviewPending'),
+        cancelButtonText: t('projects.cancel'),
+      },
+    )
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') {
+      return
+    }
+    throw error
+  }
+
+  reviewingPages.value = true
+  const taskId = selectedTaskId.value
+  try {
+    await streamReviewScriptPages(
+      taskId,
+      {},
+      {
+        onEvent: (event, payload) => {
+          addProgressEvent(event, payload)
+          if (event === 'page') {
+            const page = payload.page as ScriptPage | undefined
+            if (page !== undefined) {
+              upsertPageInList(page)
+            }
+          }
+          if (event === 'done') {
+            const failed = Number(payload.failed ?? 0)
+            void loadPages()
+            void loadSections()
+            if (failed > 0) {
+              ElMessage.warning(
+                t('scripts.messages.reviewPartial', {
+                  passed: Number(payload.passed ?? 0),
+                  failed,
+                }),
+              )
+            } else {
+              ElMessage.success(
+                t('scripts.messages.reviewSuccess', {
+                  count: Number(payload.passed ?? 0),
+                }),
+              )
+            }
+          }
+        },
+        onError: (error) => {
+          handleGenerationError(error, t('scripts.errors.reviewFailed'))
+        },
+      },
+    )
+  } catch (error) {
+    handleGenerationError(error, t('scripts.errors.reviewFailed'))
+  } finally {
+    reviewingPages.value = false
+    void loadPages()
+  }
+}
+
 const suspendBatch = async () => {
   const taskId = currentTaskId.value ?? selectedTaskId.value
   if (taskId === null) {
@@ -1245,6 +1335,17 @@ onActivated(async () => {
               @click="continueBatch"
             >
               {{ t('scripts.actions.continueBatch') }}
+            </el-button>
+            <el-button
+              v-if="pendingReviewCount > 0"
+              type="primary"
+              plain
+              :icon="Refresh"
+              :loading="reviewingPages"
+              :disabled="!canReviewPages"
+              @click="reviewPendingPages"
+            >
+              {{ t('scripts.actions.reviewPending', { count: pendingReviewCount }) }}
             </el-button>
             <el-button
               v-if="generatingBatch || continuingBatch"

@@ -107,6 +107,10 @@ export type ContinueBatchScriptPayload = {
   user_requirement?: string
 }
 
+export type ReviewScriptPagesPayload = {
+  page_nos?: number[]
+}
+
 export type ListProjectScriptTasksOptions = {
   outlineVersionId?: number
   mode?: string
@@ -300,6 +304,14 @@ export const streamContinueScriptGeneration = async (
   callbacks: ScriptStreamCallbacks,
 ): Promise<void> => {
   await streamScriptEvents(`/api/scripts/tasks/${taskId}/continue/stream`, payload, callbacks)
+}
+
+export const streamReviewScriptPages = async (
+  taskId: number,
+  payload: ReviewScriptPagesPayload,
+  callbacks: ScriptStreamCallbacks,
+): Promise<void> => {
+  await streamScriptEvents(`/api/scripts/tasks/${taskId}/review/stream`, payload, callbacks)
 }
 
 const streamScriptEvents = async (
