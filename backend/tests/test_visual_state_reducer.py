@@ -131,3 +131,60 @@ def test_reducer_rejects_identity_changes_and_invalid_transfers() -> None:
     }
     with pytest.raises(ValueError, match="does not hold"):
         _reducer().reduce(pages=pages, events=[invalid_transfer])
+
+
+def test_accessory_description_replaces_legacy_value_and_section_reset_clears_states() -> None:
+    pages = [
+        {"page_id": 1, "page_no": 1, "scene_key": "hall", "character_keys": ["alice"]},
+        {"page_id": 2, "page_no": 2, "scene_key": "hall", "character_keys": ["alice"]},
+        {"page_id": 3, "page_no": 3, "scene_key": "hall", "character_keys": ["alice"]},
+    ]
+    events = [
+        {
+            "page_no": 1,
+            "sequence_no": 1,
+            "event_type": "set_accessory",
+            "target_type": "character",
+            "target_key": "alice",
+            "timing": "before_page",
+            "payload": {"accessory_key": "__description__", "value": "one attached watch"},
+        },
+        {
+            "page_no": 1,
+            "sequence_no": 2,
+            "event_type": "set_accessory",
+            "target_type": "character",
+            "target_key": "alice",
+            "timing": "after_page",
+            "payload": {"value": "same attached watch, opened"},
+        },
+        {
+            "page_no": 2,
+            "sequence_no": 1,
+            "event_type": "set_accessory",
+            "target_type": "character",
+            "target_key": "alice",
+            "timing": "after_page",
+            "payload": {"accessory_key": "watch", "value": "closed"},
+        },
+        {
+            "page_no": 3,
+            "sequence_no": 1,
+            "event_type": "set_accessory",
+            "target_type": "character",
+            "target_key": "alice",
+            "timing": "before_page",
+            "payload": {"accessory_key": "__description__", "value": "one attached watch"},
+        },
+    ]
+
+    snapshots = _reducer().reduce(pages=pages, events=events)
+
+    assert snapshots[1]["characters"][0]["accessories"] == {
+        "description": "same attached watch, opened",
+        "states": {},
+    }
+    assert snapshots[2]["characters"][0]["accessories"] == {
+        "description": "one attached watch",
+        "states": {},
+    }

@@ -15,6 +15,7 @@
 - 页面是否只引用当前分段已锁定的 scene_key 和 character_key，没有自行新增或改写视觉设定。
 - 同一 scene_key 下的场景视觉锚点、色调、光线和环境元素是否保持稳定。
 - 当前分段角色设定是否复用了大纲角色基准中的 character_key，并且没有违背固定样貌、背景、识别锚点和禁止项。
+- visual_anchors、negative_constraints 是逐字段审查的硬约束；只要 summary、clothing、scene、composition 或 character_action 任一字段与其冲突，该页必须判为不通过。例如固定配件写明“唯一”“永不取下”或“不得取下”时，取下、放到桌面、遗失、复制或重新挂回都属于明确冲突；握住或打开时也必须仍是同一件且保持连接。
 - 发型、服装、配件如果发生变化，是否被合理写在当前分段的 current_* 字段中，而不是改写大纲基准。
 - summary 是否能概括本页内容。
 - characters / clothing / scene / composition / character_action 是否具体、可画面化，足够支撑后续文生图 Prompt。

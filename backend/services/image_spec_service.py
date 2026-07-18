@@ -27,6 +27,7 @@ from backend.models.enums import (
     GenerationMode,
     ImagePromptPresetKind,
     ImagePromptType,
+    PageScriptReviewStatus,
     ScriptGenerationTaskStatus,
     VisualAssetRole,
     VisualEntityType,
@@ -49,7 +50,7 @@ CONTROL_ROLES = {
 class ImageSpecService:
     """编排连续性事件、确定性状态、ShotPlan 和三类 Prompt ImageSpec。"""
 
-    PROMPT_VERSION = "1"
+    PROMPT_VERSION = "2"
     CONTINUITY_REDUCER_ATTEMPTS = 3
 
     def __init__(self, repository: ImageSpecRepository):
@@ -772,10 +773,32 @@ class ImageSpecService:
         if task is None:
             raise ValueError(f"ScriptGenerationTask not found: {task_id}")
         if task.status != ScriptGenerationTaskStatus.SUCCEEDED:
-            raise ValueError("ScriptGenerationTask must be succeeded before compiling image specs.")
+            raise AppError(
+                "script.task_not_succeeded",
+                status_code=409,
+                debug_message=(
+                    f"ScriptGenerationTask {task_id} has status {task.status.value}."
+                ),
+            )
         pages = [page for page in self.repository.list_task_pages(task_id) if page.summary]
         if not pages:
             raise ValueError(f"Script pages not found for task: {task_id}")
+        unreviewed_page_nos = [
+            page.page_no
+            for page in pages
+            if page.script_review_status != PageScriptReviewStatus.PASSED
+        ]
+        if unreviewed_page_nos:
+            page_list = ", ".join(str(page_no) for page_no in unreviewed_page_nos)
+            raise AppError(
+                "script.pages_not_reviewed",
+                status_code=409,
+                params={"pages": page_list},
+                debug_message=(
+                    f"Script task {task_id} contains pages without passed supervisor "
+                    f"review: {page_list}."
+                ),
+            )
         style = self.repository.get_style_profile(style_profile_id)
         if style_profile_id is not None and (
             style is None or style.project_id != task.project_id
@@ -1253,6 +1276,15 @@ class ImageSpecService:
         scene_keys = {scene.scene_key for scene in context["scenes"]}
         outfits_by_id = {item.id: item for item in context["outfits"]}
         assets_by_owner = context["assets_by_owner"]
+        locked_accessory_targets = {
+            str(raw.get("target_key", "")).strip()
+            for raw in events
+            if raw.get("event_type") == ContinuityEventType.SET_ACCESSORY.value
+            and raw.get("source") == ContinuityEventSource.SYSTEM.value
+            and str((raw.get("payload") or {}).get("accessory_key", "")).strip()
+            == "__description__"
+            and str((raw.get("payload") or {}).get("value", "")).strip()
+        }
         normalized: list[dict[str, Any]] = []
         for raw in events:
             page_no = int(raw.get("page_no", 0))
@@ -1268,6 +1300,14 @@ class ImageSpecService:
             source = ContinuityEventSource(
                 raw.get("source", ContinuityEventSource.LLM.value)
             )
+            if (
+                event_type == ContinuityEventType.SET_ACCESSORY
+                and source == ContinuityEventSource.LLM
+                and target_key in locked_accessory_targets
+            ):
+                # 已批准视觉设定中的固定配件由 system event 管理。LLM 只从脚本抽取
+                # 持久变化，不能用自然语言动作覆盖“唯一且不可取下”等硬锚点。
+                continue
             payload = dict(raw.get("payload") or {})
             if event_type == ContinuityEventType.SET_OUTFIT and payload.get("outfit_variant_id"):
                 variant_id = int(payload["outfit_variant_id"])
@@ -1650,7 +1690,6 @@ class ImageSpecService:
             + self._loads_list(item.colors_json)
             + self._loads_list(item.materials_json)
             + self._loads_list(item.patterns_json)
-            + self._loads_list(item.accessories_json)
         )
         return ", ".join(str(value) for value in values if str(value).strip()) or item.name
 

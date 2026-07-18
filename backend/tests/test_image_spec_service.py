@@ -6,6 +6,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from backend.models.comic import (
+    ComicImage,
     ComicPage,
     ComicProject,
     OutlineCharacter,
@@ -26,6 +27,7 @@ from backend.models.enums import (
     ComicPageStatus,
     GenerationMode,
     OutlineVersionStatus,
+    PageScriptReviewStatus,
     ScriptGenerationMode,
     ScriptGenerationTaskStatus,
     ScriptSectionStatus,
@@ -36,7 +38,9 @@ from backend.models.enums import (
     VisualEntityType,
 )
 from backend.repositories.image_spec_repository import ImageSpecRepository
+from backend.repositories.comic_repository import ComicRepository
 from backend.services.image_spec_service import ImageSpecService
+from backend.services.script_service import ScriptService
 from backend.i18n.errors import AppError
 
 
@@ -218,6 +222,7 @@ def _seed_project(session):
             character_action="checks the generator",
             dialogue="No text",
             status=ComicPageStatus.SCRIPT_READY,
+            script_review_status=PageScriptReviewStatus.PASSED,
         )
         for page_no in (1, 2)
     ]
@@ -304,6 +309,95 @@ def test_page_compilation_failure_preserves_final_readiness_code() -> None:
     assert failure["code"] == "image_spec.final_conditions_missing"
 
 
+def test_manual_page_edit_preserves_scene_and_character_bindings() -> None:
+    session = _session()
+    task, pages, _style = _seed_project(session)
+    original = pages[0]
+    original_scene_id = original.scene_id
+    original_character_ids = [item.id for item in original.visual_characters]
+
+    updated = ScriptService(ComicRepository(session)).upsert_manual_page_script(
+        project_id=task.project_id,
+        page_no=original.page_no,
+        task_id=task.id,
+        summary="Updated repair step",
+        characters=original.characters,
+        clothing=original.clothing,
+        scene=original.scene,
+        composition=original.composition,
+        character_action=original.character_action,
+        dialogue=original.dialogue,
+    )
+
+    assert updated.scene_id == original_scene_id
+    assert [item.id for item in updated.visual_characters] == original_character_ids
+    assert updated.script_review_status == PageScriptReviewStatus.UNREVIEWED
+
+
+def test_manual_page_edit_clears_stale_selection_but_preserves_candidate() -> None:
+    session = _session()
+    task, pages, _style = _seed_project(session)
+    original = pages[0]
+    candidate = ComicImage(
+        page=original,
+        image_url="/api/images/selected.png",
+        local_path="outputs/selected.png",
+        seed=123,
+        is_selected=True,
+    )
+    session.add(candidate)
+    session.flush()
+    original.selected_image_id = candidate.id
+    session.commit()
+
+    updated = ScriptService(ComicRepository(session)).upsert_manual_page_script(
+        project_id=task.project_id,
+        page_no=original.page_no,
+        task_id=task.id,
+        summary="A revised repair step",
+        characters=original.characters,
+        clothing=original.clothing,
+        scene=original.scene,
+        composition=original.composition,
+        character_action=original.character_action,
+        dialogue=original.dialogue,
+    )
+
+    assert updated.selected_image_id is None
+    assert session.get(ComicImage, candidate.id) is candidate
+    assert candidate.is_selected is False
+
+
+def test_image_spec_compile_rejects_manually_edited_unreviewed_page() -> None:
+    session = _session()
+    task, pages, style = _seed_project(session)
+    original = pages[0]
+    ScriptService(ComicRepository(session)).upsert_manual_page_script(
+        project_id=task.project_id,
+        page_no=original.page_no,
+        task_id=task.id,
+        summary="A revised repair step",
+        characters=original.characters,
+        clothing=original.clothing,
+        scene=original.scene,
+        composition=original.composition,
+        character_action=original.character_action,
+        dialogue=original.dialogue,
+    )
+
+    with pytest.raises(AppError) as exc_info:
+        ImageSpecService(ImageSpecRepository(session))._prepare_context(
+            task_id=task.id,
+            style_profile_id=style.id,
+            shot_planner_preset_id=None,
+            negative_prompt_preset_id=None,
+        )
+
+    assert exc_info.value.code == "script.pages_not_reviewed"
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.params == {"pages": "1"}
+
+
 @pytest.mark.asyncio
 async def test_full_compile_generates_three_prompt_specs_from_shared_visual_truth(
     monkeypatch,
@@ -367,6 +461,55 @@ async def test_full_compile_generates_three_prompt_specs_from_shared_visual_trut
     assert page_states[1]["scene"]["object_states"]["north_door"] == "closed"
     assert page_states[2]["scene"]["object_states"]["north_door"] == "open"
     assert page_states[2]["characters"][0]["held_props"] == ["brass_key"]
+
+
+@pytest.mark.asyncio
+async def test_llm_cannot_override_locked_accessory_description(monkeypatch) -> None:
+    class AccessoryOverrideAgent:
+        VERSION = "test"
+
+        async def extract(self, **_kwargs):
+            return [
+                {
+                    "page_no": 1,
+                    "sequence_no": 1,
+                    "event_type": "set_accessory",
+                    "target_type": "character",
+                    "target_key": "alice",
+                    "timing": "after_page",
+                    "payload": {
+                        "accessory_key": "tool_belt",
+                        "value": "removed and placed on the desk",
+                    },
+                }
+            ]
+
+    monkeypatch.setattr(
+        "backend.services.image_spec_service.ContinuityEventAgent",
+        AccessoryOverrideAgent,
+    )
+    monkeypatch.setattr(
+        "backend.services.image_spec_service.ShotPlannerAgent",
+        FakeShotPlannerAgent,
+    )
+    session = _session()
+    task, _pages, style = _seed_project(session)
+    service = ImageSpecService(ImageSpecRepository(session))
+
+    async for _event in service.stream_compile_task(
+        task_id=task.id,
+        style_profile_id=style.id,
+        shot_planner_preset_id=None,
+        negative_prompt_preset_id=None,
+        generation_mode=GenerationMode.FINAL,
+    ):
+        pass
+
+    compilation = service.repository.list_compilations(task.id)[0]
+    page_two = next(item for item in compilation.snapshots if item.page.page_no == 2)
+    character = json.loads(page_two.state_json)["characters"][0]
+    assert character["accessories"]["description"] == "red tool belt"
+    assert character["accessories"]["states"] == {}
 
 
 @pytest.mark.asyncio

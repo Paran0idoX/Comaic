@@ -8,7 +8,7 @@ from typing import Any, AsyncIterator
 
 from PIL import Image
 
-from backend.i18n.errors import app_error_from_exception
+from backend.i18n.errors import AppError, app_error_from_exception
 from backend.models.comic import (
     ComicImage,
     ComicPage,
@@ -23,6 +23,8 @@ from backend.models.enums import (
     GenerationTaskStatus,
     ImageGenerationProvider,
     ImagePromptType,
+    PageScriptReviewStatus,
+    ScriptGenerationTaskStatus,
     SeedStrategy,
     WorkflowCapability,
 )
@@ -322,6 +324,7 @@ class ImageGenerationService:
     ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
         """按工具 Prompt 类型读取最新规格，并为每个候选保存完整运行记录。"""
 
+        self._ensure_pages_reviewed(pages)
         self._ensure_generation_tool_ready(preset)
         generation_repository = GenerationRepository(self.repository.session)
         spec_service = ImageSpecService(ImageSpecRepository(self.repository.session))
@@ -875,7 +878,34 @@ class ImageGenerationService:
         task = self.repository.get_script_task(task_id)
         if task is None:
             raise ValueError(f"ScriptGenerationTask not found: {task_id}")
+        if task.status != ScriptGenerationTaskStatus.SUCCEEDED:
+            raise AppError(
+                "script.task_not_succeeded",
+                status_code=409,
+                debug_message=(
+                    f"ScriptGenerationTask {task_id} has status {task.status.value}."
+                ),
+            )
         return task
+
+    @staticmethod
+    def _ensure_pages_reviewed(pages: list[ComicPage]) -> None:
+        """出图只校验本次请求页，避免一处人工修订阻塞其它已审查页面。"""
+
+        unreviewed_page_nos = [
+            page.page_no
+            for page in pages
+            if page.script_review_status != PageScriptReviewStatus.PASSED
+        ]
+        if not unreviewed_page_nos:
+            return
+        page_list = ", ".join(str(page_no) for page_no in unreviewed_page_nos)
+        raise AppError(
+            "script.pages_not_reviewed",
+            status_code=409,
+            params={"pages": page_list},
+            debug_message=f"Image generation requested unreviewed pages: {page_list}.",
+        )
 
     def _get_page(self, page_id: int) -> ComicPage:
         page = self.repository.session.get(ComicPage, page_id)

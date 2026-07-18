@@ -59,6 +59,8 @@ def _shot_plan() -> dict:
                 "action": "reaches for the generator switch",
                 "pose": "leaning forward",
                 "expression": "focused",
+                "orientation": "three-quarter view toward camera",
+                "gaze": "toward the generator",
                 "identity": "EVIL OVERRIDE",
                 "outfit": "EVIL OUTFIT",
                 "control_requirements": [],
@@ -163,3 +165,104 @@ def test_final_rejects_missing_canonical_assets_but_preview_warns() -> None:
             **kwargs,
             generation_mode=GenerationMode.FINAL,
         )
+
+
+def test_render_text_false_masks_literal_copy_and_enforces_single_frame() -> None:
+    snapshot = _snapshot()
+    snapshot["scene"]["environment_details"] = (
+        "A note says 'SECRET 12345' beside coordinates 121.123, 31.456 on a signboard."
+    )
+    shot_plan = _shot_plan()
+    shot_plan["subjects"][0]["action"] = "reading a label that says 'OPEN 6789'"
+    compiled = NaturalLanguageImageSpecCompiler().compile(
+        snapshot=snapshot,
+        shot_plan={**shot_plan, "render_text": False},
+        style_profile=_style(),
+        negative_prompts={"tag": "", "natural_language": ""},
+        generation_mode=GenerationMode.FINAL,
+        source_hash="render-text-false",
+    )
+
+    assert "SECRET 12345" not in compiled.positive_prompt
+    assert "OPEN 6789" not in compiled.positive_prompt
+    assert "abstract illegible" not in compiled.positive_prompt
+    assert "illegible digits" not in compiled.positive_prompt
+    assert "121.123" not in compiled.positive_prompt
+    assert "on a signboard" not in compiled.positive_prompt.lower()
+    assert "plain folded paper shown from its blank back" in compiled.positive_prompt
+    assert "examine the blank surface" in compiled.positive_prompt
+    assert "standalone borderless cinematic splash illustration" in compiled.positive_prompt
+    assert "completely unmarked" in compiled.positive_prompt
+    assert "multiple panels" in compiled.negative_prompt
+    assert "pseudo-text" in compiled.negative_prompt
+    assert "Treat this camera and composition as mandatory" in compiled.positive_prompt
+    assert "three-quarter view toward camera" in compiled.positive_prompt
+    assert "SECRET 12345" in compiled.spec["scene"]["environment_details"]
+
+
+def test_render_prompt_mentions_accessory_once_and_uses_only_garment_components() -> None:
+    snapshot = _snapshot()
+    snapshot["characters"][0]["identity"]["visual_anchors"] += "; red tool belt"
+    snapshot["characters"][0]["visual_anchors"] = "red tool belt"
+    snapshot["characters"][0]["outfit"].update(
+        {
+            "description": "navy repair coat, red tool belt",
+            "garment_components": ["navy repair coat with brass buttons"],
+        }
+    )
+    compiled = NaturalLanguageImageSpecCompiler().compile(
+        snapshot=snapshot,
+        shot_plan={**_shot_plan(), "render_text": False},
+        style_profile=_style(),
+        negative_prompts={"tag": "", "natural_language": ""},
+        generation_mode=GenerationMode.FINAL,
+        source_hash="single-accessory",
+    )
+
+    assert compiled.positive_prompt.count("red tool belt") == 1
+    assert "navy repair coat with brass buttons" in compiled.positive_prompt
+    assert "never add a second copy" in compiled.negative_prompt
+
+
+def test_back_facing_shot_suppresses_face_description_and_duplicate_view() -> None:
+    shot_plan = _shot_plan()
+    shot_plan["subjects"][0]["orientation"] = "back toward the camera"
+    shot_plan["subjects"][0]["pose"] = "rear view, leaning forward"
+    compiled = NaturalLanguageImageSpecCompiler().compile(
+        snapshot=_snapshot(),
+        shot_plan={**shot_plan, "render_text": False},
+        style_profile=_style(),
+        negative_prompts={"tag": "", "natural_language": ""},
+        generation_mode=GenerationMode.FINAL,
+        source_hash="back-facing",
+    )
+
+    assert "young mechanic with amber eyes" not in compiled.positive_prompt
+    assert "shown strictly from behind" in compiled.positive_prompt
+    assert "exactly 1 visible person" in compiled.positive_prompt
+
+
+def test_accessory_is_named_once_when_shot_references_same_object_repeatedly() -> None:
+    snapshot = _snapshot()
+    snapshot["characters"][0]["accessories"]["description"] = (
+        "one silver pocket watch (scratched, hanging on the chest from a neck chain)"
+    )
+    shot_plan = _shot_plan()
+    shot_plan["subjects"][0]["action"] = "holds the pocket watch at chest height"
+    shot_plan["subjects"][0]["pose"] = "opens the pocket watch with one hand"
+    shot_plan["scene"]["framing_notes"] = "the pocket watch catches the lamp light"
+    compiled = NaturalLanguageImageSpecCompiler().compile(
+        snapshot=snapshot,
+        shot_plan={**shot_plan, "render_text": False},
+        style_profile=_style(),
+        negative_prompts={"tag": "", "natural_language": ""},
+        generation_mode=GenerationMode.FINAL,
+        source_hash="one-accessory-entity",
+    )
+
+    assert compiled.positive_prompt.lower().count("pocket watch") == 1
+    assert "same attached accessory" in compiled.positive_prompt
+    assert "appears only in that hand" in compiled.positive_prompt
+    assert "chest resting position is completely empty" in compiled.positive_prompt
+    assert "hanging on the chest" not in compiled.positive_prompt
+    assert "pocket watch" in compiled.spec["shot_plan"]["subjects"][0]["action"]

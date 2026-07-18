@@ -174,9 +174,11 @@ class VisualBibleService:
                 summary.skipped_characters += 1
                 continue
 
-            negative_constraints = self._join_distinct_text(
-                outline_character.negative_constraints,
-                character.negative_constraints,
+            # 分段角色的 negative_constraints 会由连续性事件按 section 写入
+            # ImageSpec；它可能包含“不要显示追踪者正脸”一类剧情约束，不能参与
+            # 服装版本哈希，否则相同基础服装会被误拆成多个草稿。
+            negative_constraints = self._first_text(
+                outline_character.negative_constraints
             )
             outfit_content = {
                 "garment_components": self._text_list(clothing),

@@ -8,7 +8,7 @@ from typing import TypeVar
 from backend.agents.page_script_writer_agent import PageScriptWriterAgent
 from backend.agents.script_planning_agent import ScriptPlanningAgent
 from backend.agents.script_supervisor_agent import ScriptSupervisorAgent
-from backend.i18n.errors import app_error_from_exception
+from backend.i18n.errors import AppError, app_error_from_exception
 from backend.models.comic import (
     ComicPage,
     ComicProject,
@@ -306,6 +306,7 @@ class ScriptService:
                     visual_settings["character_ids_by_key"][key]
                     for key in page_payload.get("character_keys", [])
                 ],
+                script_review_status=PageScriptReviewStatus.PASSED,
                 **self._page_payload_for_save(page_payload),
             )
             self.repository.update_script_task(
@@ -397,6 +398,203 @@ class ScriptService:
                 yield event, payload
         finally:
             running_task_registry.unregister(RuntimeTaskType.SCRIPT_GENERATION_TASK, task.id)
+
+    async def stream_review_script_pages(
+        self,
+        *,
+        task_id: int,
+        page_nos: list[int] | None = None,
+    ):
+        """仅复审当前落库脚本，不调用 Writer，也不覆盖人工修订内容。"""
+
+        task = self.get_script_task(task_id)
+        if task.status != ScriptGenerationTaskStatus.SUCCEEDED:
+            raise AppError(
+                "script.task_not_succeeded",
+                status_code=409,
+                debug_message=(
+                    f"ScriptGenerationTask {task_id} has status {task.status.value}."
+                ),
+            )
+        if task.outline_version_id is None:
+            raise ValueError("OutlineVersion not found: None")
+        outline_version = self.repository.get_outline_version(task.outline_version_id)
+        if outline_version is None:
+            raise ValueError(f"OutlineVersion not found: {task.outline_version_id}")
+
+        all_pages = [
+            page
+            for page in self.repository.list_script_task_pages(task_id)
+            if page.summary and page.section is not None
+        ]
+        if page_nos is None:
+            target_pages = [
+                page
+                for page in all_pages
+                if page.script_review_status != PageScriptReviewStatus.PASSED
+            ]
+        else:
+            normalized_page_nos = [int(page_no) for page_no in page_nos]
+            if (
+                not normalized_page_nos
+                or any(page_no <= 0 for page_no in normalized_page_nos)
+                or len(normalized_page_nos) != len(set(normalized_page_nos))
+            ):
+                raise AppError(
+                    "common.validation_error",
+                    status_code=422,
+                    debug_message=(
+                        "Review page_nos must contain unique positive integers."
+                    ),
+                )
+            requested = set(normalized_page_nos)
+            target_pages = [page for page in all_pages if page.page_no in requested]
+            found = {page.page_no for page in target_pages}
+            if found != requested:
+                missing = ", ".join(
+                    str(page_no) for page_no in sorted(requested - found)
+                )
+                raise AppError(
+                    "script.pages_not_found",
+                    status_code=404,
+                    debug_message=f"Script pages not found for review: {missing}",
+                )
+
+        target_pages.sort(key=lambda page: page.page_no)
+        if not target_pages:
+            raise AppError("script.pages_review_not_needed", status_code=409)
+
+        outline_characters = self._outline_characters_context(outline_version.id)
+        pages_by_section: dict[int, list[ComicPage]] = {}
+        sections_by_id: dict[int, ScriptSection] = {}
+        for page in target_pages:
+            section = page.section
+            if section is None:
+                continue
+            sections_by_id[section.id] = section
+            pages_by_section.setdefault(section.id, []).append(page)
+
+        supervisor_agent = ScriptSupervisorAgent()
+        pending_page_ids = {page.id for page in target_pages}
+        passed_count = 0
+        failed_count = 0
+        failed_page_nos: list[int] = []
+        yield "phase", {
+            "code": "script.review_existing.started",
+            "task_id": task.id,
+            "count": len(target_pages),
+            "page_nos": [page.page_no for page in target_pages],
+        }
+
+        try:
+            for page in target_pages:
+                updated = self.repository.update_page_script_review_status(
+                    page_id=page.id,
+                    status=PageScriptReviewStatus.REVIEWING,
+                    error_message=None,
+                )
+                yield "page", {
+                    "action": "updated",
+                    "page": self._page_to_payload(updated),
+                    "page_no": updated.page_no,
+                    "revision_note": "",
+                }
+
+            for section_id in sorted(
+                pages_by_section,
+                key=lambda value: sections_by_id[value].section_no,
+            ):
+                section = sections_by_id[section_id]
+                section_pages = sorted(
+                    pages_by_section[section_id], key=lambda page: page.page_no
+                )
+                visual_context = self._section_visual_context(
+                    task_id=task.id,
+                    section=section,
+                    outline_version_id=outline_version.id,
+                )
+                yield "phase", {
+                    "code": "script.section.review_started",
+                    "section_no": section.section_no,
+                    "page_nos": [page.page_no for page in section_pages],
+                    "attempt": 1,
+                }
+                review_result = await supervisor_agent.review_section_pages(
+                    outline=outline_version.content,
+                    current_section=self._section_to_payload(section),
+                    section_scenes=visual_context["scenes"],
+                    section_characters=visual_context["characters"],
+                    outline_characters=outline_characters,
+                    pages=[self._page_to_writer_payload(page) for page in section_pages],
+                )
+                reviews = [
+                    review
+                    for review in review_result.get("reviews", [])
+                    if isinstance(review, dict)
+                ]
+                reviews_by_page_no = {
+                    int(review["page_no"]): review for review in reviews
+                }
+                feedback_by_page_no = self._review_feedback_by_page_no(reviews)
+                for page in section_pages:
+                    review = reviews_by_page_no[page.page_no]
+                    passed = bool(review.get("passed"))
+                    error_message = None
+                    if passed:
+                        passed_count += 1
+                    else:
+                        failed_count += 1
+                        failed_page_nos.append(page.page_no)
+                        error_message = feedback_by_page_no.get(
+                            page.page_no,
+                            str(review.get("summary", "")).strip()
+                            or "script.review_failed",
+                        )
+                    updated = self.repository.update_page_script_review_status(
+                        page_id=page.id,
+                        status=(
+                            PageScriptReviewStatus.PASSED
+                            if passed
+                            else PageScriptReviewStatus.FAILED
+                        ),
+                        error_message=error_message,
+                    )
+                    pending_page_ids.discard(page.id)
+                    yield "review", {"section_no": section.section_no, **review}
+                    yield "page", {
+                        "action": "updated",
+                        "page": self._page_to_payload(updated),
+                        "page_no": updated.page_no,
+                        "revision_note": "",
+                    }
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            error = app_error_from_exception(exc)
+            for page_id in list(pending_page_ids):
+                self.repository.update_page_script_review_status(
+                    page_id=page_id,
+                    status=PageScriptReviewStatus.FAILED,
+                    error_message=error.code,
+                )
+                pending_page_ids.discard(page_id)
+            raise
+        finally:
+            # SSE 连接被关闭时不能把页面永久留在 reviewing；下次可直接再次复审。
+            for page_id in list(pending_page_ids):
+                self.repository.update_page_script_review_status(
+                    page_id=page_id,
+                    status=PageScriptReviewStatus.UNREVIEWED,
+                    error_message=None,
+                )
+
+        yield "done", {
+            "task_id": task.id,
+            "total": len(target_pages),
+            "passed": passed_count,
+            "failed": failed_count,
+            "failed_page_nos": sorted(failed_page_nos),
+        }
 
     async def _stream_batch_task(
         self,
@@ -1325,14 +1523,23 @@ class ScriptService:
             page_no = page.get("page_no")
             scene_key = str(page.get("scene_key", "")).strip()
             if scene_key not in scene_keys:
-                raise ValueError(f"page {page_no} scene_key not found: {scene_key}")
+                allowed = "、".join(sorted(scene_keys)) or "无"
+                raise ValueError(
+                    f"第 {page_no} 页 scene_key={scene_key or '空'} 不属于当前分段；"
+                    f"只能逐字选择以下 scene_key：{allowed}。"
+                    "请用其中一个场景重写整页，删除未锁定场景的空间、家具和主光源。"
+                )
             page_character_keys = page.get("character_keys", [])
             page_characters_text = str(page.get("characters", "")).strip()
             if page_characters_text and page_characters_text != "无" and not page_character_keys:
                 raise ValueError(f"page {page_no} has characters text but no character_keys")
             for character_key in page_character_keys:
                 if character_key not in character_keys:
-                    raise ValueError(f"page {page_no} character_key not found: {character_key}")
+                    allowed = "、".join(sorted(character_keys)) or "无"
+                    raise ValueError(
+                        f"第 {page_no} 页 character_key={character_key} 不属于当前分段；"
+                        f"只能逐字选择以下 character_key：{allowed}。"
+                    )
 
     async def _generate_and_save_page(
         self,
