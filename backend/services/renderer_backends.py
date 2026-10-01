@@ -18,6 +18,7 @@ from backend.services.workflow_compiler import (
     parse_bindings,
     parse_capabilities,
 )
+from backend.services.reference_inputs import prepare_renderer_spec, frozen_preset, validate_renderer_spec
 from backend.tools.comfyui_client import ComfyUIClient
 from backend.utils.json_utils import canonical_hash
 
@@ -78,16 +79,32 @@ class ComfyUIBackend:
     ) -> RendererSubmission:
         if not self.preset.workflow_json:
             raise ValueError("Workflow JSON is required for ComfyUI image generation.")
-        applied_spec = deepcopy(spec)
-        await self._resolve_assets(applied_spec, {})
+        applied_spec = prepare_renderer_spec(spec, self.preset, mode)
+        preset = frozen_preset(self.preset, applied_spec)
+        self.client = ComfyUIClient(preset.comfy_base_url) if preset.comfy_base_url and preset.comfy_base_url != self.preset.comfy_base_url else self.client
+        bindings = parse_bindings(preset.bindings_json)
+        workflow = json.loads(preset.workflow_json)
+        validate_renderer_spec(applied_spec, preset, mode, seed)
+        if applied_spec.get("reference_inputs"):
+            # 先用临时名字完成纯本地编译校验，严格失败不会先上传产生副作用。
+            await self._resolve_assets(applied_spec["reference_inputs"]["items"], {})
+            # 独立控制素材仍按显式 binding 传输；非计划的身份/造型图片不自动上传。
+            for binding in bindings.bindings:
+                if ".controls." in binding.source:
+                    try:
+                        current = WorkflowCompiler.resolve_value(applied_spec, binding.source)
+                        await self._resolve_assets(current, {})
+                    except (KeyError, IndexError, TypeError):
+                        pass
+        else:
+            await self._resolve_assets(applied_spec, {})
 
-        workflow = json.loads(self.preset.workflow_json)
         compiled = self.compiler.compile(
             workflow=workflow,
             spec=applied_spec,
             seed=seed,
-            capabilities=parse_capabilities(self.preset.capabilities_json),
-            bindings=parse_bindings(self.preset.bindings_json),
+            capabilities=parse_capabilities(preset.capabilities_json),
+            bindings=bindings,
             mode=mode,
         )
         external_id = await asyncio.to_thread(
@@ -102,7 +119,7 @@ class ComfyUIBackend:
             degradations=compiled.degradations,
             seed_applied=any(
                 item.source == "render.seed"
-                for item in parse_bindings(self.preset.bindings_json).bindings
+                for item in bindings.bindings
             ),
         )
 
@@ -191,7 +208,7 @@ class ComfyUIBackend:
 
 
 class OpenAIImagesBackend:
-    """OpenAI Images 兼容 Renderer；P0 只支持 Prompt-only 规格。"""
+    """兼容文字生图、multipart 原图数组与 JSON data URL 数组的有限传输方式。"""
 
     def __init__(self, preset: ImageGenerationToolPreset):
         self.preset = preset
@@ -203,8 +220,15 @@ class OpenAIImagesBackend:
         seed: int,
         mode: GenerationMode,
     ) -> RendererSubmission:
-        required = set(spec.get("required_capabilities", []))
-        missing = sorted(required - {"txt2img"})
+        applied_spec = prepare_renderer_spec(spec, self.preset, mode)
+        preset = frozen_preset(self.preset, applied_spec)
+        required = set(applied_spec.get("required_capabilities", []))
+        available = {"txt2img"}
+        if (applied_spec.get("reference_inputs") or {}).get("items"):
+            available.add("reference_image")
+            if any(item.get("purpose") == "canvas" for item in applied_spec["reference_inputs"]["items"]):
+                available.add("img2img")
+        missing = sorted(required - available)
         degradations = [
             {
                 "code": "workflow.capability_missing",
@@ -212,34 +236,35 @@ class OpenAIImagesBackend:
             }
             for item in missing
         ]
-        if not self.preset.seed_field_name:
+        degradations.extend((applied_spec.get("reference_inputs") or {}).get("degradations", []))
+        if not preset.seed_field_name:
             degradations.append(
                 {
                     "code": "workflow.seed_not_applied",
                     "message": "Image API does not expose a seed field.",
                 }
             )
-        if (spec.get("prompt") or {}).get("negative") and not self.preset.negative_prompt_field_name:
+        if (applied_spec.get("prompt") or {}).get("negative") and not preset.negative_prompt_field_name:
             degradations.append(
                 {
                     "code": "workflow.condition_unbound",
                     "message": "Image API does not expose a negative prompt field.",
                 }
             )
-        if mode == GenerationMode.FINAL and degradations:
+        if mode == GenerationMode.FINAL and any(item["code"] != "reference.capacity_exceeded" for item in degradations):
             raise ValueError(
                 "Final prompt-only backend cannot satisfy ImageSpec: "
                 + ", ".join(item["message"] for item in degradations)
             )
-        payload = await asyncio.to_thread(self._request, spec=spec, seed=seed)
+        payload = await asyncio.to_thread(self._request, spec=applied_spec, seed=seed)
         external_id = str(payload.get("id") or f"image-api-{uuid4().hex}")
         return RendererSubmission(
             external_id=external_id,
-            applied_spec=deepcopy(spec),
+            applied_spec=applied_spec,
             workflow=None,
             workflow_hash=None,
             degradations=degradations,
-            seed_applied=bool(self.preset.seed_field_name),
+            seed_applied=bool(preset.seed_field_name),
             context={"response": payload},
         )
 
@@ -266,37 +291,49 @@ class OpenAIImagesBackend:
         return result
 
     def _request(self, *, spec: dict[str, Any], seed: int) -> dict[str, Any]:
-        if not self.preset.api_base_url or not self.preset.model:
+        preset = frozen_preset(self.preset, spec)
+        if not preset.api_base_url or not preset.model:
             raise ValueError("Image API base URL and model are required.")
         body: dict[str, Any] = {
-            "model": self.preset.model,
+            "model": preset.model,
             "prompt": spec["prompt"]["positive"],
             "n": 1,
         }
-        if self.preset.size:
-            body["size"] = self.preset.size
-        if self.preset.response_format:
-            body["response_format"] = self.preset.response_format
-        if self.preset.extra_body_json:
-            extra = json.loads(self.preset.extra_body_json)
+        if preset.size:
+            body["size"] = preset.size
+        if preset.response_format:
+            body["response_format"] = preset.response_format
+        config = parse_capabilities(preset.capabilities_json).reference_images
+        if preset.extra_body_json:
+            extra = json.loads(preset.extra_body_json)
             if not isinstance(extra, dict):
                 raise ValueError("Extra body JSON must be an object.")
+            protected = {"model", "prompt", "n", config.image_field_name, preset.seed_field_name, preset.negative_prompt_field_name}
+            if protected.intersection(extra):
+                raise ValueError("Extra API body cannot override frozen prompt, images, model or seed")
             body.update(extra)
-        if self.preset.seed_field_name:
-            body[self.preset.seed_field_name] = seed
+        if preset.seed_field_name:
+            body[preset.seed_field_name] = seed
         negative = spec.get("prompt", {}).get("negative")
-        if negative and self.preset.negative_prompt_field_name:
-            body[self.preset.negative_prompt_field_name] = negative
+        if negative and preset.negative_prompt_field_name:
+            body[preset.negative_prompt_field_name] = negative
         headers = {"Content-Type": "application/json"}
-        if self.preset.api_key:
-            headers["Authorization"] = f"Bearer {self.preset.api_key}"
-        endpoint = (self.preset.endpoint_path or "/images/generations").lstrip("/")
-        response = requests.post(
-            f"{self.preset.api_base_url.rstrip('/')}/{endpoint}",
-            json=body,
-            headers=headers,
-            timeout=180,
-        )
+        if preset.api_key:
+            headers["Authorization"] = f"Bearer {preset.api_key}"
+        images = (spec.get("reference_inputs") or {}).get("items", [])
+        endpoint = (config.edit_endpoint_path if images else preset.endpoint_path or "/images/generations").lstrip("/")
+        url = f"{preset.api_base_url.rstrip('/')}/{endpoint}"
+        if images and config.transport == "multipart":
+            files = [(config.image_field_name, (Path(item["local_path"]).name, Path(item["local_path"]).read_bytes(), item.get("mime_type") or "image/png")) for item in images]
+            headers.pop("Content-Type")
+            data = {key: json.dumps(value) if isinstance(value, (dict, list, bool)) else str(value) for key, value in body.items()}
+            response = requests.post(url, data=data, files=files, headers=headers, timeout=180)
+        else:
+            if images:
+                if config.transport != "json_data_url":
+                    raise ValueError("Image API has no configured reference image transport")
+                body[config.image_field_name] = [f"data:{item.get('mime_type') or 'image/png'};base64,{base64.b64encode(Path(item['local_path']).read_bytes()).decode('ascii')}" for item in images]
+            response = requests.post(url, json=body, headers=headers, timeout=180)
         response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, dict):

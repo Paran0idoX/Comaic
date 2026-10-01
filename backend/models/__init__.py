@@ -1,6 +1,9 @@
 """数据模型模块：集中导出 SQLAlchemy ORM 实体和业务枚举。"""
 
 from backend.models.comic import (
+    CharacterReferenceGenerationRun,
+    CharacterReferenceGenerationTask,
+    CharacterReferenceImage,
     ComicImage,
     ComicPage,
     ComicProject,
@@ -16,6 +19,7 @@ from backend.models.comic import (
     OutlineVersion,
     OutfitVariant,
     PageShotPlan,
+    ReferenceSubject,
     SceneVisualVersion,
     Session,
     StyleProfile,
@@ -40,6 +44,9 @@ from backend.models.enums import (
 )
 
 __all__ = [
+    "CharacterReferenceGenerationRun",
+    "CharacterReferenceGenerationTask",
+    "CharacterReferenceImage",
     "ComicImage",
     "ComicPage",
     "ComicProject",
@@ -55,6 +62,7 @@ __all__ = [
     "OutlineVersion",
     "OutfitVariant",
     "PageShotPlan",
+    "ReferenceSubject",
     "SceneVisualVersion",
     "Session",
     "StyleProfile",

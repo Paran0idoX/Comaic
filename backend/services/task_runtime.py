@@ -11,6 +11,12 @@ import threading
 from backend.models.database import SessionLocal
 from backend.models.time import utc_now
 from backend.repositories.comic_repository import ComicRepository
+from backend.repositories.character_reference_repository import (
+    CharacterReferenceRepository,
+)
+from backend.repositories.consistency_evaluation_repository import (
+    ConsistencyEvaluationRepository,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -26,6 +32,8 @@ class RuntimeTaskType(str, Enum):
 
     SCRIPT_GENERATION_TASK = "script_generation_task"
     GENERATION_TASK = "generation_task"
+    CONSISTENCY_EVALUATION_TASK = "consistency_evaluation_task"
+    CHARACTER_REFERENCE_TASK = "character_reference_generation_task"
 
 
 @dataclass(frozen=True)
@@ -57,7 +65,7 @@ class RunningTaskRegistry:
             self._tasks.discard(RunningTaskRef(task_type=task_type, task_id=task_id))
         logger.info("Unregistered running task type=%s id=%s", task_type.value, task_id)
 
-    def snapshot_ids(self) -> tuple[set[int], set[int]]:
+    def snapshot_ids(self) -> tuple[set[int], set[int], set[int], set[int]]:
         """返回当前注册任务 id 快照，避免后台线程持有锁访问数据库。"""
 
         with self._lock:
@@ -72,7 +80,22 @@ class RunningTaskRegistry:
             for ref in refs
             if ref.task_type == RuntimeTaskType.GENERATION_TASK
         }
-        return script_task_ids, generation_task_ids
+        consistency_task_ids = {
+            ref.task_id
+            for ref in refs
+            if ref.task_type == RuntimeTaskType.CONSISTENCY_EVALUATION_TASK
+        }
+        character_reference_task_ids = {
+            ref.task_id
+            for ref in refs
+            if ref.task_type == RuntimeTaskType.CHARACTER_REFERENCE_TASK
+        }
+        return (
+            script_task_ids,
+            generation_task_ids,
+            consistency_task_ids,
+            character_reference_task_ids,
+        )
 
 
 running_task_registry = RunningTaskRegistry()
@@ -129,8 +152,20 @@ class TaskRuntimeController:
 
     @staticmethod
     def _update_registered_task_heartbeats() -> None:
-        script_task_ids, generation_task_ids = running_task_registry.snapshot_ids()
-        if not script_task_ids and not generation_task_ids:
+        (
+            script_task_ids,
+            generation_task_ids,
+            consistency_task_ids,
+            character_reference_task_ids,
+        ) = running_task_registry.snapshot_ids()
+        if not any(
+            (
+                script_task_ids,
+                generation_task_ids,
+                consistency_task_ids,
+                character_reference_task_ids,
+            )
+        ):
             return
 
         try:
@@ -141,10 +176,25 @@ class TaskRuntimeController:
                     generation_task_ids=generation_task_ids,
                     heartbeat_at=utc_now(),
                 )
+                consistency_count = ConsistencyEvaluationRepository(
+                    session
+                ).update_running_heartbeats(
+                    task_ids=consistency_task_ids,
+                    heartbeat_at=utc_now(),
+                )
+                character_reference_count = CharacterReferenceRepository(
+                    session
+                ).update_running_heartbeats(
+                    task_ids=character_reference_task_ids,
+                    heartbeat_at=utc_now(),
+                )
                 logger.debug(
-                    "Task heartbeat updated script=%s generation=%s",
+                    "Task heartbeat updated script=%s generation=%s consistency=%s "
+                    "character_reference=%s",
                     script_count,
                     generation_count,
+                    consistency_count,
+                    character_reference_count,
                 )
         except Exception:  # noqa: BLE001 - 后台线程不能因单轮数据库错误退出
             logger.exception("Failed to update task heartbeats")
@@ -159,11 +209,31 @@ class TaskRuntimeController:
                     stale_before=stale_before,
                     error_message=ZOMBIE_ERROR_MESSAGE,
                 )
-                if script_count or generation_count:
+                consistency_count = ConsistencyEvaluationRepository(
+                    session
+                ).suspend_stale_tasks(
+                    stale_before=stale_before,
+                    error_message=ZOMBIE_ERROR_MESSAGE,
+                )
+                character_reference_count = CharacterReferenceRepository(
+                    session
+                ).suspend_stale_tasks(
+                    stale_before=stale_before,
+                    error_message=ZOMBIE_ERROR_MESSAGE,
+                )
+                if (
+                    script_count
+                    or generation_count
+                    or consistency_count
+                    or character_reference_count
+                ):
                     logger.warning(
-                        "Suspended zombie tasks script=%s generation=%s",
+                        "Suspended zombie tasks script=%s generation=%s consistency=%s "
+                        "character_reference=%s",
                         script_count,
                         generation_count,
+                        consistency_count,
+                        character_reference_count,
                     )
         except Exception:  # noqa: BLE001 - 后台线程不能因单轮数据库错误退出
             logger.exception("Failed to suspend zombie tasks")

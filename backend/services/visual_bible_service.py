@@ -8,8 +8,10 @@ from uuid import uuid4
 
 from PIL import Image, UnidentifiedImageError
 
+from backend.i18n.errors import AppError
 from backend.models.comic import (
     OutfitVariant,
+    ReferenceSubject,
     SceneVisualVersion,
     ScriptCharacter,
     ScriptScene,
@@ -18,6 +20,7 @@ from backend.models.comic import (
 )
 from backend.models.enums import (
     ApprovalStatus,
+    CharacterVisualType,
     VisualAssetRole,
     VisualAssetSource,
     VisualAssetStorageKind,
@@ -38,6 +41,8 @@ ALLOWED_ASSET_ROLES = {
         VisualAssetRole.IDENTITY_FACE,
         VisualAssetRole.IDENTITY_HALF_BODY,
         VisualAssetRole.IDENTITY_FULL_BODY,
+        VisualAssetRole.IDENTITY_SIDE,
+        VisualAssetRole.IDENTITY_BACK,
         VisualAssetRole.POSE,
         VisualAssetRole.DEPTH,
         VisualAssetRole.CANNY,
@@ -279,9 +284,30 @@ class VisualBibleService:
                 version_id=version.id,
             )
 
+        # 脚本完成即可在目录和生图准备中定位场景，不依赖用户先打开素材页。
+        from backend.repositories.reference_subject_repository import ReferenceSubjectRepository
+        from backend.services.reference_subject_service import ReferenceSubjectService
+
+        ReferenceSubjectService(ReferenceSubjectRepository(self.repository.session)).sync_script_scenes(project_id)
         return summary
 
     # Versioned visual settings ----------------------------------------
+    def update_character_visual_type(
+        self,
+        *,
+        character_id: int,
+        visual_type: CharacterVisualType,
+    ):
+        """更新 CIDS 编码器路由类型；角色归属仍由现有大纲关系约束。"""
+
+        character = self.repository.get_outline_character(character_id)
+        if character is None:
+            raise ValueError(f"OutlineCharacter not found: {character_id}")
+        return self.repository.update_outline_character_visual_type(
+            character_id=character_id,
+            visual_type=visual_type,
+        )
+
     def list_outfits(
         self, *, project_id: int, outline_character_id: int | None = None
     ) -> list[OutfitVariant]:
@@ -569,15 +595,21 @@ class VisualBibleService:
         source: VisualAssetSource = VisualAssetSource.UPLOAD,
         source_image_id: int | None = None,
         approve: bool = False,
+        commit: bool = True,
+        reference_subject_id: int | None = None,
+        outfit_variant_id: int | None = None,
     ) -> VisualAsset:
         if role == VisualAssetRole.LORA:
             raise ValueError("LoRA must be configured inside the ComfyUI workflow.")
+        entity_key = self._reference_owner_key(project_id, entity_type, entity_id,
+            entity_key, reference_subject_id, outfit_variant_id)
         self._validate_asset_owner(
             project_id=project_id,
             entity_type=entity_type,
             entity_id=entity_id,
             entity_key=entity_key,
             role=role,
+            reference_subject_id=reference_subject_id,
         )
         self._validate_mask_asset(
             project_id=project_id,
@@ -622,6 +654,9 @@ class VisualBibleService:
             mask_asset_id=mask_asset_id,
             status=status,
             approved_at=utc_now() if approve else None,
+            commit=commit,
+            reference_subject_id=reference_subject_id,
+            outfit_variant_id=outfit_variant_id,
         )
 
     def register_renderer_asset(
@@ -635,15 +670,20 @@ class VisualBibleService:
         renderer_locator: str,
         sha256: str | None = None,
         approve: bool = False,
+        reference_subject_id: int | None = None,
+        outfit_variant_id: int | None = None,
     ) -> VisualAsset:
         if role == VisualAssetRole.LORA:
             raise ValueError("LoRA must be configured inside the ComfyUI workflow.")
+        entity_key = self._reference_owner_key(project_id, entity_type, entity_id,
+            entity_key, reference_subject_id, outfit_variant_id)
         self._validate_asset_owner(
             project_id=project_id,
             entity_type=entity_type,
             entity_id=entity_id,
             entity_key=entity_key,
             role=role,
+            reference_subject_id=reference_subject_id,
         )
         locator = self._required(renderer_locator, "Renderer locator")
         normalized_hash = self._optional_sha256(sha256, "Asset sha256")
@@ -669,6 +709,8 @@ class VisualBibleService:
             sha256=normalized_hash,
             status=status,
             approved_at=utc_now() if approve else None,
+            reference_subject_id=reference_subject_id,
+            outfit_variant_id=outfit_variant_id,
         )
 
     def promote_image(
@@ -680,6 +722,8 @@ class VisualBibleService:
         entity_key: str | None,
         role: VisualAssetRole,
         approve: bool = False,
+        reference_subject_id: int | None = None,
+        outfit_variant_id: int | None = None,
     ) -> VisualAsset:
         image = self.repository.get_comic_image(image_id)
         if image is None or not image.local_path:
@@ -697,6 +741,8 @@ class VisualBibleService:
             source=VisualAssetSource.GENERATED_IMAGE,
             source_image_id=image.id,
             approve=approve,
+            reference_subject_id=reference_subject_id,
+            outfit_variant_id=outfit_variant_id,
         )
 
     def set_asset_status(self, *, asset_id: int, status: ApprovalStatus) -> VisualAsset:
@@ -724,6 +770,29 @@ class VisualBibleService:
         return path, asset.mime_type
 
     # Validation --------------------------------------------------------
+    def _reference_owner_key(self, project_id, entity_type, entity_id, entity_key,
+            reference_subject_id, outfit_variant_id):
+        """统一上传、生成图转存和远端登记的归属校验，避免目录 id 混入旧版本 id。"""
+        if reference_subject_id is not None:
+            subject = self.repository.session.get(ReferenceSubject, reference_subject_id)
+            if subject is None or subject.project_id != project_id or subject.entity_type != entity_type:
+                raise AppError("reference.owner_invalid", status_code=422)
+            if entity_type not in {VisualEntityType.SCENE, VisualEntityType.PROP}:
+                raise AppError("reference.owner_invalid", status_code=422)
+            if entity_id is not None:
+                version = self.repository.get_scene_version(entity_id) if entity_type == VisualEntityType.SCENE else None
+                if (version is None or version.project_id != project_id
+                        or version.script_scene.task.project_id != project_id
+                        or version.script_scene.reference_subject_id != reference_subject_id):
+                    raise AppError("reference.owner_invalid", status_code=422)
+            entity_key = subject.key
+        if outfit_variant_id is not None:
+            outfit = self.repository.get_outfit_variant(outfit_variant_id)
+            if (entity_type != VisualEntityType.CHARACTER or outfit is None
+                    or outfit.project_id != project_id or outfit.outline_character_id != entity_id):
+                raise AppError("reference.outfit_invalid", status_code=422)
+        return entity_key
+
     def _require_project(self, project_id: int) -> None:
         if self.repository.get_project(project_id) is None:
             raise ValueError(f"ComicProject not found: {project_id}")
@@ -748,6 +817,7 @@ class VisualBibleService:
         entity_id: int | None,
         entity_key: str | None,
         role: VisualAssetRole,
+        reference_subject_id: int | None = None,
     ) -> None:
         self._require_project(project_id)
         if role not in ALLOWED_ASSET_ROLES[entity_type]:
@@ -765,6 +835,11 @@ class VisualBibleService:
                 raise ValueError(f"OutfitVariant not found for project {project_id}: {entity_id}")
             return
         if entity_type == VisualEntityType.SCENE:
+            if reference_subject_id is not None:
+                subject = self.repository.session.get(ReferenceSubject, reference_subject_id)
+                if subject is not None and subject.project_id == project_id and subject.entity_type == entity_type:
+                    return
+                raise AppError("reference.owner_invalid", status_code=422)
             version = self.repository.get_scene_version(entity_id or 0)
             if version is None or version.project_id != project_id:
                 raise ValueError(

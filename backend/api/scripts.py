@@ -118,6 +118,7 @@ def scene_to_response(scene: ScriptScene) -> ScriptSceneResponse:
         visual_anchors=scene.visual_anchors,
         negative_constraints=scene.negative_constraints,
         selected_visual_version_id=scene.selected_visual_version_id,
+        reference_subject_id=scene.reference_subject_id,
         created_at=scene.created_at,
         updated_at=scene.updated_at,
     )
@@ -159,6 +160,7 @@ def character_to_response(character: ScriptCharacter) -> ScriptCharacterResponse
                 "default_clothing": outline_character.default_clothing,
                 "default_accessories": outline_character.default_accessories,
                 "default_color_palette": outline_character.default_color_palette,
+                "visual_type": outline_character.visual_type.value,
             }
             if outline_character is not None
             else None

@@ -40,6 +40,26 @@ class ComfyUIClient:
         response.raise_for_status()
         return response.json()
 
+    def free_memory(self, *, unload_models: bool = True) -> dict[str, Any]:
+        """在队列空闲后释放 ComfyUI 模型与缓存，给本机评估进程腾出显存。"""
+
+        response = requests.post(
+            f"{self.base_url}/api/free",
+            json={"unload_models": unload_models, "free_memory": True},
+            timeout=60,
+        )
+        response.raise_for_status()
+        if not response.content:
+            return {}
+        payload = response.json()
+        return payload if isinstance(payload, dict) else {}
+
+    @staticmethod
+    def queue_is_idle(payload: dict[str, Any]) -> bool:
+        """兼容 ComfyUI 标准 queue_running / queue_pending 响应。"""
+
+        return not payload.get("queue_running") and not payload.get("queue_pending")
+
     def upload_image(
         self,
         *,

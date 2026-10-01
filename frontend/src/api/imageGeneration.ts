@@ -10,8 +10,8 @@ export type ImageGenerationTool = {
   comfy_base_url: string | null
   workflow_json: string | null
   is_default: boolean
-  capabilities: { features?: string[]; limits?: Record<string, number> }
-  bindings: { schema_version?: number; bindings?: Array<{ source: string; node_id: string; input_name: string }> }
+  capabilities: { features?: string[]; limits?: Record<string, number>; reference_images?: { max_images: number; label_format: 'image_N' | 'picture_N' | 'bracket_N'; requires_canvas: boolean; transport: 'none' | 'multipart' | 'json_data_url'; edit_endpoint_path?: string | null; image_field_name: string } }
+  bindings: { schema_version?: number; bindings?: Array<{ source: string; node_id: string; input_name: string }>; reference_slots?: Array<{ node_id: string; input_name: string; disconnect: Array<{ node_id: string; input_name: string }> }> }
   positive_node_id: string | null
   positive_input_name: string | null
   negative_node_id: string | null
@@ -62,6 +62,7 @@ export type GeneratedImage = {
   id: number
   page_id: number
   generation_run_id: number | null
+  artifact_index: number
   image_url: string | null
   local_path: string | null
   seed: number | null
@@ -101,6 +102,7 @@ export type GenerateImagesPayload = {
 export type GenerationRun = {
   id: number
   generation_task_id: number
+  batch_task_id: number | null
   page_id: number
   image_spec_id: number
   tool_preset_id: number
@@ -130,6 +132,13 @@ export type GenerationTask = {
   id: number
   project_id: number
   page_id: number | null
+  script_task_id: number | null
+  tool_preset_id: number | null
+  parent_task_id: number | null
+  task_kind: 'legacy' | 'batch' | 'page'
+  generation_mode: 'preview' | 'final' | null
+  seed_strategy: 'per_page' | 'shared_candidate' | null
+  candidate_count: number
   comfy_prompt_id: string | null
   status: string
   batch_size: number
@@ -209,6 +218,13 @@ export const listImageGenerationPages = async (
   return result.items
 }
 
+export const listGenerationBatches = async (taskId: number): Promise<GenerationTask[]> => {
+  const result = await requestJson<{ items: GenerationTask[] }>(
+    `/api/image-generation/script-tasks/${taskId}/batches`,
+  )
+  return result.items
+}
+
 export const suspendImageGenerationTask = (taskId: number): Promise<GenerationTask> =>
   requestJson<GenerationTask>(`/api/image-generation/tasks/${taskId}/suspend`, {
     method: 'POST',
@@ -238,6 +254,13 @@ export const streamContinueImagesForTask = (
   callbacks: ImageGenerationStreamCallbacks,
 ): Promise<void> =>
   streamSse(`/api/image-generation/script-tasks/${taskId}/continue/stream`, payload, callbacks)
+
+export const streamContinueImagesForBatch = (
+  batchTaskId: number,
+  payload: GenerateImagesPayload,
+  callbacks: ImageGenerationStreamCallbacks,
+): Promise<void> =>
+  streamSse(`/api/image-generation/batches/${batchTaskId}/continue/stream`, payload, callbacks)
 
 export const streamGenerateImagesForPage = (
   pageId: number,

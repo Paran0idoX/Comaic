@@ -15,7 +15,7 @@ const pageTitle = computed(() => t(String(route.meta.titleKey ?? 'routeTitles.ou
 
 <template>
   <el-container class="app-shell">
-    <el-aside class="app-shell__aside" width="252px">
+    <el-aside class="app-shell__aside" width="216px">
       <SidebarNav />
     </el-aside>
 
@@ -53,6 +53,9 @@ const pageTitle = computed(() => t(String(route.meta.titleKey ?? 'routeTitles.ou
 }
 
 .app-shell__header {
+  position: sticky;
+  z-index: 20;
+  top: 0;
   height: 68px;
   padding: 0;
   border-bottom: 1px solid var(--panel-border);
@@ -61,7 +64,10 @@ const pageTitle = computed(() => t(String(route.meta.titleKey ?? 'routeTitles.ou
 }
 
 .app-shell__content {
-  padding: 28px;
+  width: 100%;
+  max-width: 1680px;
+  margin: 0 auto;
+  padding: 20px;
 }
 
 @media (max-width: 860px) {

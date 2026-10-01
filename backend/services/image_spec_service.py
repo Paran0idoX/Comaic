@@ -34,6 +34,7 @@ from backend.models.enums import (
 )
 from backend.repositories.image_spec_repository import ImageSpecRepository
 from backend.services.image_spec_compilers import compiler_for_prompt_type
+from backend.services.reference_selection_service import ReferenceSelectionService
 from backend.services.visual_state_reducer import VisualStateReducer
 from backend.utils.json_utils import canonical_hash, canonical_json
 from backend.utils.prompt_loader import PromptLoader
@@ -50,7 +51,7 @@ CONTROL_ROLES = {
 class ImageSpecService:
     """编排连续性事件、确定性状态、ShotPlan 和三类 Prompt ImageSpec。"""
 
-    PROMPT_VERSION = "2"
+    PROMPT_VERSION = "3"
     CONTINUITY_REDUCER_ATTEMPTS = 3
 
     def __init__(self, repository: ImageSpecRepository):
@@ -340,6 +341,11 @@ class ImageSpecService:
                     shot_plan_payload["reused"] = existing_plan is not None
                     yield "shot_plan", shot_plan_payload
 
+                    reference_plan = ReferenceSelectionService.select(
+                        snapshot=self._loads_object(snapshot.state_json),
+                        shot_plan=plan_data,
+                    )
+
                     for prompt_type in ImagePromptType:
                         spec = self._compile_prompt_spec(
                             page=page,
@@ -350,6 +356,7 @@ class ImageSpecService:
                             style_assets=context["style_assets"],
                             negative_preset=context["negative_preset"],
                             generation_mode=generation_mode,
+                            reference_plan=reference_plan,
                         )
                         completed_specs += 1
                         yield "image_spec", self._spec_payload(spec, page)
@@ -694,14 +701,9 @@ class ImageSpecService:
 
     def current_image_spec_source_hash(self, spec: ImageSpec) -> str:
         """按当前 Prompt 类型、风格和预设重算来源，用于生成前判定 stale。"""
-        style = self.repository.get_style_profile(spec.style_profile_id)
+        # 历史 spec 风格字段保留；新编译来源不再读取或施加风格。
+        style = None
         style_assets: list[dict[str, Any]] = []
-        if style is not None:
-            style_assets = [
-                self._asset_payload(asset)
-                for asset in self.repository.list_project_assets(style.project_id, approved_only=True)
-                if asset.entity_type == VisualEntityType.STYLE and asset.entity_id == style.id
-            ]
         negative_preset = (
             self.repository.session.get(ImagePromptPreset, spec.negative_prompt_preset_id)
             if spec.negative_prompt_preset_id is not None
@@ -799,11 +801,8 @@ class ImageSpecService:
                     f"review: {page_list}."
                 ),
             )
-        style = self.repository.get_style_profile(style_profile_id)
-        if style_profile_id is not None and (
-            style is None or style.project_id != task.project_id
-        ):
-            raise ValueError(f"StyleProfile not found for project: {style_profile_id}")
+        # 兼容旧请求中的 style_profile_id，但画面准备不再消费该条件。
+        style = None
         planner_preset = (
             self.repository.get_prompt_preset(
                 shot_planner_preset_id,
@@ -826,28 +825,63 @@ class ImageSpecService:
         )
         if planner_preset is None:
             raise ValueError("ShotPlanner prompt preset is required.")
-        assets = self.repository.list_project_assets(task.project_id, approved_only=True)
+        assets = [
+            asset for asset in self.repository.list_project_assets(task.project_id, approved_only=True)
+            if asset.entity_type != VisualEntityType.STYLE and asset.role != VisualAssetRole.LORA
+        ]
         asset_payloads = [self._asset_payload(asset) for asset in assets]
         assets_by_owner: dict[tuple[str, int], list[dict[str, Any]]] = defaultdict(list)
         for asset in asset_payloads:
             if asset["entity_id"] is not None:
                 assets_by_owner[(asset["entity_type"], int(asset["entity_id"]))].append(asset)
-        style_assets = (
-            assets_by_owner.get((VisualEntityType.STYLE.value, style.id), [])
-            if style is not None
-            else []
-        )
+        assets_by_subject: dict[int, list[dict[str, Any]]] = defaultdict(list)
+        for asset in asset_payloads:
+            if asset.get("reference_subject_id") is not None:
+                assets_by_subject[int(asset["reference_subject_id"])].append(asset)
+        reference_subjects = self.repository.list_project_reference_subjects(task.project_id)
+        subject_payloads = {
+            subject.id: {
+                "id": subject.id, "entity_type": subject.entity_type.value,
+                "key": subject.key, "name": subject.name,
+                "description": subject.description,
+                "negative_constraints": subject.negative_constraints,
+            }
+            for subject in reference_subjects
+        }
+        prop_catalog = [
+            {
+                "id": subject.id, "key": subject.key, "name": subject.name,
+                "description": subject.description,
+                "negative_constraints": subject.negative_constraints,
+                "assets": assets_by_subject.get(subject.id, []),
+            }
+            for subject in reference_subjects
+            if subject.entity_type == VisualEntityType.PROP
+        ]
+        # 没有目录的历史物品仍可依据准确的 entity_key 关联，不模糊匹配名称。
+        props_by_key = {item["key"]: item for item in prop_catalog}
+        for asset in asset_payloads:
+            if asset["entity_type"] != VisualEntityType.PROP.value or not asset.get("entity_key"):
+                continue
+            key = str(asset["entity_key"])
+            prop = props_by_key.setdefault(key, {"id": None, "key": key, "name": key, "description": "", "negative_constraints": "", "assets": []})
+            if not any(value["id"] == asset["id"] for value in prop["assets"]):
+                prop["assets"].append(asset)
+        prop_catalog = [props_by_key[key] for key in sorted(props_by_key)]
         active_llm = self.repository.get_active_llm_config()
         return {
             "task": task,
             "pages": pages,
             "style": style,
-            "style_assets": style_assets,
+            "style_assets": [],
             "planner_preset": planner_preset,
             "negative_preset": negative_preset,
             "assets": assets,
             "asset_payloads": asset_payloads,
             "assets_by_owner": assets_by_owner,
+            "assets_by_reference_subject": assets_by_subject,
+            "reference_subjects": subject_payloads,
+            "prop_catalog": prop_catalog,
             "outfits": self.repository.list_project_outfits(
                 task.project_id, approved_only=True
             ),
@@ -952,6 +986,7 @@ class ImageSpecService:
             ):
                 prop_assets_by_key[str(asset["entity_key"])].append(asset)
         for page_state in reduced:
+            page_state["prop_catalog"] = context["prop_catalog"]
             for character_state in page_state["characters"]:
                 character_state["held_prop_assets"] = [
                     {
@@ -1060,6 +1095,7 @@ class ImageSpecService:
         assets_by_owner = context["assets_by_owner"]
         result: dict[str, dict[str, Any]] = {}
         for scene in context["scenes"]:
+            reference_subject = context["reference_subjects"].get(scene.reference_subject_id) or {}
             version = scene.selected_visual_version
             approved_version = (
                 version if version is not None and version.status == ApprovalStatus.APPROVED else None
@@ -1079,6 +1115,13 @@ class ImageSpecService:
                 "visual_anchors": scene.visual_anchors,
                 "negative_constraints": scene.negative_constraints,
                 "visual_version_id": approved_version.id if approved_version else None,
+                "reference_subject_id": scene.reference_subject_id,
+                "reference_subject_key": reference_subject.get("key", ""),
+                "reference_subject_name": reference_subject.get("name", ""),
+                "reference_description": reference_subject.get("description", ""),
+                "reference_negative_constraints": reference_subject.get("negative_constraints", ""),
+                # 条目通用图与版本专用图分开，重新绑定条目后不能继续取旧条目的专用素材。
+                "catalog_assets": [asset for asset in context["assets_by_reference_subject"].get(scene.reference_subject_id, []) if asset.get("entity_id") is None],
                 "landmarks": self._loads_list(approved_version.landmarks_json)
                 if approved_version
                 else [],
@@ -1094,9 +1137,9 @@ class ImageSpecService:
                 "camera_presets": self._loads_list(approved_version.camera_presets_json)
                 if approved_version
                 else [],
-                "assets": assets_by_owner.get(
+                "assets": [asset for asset in assets_by_owner.get(
                     (VisualEntityType.SCENE.value, approved_version.id), []
-                )
+                ) if asset.get("reference_subject_id") in (None, scene.reference_subject_id)]
                 if approved_version
                 else [],
             }
@@ -1414,6 +1457,7 @@ class ImageSpecService:
         style_assets: list[dict[str, Any]],
         negative_preset: ImagePromptPreset | None,
         generation_mode: GenerationMode,
+        reference_plan: dict[str, Any] | None = None,
     ) -> ImageSpec:
         snapshot_data = self._loads_object(snapshot.state_json)
         plan_data = self._loads_object(shot_plan.plan_json)
@@ -1438,6 +1482,7 @@ class ImageSpecService:
             negative_prompts=self._negative_prompt_payload(negative_preset),
             generation_mode=generation_mode,
             source_hash=combined_source_hash,
+            reference_plan=reference_plan,
         )
         return self.repository.add_image_spec(
             page_id=page.id,
@@ -1469,7 +1514,7 @@ class ImageSpecService:
         style_assets: list[dict[str, Any]],
         negative_preset: ImagePromptPreset | None,
     ) -> str:
-        """完整来源 Hash 包含 Prompt 类型、编译器、风格资产和负向 Prompt 版本。"""
+        """来源锁定快照、镜头、选图规则和负向 Prompt；历史风格不再影响新规格。"""
 
         compiler = compiler_for_prompt_type(prompt_type)
         return canonical_hash(
@@ -1481,11 +1526,7 @@ class ImageSpecService:
                     "key": compiler.compiler_key,
                     "version": compiler.compiler_version,
                 },
-                "style": (
-                    self._style_payload(style_profile, style_assets)
-                    if style_profile is not None
-                    else None
-                ),
+                "reference_selector_version": ReferenceSelectionService.VERSION,
                 "negative_prompt_preset": (
                     {
                         "id": negative_preset.id,
@@ -1548,6 +1589,8 @@ class ImageSpecService:
                 for item in context["outfits"]
             ],
             "assets": context["asset_payloads"],
+            "prop_catalog": context["prop_catalog"],
+            "reference_subjects": list(context["reference_subjects"].values()),
             "agent": {
                 "key": "continuity_event_agent",
                 "version": ContinuityEventAgent.VERSION,
@@ -1627,6 +1670,7 @@ class ImageSpecService:
         payload.update(
             {
                 "lighting": scene.lighting,
+                "reference_subject_id": scene.reference_subject_id,
                 "environment_details": scene.environment_details,
                 "color_palette": scene.color_palette,
                 "negative_constraints": scene.negative_constraints,
@@ -1725,11 +1769,16 @@ class ImageSpecService:
             "entity_id": asset.entity_id,
             "entity_key": asset.entity_key,
             "role": asset.role.value,
+            "reference_subject_id": asset.reference_subject_id,
+            "outfit_variant_id": asset.outfit_variant_id,
             "storage_kind": asset.storage_kind.value,
             "local_path": asset.local_path,
             "renderer_locator": asset.renderer_locator,
             "sha256": asset.sha256,
             "version": asset.version,
+            "mime_type": asset.mime_type,
+            "width": asset.width,
+            "height": asset.height,
         }
 
     def _style_payload(
@@ -1775,8 +1824,6 @@ class ImageSpecService:
                 asset.get("role") for asset in (character.get("outfit") or {}).get("assets", [])
             )
         controls = {CONTROL_ROLES[role] for role in roles if role in CONTROL_ROLES}
-        if len(snapshot.get("characters", [])) > 1:
-            controls.add("regional_condition")
         return sorted(controls)
 
     @staticmethod

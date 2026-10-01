@@ -1,0 +1,1 @@
+Avoid changing these canonical details: {negative_constraints}. Avoid collages, contact sheets, split screens, multiple views in one image, captions, text, watermark, blur, and cropped distinguishing features.

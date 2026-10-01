@@ -192,6 +192,28 @@ def test_binding_rejects_jsonpath_and_duplicate_targets() -> None:
         )
 
 
+def test_each_legacy_reference_needs_its_own_binding() -> None:
+    spec = _spec()
+    spec["subjects"][0]["identity"]["references"].append({"renderer_name": "alice-body.png"})
+    with pytest.raises(ValueError, match=r"references\[1\]"):
+        WorkflowCompiler().compile(workflow=_workflow(), spec=spec, seed=123,
+            capabilities=WorkflowCapabilities.model_validate({"features": ["txt2img", "reference_image"]}),
+            bindings=_bindings(), mode=GenerationMode.FINAL)
+
+
+def test_legacy_reference_array_binding_covers_all_items() -> None:
+    spec = _spec()
+    spec["subjects"][0]["identity"]["references"].append({"renderer_name": "alice-body.png"})
+    binding_data = _bindings().model_dump()
+    for binding in binding_data["bindings"]:
+        if binding["source"] == "subjects[0].identity.references[0]":
+            binding["source"] = "subjects[0].identity.references"
+    result = WorkflowCompiler().compile(workflow=_workflow(), spec=spec, seed=123,
+        capabilities=WorkflowCapabilities.model_validate({"features": ["txt2img", "reference_image"]}),
+        bindings=WorkflowBindings.model_validate(binding_data), mode=GenerationMode.FINAL)
+    assert "alice-body.png" in result.workflow["3"]["inputs"]["image"]
+
+
 def test_configuration_rejects_binding_capability_and_subject_slot_mismatch() -> None:
     with pytest.raises(ValueError, match="requires capability reference_image"):
         WorkflowCompiler().validate_configuration(

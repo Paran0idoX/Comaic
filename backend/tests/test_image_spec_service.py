@@ -9,9 +9,11 @@ from backend.models.comic import (
     ComicImage,
     ComicPage,
     ComicProject,
+    ImageSpec,
     OutlineCharacter,
     OutlineVersion,
     OutfitVariant,
+    ReferenceSubject,
     SceneVisualVersion,
     ScriptCharacter,
     ScriptGenerationTask,
@@ -450,6 +452,10 @@ async def test_full_compile_generates_three_prompt_specs_from_shared_visual_trut
         f"{natural_spec['positive_prompt']}\n{tag_spec['positive_prompt']}"
     )
     assert len({item["shot_plan_id"] for item in page_two_specs}) == 1
+    assert tag_spec["spec"]["reference_plan"] == natural_spec["spec"]["reference_plan"] == hybrid_spec["spec"]["reference_plan"]
+    assert tag_spec["spec"]["style"] == {}
+    assert session.get(ImageSpec, tag_spec["id"]).style_profile_id is None
+    assert "clean comic line art" not in tag_spec["positive_prompt"]
     session.refresh(pages[0])
     assert pages[0].status == ComicPageStatus.SPEC_READY
 
@@ -461,6 +467,102 @@ async def test_full_compile_generates_three_prompt_specs_from_shared_visual_trut
     assert page_states[1]["scene"]["object_states"]["north_door"] == "closed"
     assert page_states[2]["scene"]["object_states"]["north_door"] == "open"
     assert page_states[2]["characters"][0]["held_props"] == ["brass_key"]
+
+
+def test_reference_changes_stale_source_and_historical_style_changes_do_not() -> None:
+    session = _session()
+    task, pages, style = _seed_project(session)
+    service = ImageSpecService(ImageSpecRepository(session))
+    initial = service.current_continuity_source_hash(task.id)
+    style.positive_tag = "changed historical style"
+    style_asset = session.scalar(select(VisualAsset).where(VisualAsset.role == VisualAssetRole.STYLE_REFERENCE))
+    style_asset.version += 1
+    session.commit()
+    assert service.current_continuity_source_hash(task.id) == initial
+
+    character_asset = session.scalar(select(VisualAsset).where(VisualAsset.role == VisualAssetRole.IDENTITY_FACE))
+    character_asset.version += 1
+    session.commit()
+    revised = service.current_continuity_source_hash(task.id)
+    assert revised != initial
+    character_asset.status = ApprovalStatus.DRAFT
+    session.commit()
+    revoked = service.current_continuity_source_hash(task.id)
+    assert revoked != revised
+    character_asset.status = ApprovalStatus.APPROVED
+    session.commit()
+    assert service.current_continuity_source_hash(task.id) == revised
+
+    subject = ReferenceSubject(project_id=task.project_id, entity_type=VisualEntityType.SCENE, key="catalog_room", name="Catalog room", description="round skylight")
+    session.add(subject)
+    session.flush()
+    pages[0].script_scene.reference_subject_id = subject.id
+    session.commit()
+    bound = service.current_continuity_source_hash(task.id)
+    assert bound != revised
+    subject.description = "square skylight"
+    session.commit()
+    assert service.current_continuity_source_hash(task.id) != bound
+
+
+def test_asset_metadata_clothing_and_subject_association_are_part_of_source_hash() -> None:
+    session = _session()
+    task, pages, _style = _seed_project(session)
+    service = ImageSpecService(ImageSpecRepository(session))
+    asset = session.scalar(select(VisualAsset).where(VisualAsset.role == VisualAssetRole.IDENTITY_FACE))
+    previous = service.current_continuity_source_hash(task.id)
+    for field, value in [("outfit_variant_id", pages[0].visual_characters[0].outfit_variant_id), ("mime_type", "image/webp"), ("width", 240), ("height", 360), ("local_path", "independent-original.webp")]:
+        setattr(asset, field, value)
+        session.commit()
+        current = service.current_continuity_source_hash(task.id)
+        assert current != previous
+        previous = current
+
+
+def test_scene_baseline_separates_generic_and_version_specific_subject_assets() -> None:
+    session = _session()
+    task, pages, _style = _seed_project(session)
+    scene = pages[0].script_scene
+    selected_version = scene.selected_visual_version
+    first = ReferenceSubject(project_id=task.project_id, entity_type=VisualEntityType.SCENE, key="first_scene", name="First scene")
+    second = ReferenceSubject(project_id=task.project_id, entity_type=VisualEntityType.SCENE, key="second_scene", name="Second scene")
+    other_version = SceneVisualVersion(project_id=task.project_id, script_scene_id=scene.id, version=2, status=ApprovalStatus.APPROVED)
+    session.add_all([first, second, other_version])
+    session.flush()
+    scene.reference_subject_id = first.id
+
+    def scoped_asset(subject, entity_id, locator):
+        asset = VisualAsset(project_id=task.project_id, entity_type=VisualEntityType.SCENE, reference_subject_id=subject.id, entity_id=entity_id, entity_key=subject.key, role=VisualAssetRole.SCENE_MASTER, version=1, storage_kind=VisualAssetStorageKind.RENDERER_LOCATOR, renderer_locator=locator, source=VisualAssetSource.RENDERER_LOCATOR, status=ApprovalStatus.APPROVED)
+        session.add(asset)
+        session.flush()
+        return asset
+
+    generic = scoped_asset(first, None, "first-generic.png")
+    specific = scoped_asset(first, selected_version.id, "first-selected-version.png")
+    other_specific = scoped_asset(first, other_version.id, "first-other-version.png")
+    wrong_subject = scoped_asset(second, selected_version.id, "second-selected-version.png")
+    session.commit()
+    service = ImageSpecService(ImageSpecRepository(session))
+
+    def baseline():
+        context = service._prepare_context(task_id=task.id, style_profile_id=None, shot_planner_preset_id=None, negative_prompt_preset_id=None)
+        return service._scene_baselines(context)[scene.scene_key]
+
+    result = baseline()
+    assert [asset["id"] for asset in result["catalog_assets"]] == [generic.id]
+    version_ids = {asset["id"] for asset in result["assets"]}
+    assert specific.id in version_ids
+    assert wrong_subject.id not in version_ids
+    assert other_specific.id not in version_ids
+    # 老的NULL条目归属素材仍按当前选用版本兼容，不把entity_id解释成目录ID。
+    assert any(asset["reference_subject_id"] is None for asset in result["assets"])
+
+    scene.reference_subject_id = second.id
+    session.commit()
+    rebound = baseline()
+    assert rebound["catalog_assets"] == []
+    assert specific.id not in {asset["id"] for asset in rebound["assets"]}
+    assert wrong_subject.id in {asset["id"] for asset in rebound["assets"]}
 
 
 @pytest.mark.asyncio

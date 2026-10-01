@@ -17,6 +17,13 @@ venv/
 logs/
 *.log
 
+# Local Codex browser, E2E, pytest, and smoke-test artifacts
+/.codex-artifacts/
+/.codex-*.png
+/.codex-*.html
+/.codex-*.py
+/.research-*/
+
 # Local SQLite data and generated assets
 data/
 outputs/*

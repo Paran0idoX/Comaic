@@ -190,6 +190,7 @@ onBeforeUnmount(() => {
 .conversation-panel {
   position: relative;
   display: flex;
+  min-width: 0;
   min-height: 620px;
   flex-direction: column;
 }
@@ -216,6 +217,21 @@ onBeforeUnmount(() => {
 .conversation-panel__header p {
   margin-top: 6px;
   color: var(--text-soft);
+}
+
+.conversation-panel__header > div {
+  min-width: 0;
+}
+
+.conversation-panel__header :deep(.el-tag) {
+  max-width: 48%;
+  flex: 0 1 auto;
+}
+
+.conversation-panel__header :deep(.el-tag__content) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .conversation-panel__body {
@@ -299,5 +315,28 @@ onBeforeUnmount(() => {
 :global(body.is-resizing-conversation) {
   cursor: ns-resize;
   user-select: none;
+}
+
+@media (max-width: 640px) {
+  .conversation-panel__header {
+    align-items: stretch;
+    flex-direction: column;
+    padding: 18px;
+  }
+
+  .conversation-panel__header :deep(.el-tag) {
+    max-width: 100%;
+    align-self: flex-start;
+  }
+
+  .conversation-panel__messages,
+  .conversation-panel__composer {
+    padding-right: 18px;
+    padding-left: 18px;
+  }
+
+  .conversation-panel__composer-actions {
+    align-items: flex-start;
+  }
 }
 </style>

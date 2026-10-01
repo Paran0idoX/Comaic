@@ -7,6 +7,9 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from backend.api.image_generation import router as image_generation_router
+from backend.api.character_reference import router as character_reference_router
+from backend.api.reference_images import router as reference_images_router
+from backend.api.consistency_evaluation import router as consistency_evaluation_router
 from backend.api.image_specs import router as image_specs_router
 from backend.api.outline import router as outline_router
 from backend.api.projects import router as projects_router
@@ -22,6 +25,10 @@ from backend.i18n.errors import (
 from backend.i18n.locale import request_locale
 from backend.models.database import init_db
 from backend.services.task_runtime import start_task_runtime_threads
+from backend.services.consistency_evaluation_runtime import (
+    consistency_evaluation_runtime,
+)
+from backend.services.character_reference_runtime import character_reference_runtime
 
 
 logging.basicConfig(
@@ -39,9 +46,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     init_db()
     logger.info("Database ready")
     task_runtime = start_task_runtime_threads()
+    consistency_evaluation_runtime.start()
+    character_reference_runtime.start()
     try:
         yield
     finally:
+        character_reference_runtime.stop()
+        consistency_evaluation_runtime.stop()
         task_runtime.stop()
 
 
@@ -73,6 +84,9 @@ app.include_router(scripts_router)
 app.include_router(project_pages_router)
 app.include_router(image_specs_router)
 app.include_router(image_generation_router)
+app.include_router(character_reference_router)
+app.include_router(reference_images_router)
+app.include_router(consistency_evaluation_router)
 app.include_router(settings_router)
 app.include_router(visual_bible_router)
 

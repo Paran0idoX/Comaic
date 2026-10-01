@@ -17,6 +17,7 @@ from backend.models.comic import (
 )
 from backend.models.enums import (
     ApprovalStatus,
+    CharacterVisualType,
     VisualAssetRole,
     VisualAssetSource,
     VisualAssetStorageKind,
@@ -36,6 +37,20 @@ class VisualBibleRepository:
 
     def get_outline_character(self, character_id: int) -> OutlineCharacter | None:
         return self.session.get(OutlineCharacter, character_id)
+
+    def update_outline_character_visual_type(
+        self,
+        *,
+        character_id: int,
+        visual_type: CharacterVisualType,
+    ) -> OutlineCharacter:
+        character = self.get_outline_character(character_id)
+        if character is None:
+            raise ValueError(f"OutlineCharacter not found: {character_id}")
+        character.visual_type = visual_type
+        self.session.commit()
+        self.session.refresh(character)
+        return character
 
     def get_script_scene(self, scene_id: int) -> ScriptScene | None:
         return self.session.get(ScriptScene, scene_id)
@@ -308,6 +323,9 @@ class VisualBibleRepository:
         mask_asset_id: int | None = None,
         status: ApprovalStatus = ApprovalStatus.DRAFT,
         approved_at: datetime | None = None,
+        commit: bool = True,
+        reference_subject_id: int | None = None,
+        outfit_variant_id: int | None = None,
     ) -> VisualAsset:
         asset = VisualAsset(
             project_id=project_id,
@@ -326,14 +344,20 @@ class VisualBibleRepository:
             status=status,
             source=source,
             source_image_id=source_image_id,
+            reference_subject_id=reference_subject_id,
+            outfit_variant_id=outfit_variant_id,
             derived_from_asset_id=derived_from_asset_id,
             crop_metadata_json=crop_metadata_json,
             mask_asset_id=mask_asset_id,
             approved_at=approved_at,
         )
         self.session.add(asset)
-        self.session.commit()
-        self.session.refresh(asset)
+        if commit:
+            self.session.commit()
+            self.session.refresh(asset)
+        else:
+            # 三件套批准需要三个资产与候选状态在同一事务中提交。
+            self.session.flush()
         return asset
 
     def set_approval_status(
