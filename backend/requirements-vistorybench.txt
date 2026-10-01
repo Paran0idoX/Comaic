@@ -1,0 +1,16 @@
+# 安装到现有 comaic 环境；PyTorch/CUDA 先按 README 的 cu130 命令安装。
+numpy==1.26.4
+pandas==2.3.1
+natsort==8.4.0
+transformers==4.41.2
+huggingface-hub==0.34.4
+insightface==0.7.3
+onnxruntime-gpu==1.22.0
+supervision==0.6.0
+groundingdino-py==0.4.0
+facexlib==0.3.0
+opencv-python==4.11.0.86
+opencv-python-headless==4.11.0.86
+scipy>=1.12,<2
+gdown==5.2.0
+PyYAML>=6,<7

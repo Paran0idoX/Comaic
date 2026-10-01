@@ -1,0 +1,1 @@
+solo, single view, continuous image, character reference, centered, neutral pose, simple background, consistent identity, {framing}, {appearance}, {visual_anchors}, {hairstyle}, {clothing}, {accessories}, {color_palette}, {style}

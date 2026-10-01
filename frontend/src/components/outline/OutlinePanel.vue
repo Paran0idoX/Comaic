@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { Check, Clock } from '@element-plus/icons-vue'
 import MarkdownIt from 'markdown-it'
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import { formatLocalDateTime } from '@/utils/datetime'
@@ -46,6 +46,12 @@ const emit = defineEmits<{
 }>()
 
 const { locale, t } = useI18n()
+const activeTab = ref<'outline' | 'characters' | 'versions'>(
+  (localStorage.getItem('comaic-outline-panel-tab') as 'outline' | 'characters' | 'versions') ||
+    'outline',
+)
+
+watch(activeTab, (value) => localStorage.setItem('comaic-outline-panel-tab', value))
 
 // 大纲由 LLM 生成，可能包含 Markdown；关闭 html 解析，避免把模型文本当成真实 HTML 执行。
 const markdown = new MarkdownIt({
@@ -83,75 +89,79 @@ const formatDate = (value: string) => {
     </header>
 
     <div class="outline-panel__content">
-      <el-empty v-if="!outline" :description="t('outline.panel.empty')" />
-      <el-scrollbar v-else class="outline-panel__outline-scroll" always>
-        <article class="outline-panel__outline markdown-body" v-html="renderedOutline" />
-      </el-scrollbar>
+      <el-tabs v-model="activeTab" class="outline-panel__tabs">
+        <el-tab-pane :label="t('outline.panel.title')" name="outline">
+          <el-empty v-if="!outline" :description="t('outline.panel.empty')" />
+          <el-scrollbar v-else class="outline-panel__tab-scroll">
+            <article class="outline-panel__outline markdown-body" v-html="renderedOutline" />
+          </el-scrollbar>
+        </el-tab-pane>
 
-      <el-divider />
+        <el-tab-pane :label="`${t('outline.characters.title')} (${currentCharacters.length})`" name="characters">
+          <div class="outline-panel__tab-intro">
+            <p>{{ t('outline.characters.description') }}</p>
+          </div>
+          <el-scrollbar class="outline-panel__tab-scroll">
+            <el-empty
+              v-if="currentCharacters.length === 0"
+              :description="t('outline.characters.empty')"
+            />
+            <div v-else class="outline-panel__character-grid">
+              <article
+                v-for="character in currentCharacters"
+                :key="character.id"
+                class="outline-panel__character"
+              >
+                <header>
+                  <strong>{{ character.name }}</strong>
+                  <el-tooltip :content="character.character_key">
+                    <el-tag size="small" effect="plain">Key</el-tag>
+                  </el-tooltip>
+                </header>
+                <p><span>{{ t('outline.characters.role') }}</span>{{ character.role || '-' }}</p>
+                <p><span>{{ t('outline.characters.background') }}</span>{{ character.background || '-' }}</p>
+                <p><span>{{ t('outline.characters.appearance') }}</span>{{ character.appearance || '-' }}</p>
+                <p><span>{{ t('outline.characters.defaults') }}</span>{{ [
+                  character.default_hairstyle,
+                  character.default_clothing,
+                  character.default_accessories,
+                  character.default_color_palette,
+                ].filter(Boolean).join(' / ') || '-' }}</p>
+                <p><span>{{ t('outline.characters.anchors') }}</span>{{ character.visual_anchors || '-' }}</p>
+              </article>
+            </div>
+          </el-scrollbar>
+        </el-tab-pane>
 
-      <div class="outline-panel__characters">
-        <h4>{{ t('outline.characters.title') }}</h4>
-        <p>{{ t('outline.characters.description') }}</p>
-        <el-empty
-          v-if="currentCharacters.length === 0"
-          :description="t('outline.characters.empty')"
-        />
-        <div v-else class="outline-panel__character-grid">
-          <article
-            v-for="character in currentCharacters"
-            :key="character.id"
-            class="outline-panel__character"
-          >
-            <header>
-              <strong>{{ character.name }}</strong>
-              <el-tag size="small" effect="plain">{{ character.character_key }}</el-tag>
-            </header>
-            <p><span>{{ t('outline.characters.role') }}</span>{{ character.role || '-' }}</p>
-            <p><span>{{ t('outline.characters.background') }}</span>{{ character.background || '-' }}</p>
-            <p><span>{{ t('outline.characters.appearance') }}</span>{{ character.appearance || '-' }}</p>
-            <p><span>{{ t('outline.characters.defaults') }}</span>{{ [
-              character.default_hairstyle,
-              character.default_clothing,
-              character.default_accessories,
-              character.default_color_palette,
-            ].filter(Boolean).join(' / ') || '-' }}</p>
-            <p><span>{{ t('outline.characters.anchors') }}</span>{{ character.visual_anchors || '-' }}</p>
-          </article>
-        </div>
-      </div>
-
-      <el-divider />
-
-      <div class="outline-panel__versions">
-        <h4>{{ t('outline.panel.recentVersions') }}</h4>
-        <el-empty
-          v-if="versions.length === 0"
-          :description="t('outline.panel.emptyVersions')"
-        />
-        <div
-          v-for="item in versions"
-          v-else
-          :key="item.version_id"
-          class="outline-panel__version"
-        >
-          <span>v{{ item.version_no }}</span>
-          <el-tag :type="item.status === 'active' ? 'success' : 'info'" effect="plain">
-            {{ t(`outline.versionStatus.${item.status}`) }}
-          </el-tag>
-          <small>
-            <el-icon><Clock /></el-icon>
-            {{ formatDate(item.created_at) }}
-          </small>
-        </div>
-      </div>
+        <el-tab-pane :label="`${t('outline.panel.recentVersions')} (${versions.length})`" name="versions">
+          <el-scrollbar class="outline-panel__tab-scroll">
+            <el-empty
+              v-if="versions.length === 0"
+              :description="t('outline.panel.emptyVersions')"
+            />
+            <div v-else class="outline-panel__versions">
+              <div v-for="item in versions" :key="item.version_id" class="outline-panel__version">
+                <span>v{{ item.version_no }}</span>
+                <el-tag :type="item.status === 'active' ? 'success' : 'info'" effect="plain">
+                  {{ t(`outline.versionStatus.${item.status}`) }}
+                </el-tag>
+                <small><el-icon><Clock /></el-icon>{{ formatDate(item.created_at) }}</small>
+              </div>
+            </div>
+          </el-scrollbar>
+        </el-tab-pane>
+      </el-tabs>
     </div>
   </section>
 </template>
 
 <style scoped>
 .outline-panel {
+  display: flex;
+  min-width: 0;
+  height: clamp(620px, calc(100vh - 170px), 1100px);
   min-height: 680px;
+  flex-direction: column;
 }
 
 .outline-panel__header {
@@ -179,12 +189,37 @@ const formatDate = (value: string) => {
 }
 
 .outline-panel__content {
+  min-height: 0;
+  flex: 1;
   padding: 24px;
 }
 
-.outline-panel__outline-scroll {
-  height: clamp(320px, 48vh, 560px);
+.outline-panel__tabs {
+  display: flex;
+  height: 100%;
+  flex-direction: column;
+}
+
+.outline-panel__tabs :deep(.el-tabs__content),
+.outline-panel__tabs :deep(.el-tab-pane) {
+  min-height: 0;
+  flex: 1;
+}
+
+.outline-panel__tabs :deep(.el-tab-pane) {
+  display: flex;
+  flex-direction: column;
+}
+
+.outline-panel__tab-scroll {
+  min-height: 0;
+  flex: 1;
   padding-right: 8px;
+}
+
+.outline-panel__tab-intro p {
+  margin: 0 0 12px;
+  color: var(--text-soft);
 }
 
 .outline-panel__outline {
@@ -323,5 +358,26 @@ const formatDate = (value: string) => {
   align-items: center;
   gap: 6px;
   color: var(--text-soft);
+}
+
+@media (max-width: 640px) {
+  .outline-panel__header {
+    align-items: stretch;
+    flex-direction: column;
+    padding: 18px;
+  }
+
+  .outline-panel__content {
+    padding: 18px;
+  }
+
+  .outline-panel__character-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .outline-panel__version {
+    grid-template-columns: 34px 72px minmax(0, 1fr);
+    gap: 8px;
+  }
 }
 </style>

@@ -1,12 +1,22 @@
 <script setup lang="ts">
-import { Delete, Document, EditPen, Plus, Refresh, Tickets, VideoPause, View } from '@element-plus/icons-vue'
+import {
+  Delete,
+  Document,
+  EditPen,
+  MoreFilled,
+  Plus,
+  Refresh,
+  Search,
+  Tickets,
+  VideoPause,
+  View,
+} from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { storeToRefs } from 'pinia'
-import { computed, nextTick, onActivated, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onDeactivated, onMounted, reactive, ref, shallowRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 
-import { listProjects, type Project } from '@/api/projects'
 import { resolveOutlineSession, type OutlineVersion } from '@/api/outline'
 import { ApiError, apiErrorMessage } from '@/api/errors'
 import {
@@ -32,6 +42,7 @@ import {
 } from '@/api/scripts'
 import { formatLocalDateTime, formatLocalNowTime } from '@/utils/datetime'
 import { useProjectContextStore } from '@/stores/projectContext'
+import { useActivityCenterStore, type ActivityStatus } from '@/stores/activityCenter'
 
 // 组件名用于 AppShell 的 KeepAlive include 精准缓存脚本工作台。
 defineOptions({ name: 'ScriptWorkspaceView' })
@@ -46,13 +57,23 @@ type ProgressEvent = {
   type: TimelineLevel
 }
 
+type ScriptRunContext = {
+  readonly projectId: number
+  readonly outlineVersionId: number | null
+  readonly totalPages: number
+  taskId: number | null
+  status: ActivityStatus
+  completedPageIds: Set<number>
+  events: ProgressEvent[]
+}
+
 const route = useRoute()
 const router = useRouter()
 const { locale, t } = useI18n()
 const projectContext = useProjectContextStore()
-const { selectedProjectId } = storeToRefs(projectContext)
+const activityCenter = useActivityCenterStore()
+const { selectedProjectId, projects, loadingProjects } = storeToRefs(projectContext)
 
-const projects = ref<Project[]>([])
 const outlineVersions = ref<OutlineVersion[]>([])
 const scriptTasks = ref<ScriptTask[]>([])
 const sections = ref<ScriptSection[]>([])
@@ -61,8 +82,12 @@ const visualCharacters = ref<ScriptCharacter[]>([])
 const pages = ref<ScriptPage[]>([])
 const selectedOutlineVersionId = ref<number | null>(null)
 const selectedTaskId = ref<number | null>(null)
+const unavailableTaskId = ref<number | null>(null)
 const selectedSectionNo = ref<number | null>(null)
-const currentTaskId = ref<number | null>(null)
+// 运行上下文不跟随浏览选择变化，避免切换项目后旧 SSE 写入当前工作台或暂停错误任务。
+const runContext = shallowRef<ScriptRunContext | null>(null)
+const workspaceActive = ref(true)
+const showGenerationConfiguration = ref(false)
 const totalPages = ref(12)
 const userRequirement = ref('')
 const progressEvents = ref<ProgressEvent[]>([])
@@ -82,7 +107,6 @@ const scriptForm = reactive({
 })
 const savingScript = ref(false)
 
-const loadingProjects = ref(false)
 const loadingOutlineVersions = ref(false)
 const loadingTasks = ref(false)
 const loadingSections = ref(false)
@@ -94,6 +118,13 @@ const continuingBatch = ref(false)
 const reviewingPages = ref(false)
 const needsOutline = ref(false)
 const eventSequence = ref(1)
+const activeScriptTab = ref<'pages' | 'visual'>(
+  (localStorage.getItem('comaic-script-workspace-tab') as 'pages' | 'visual') || 'pages',
+)
+const pageSearch = ref(localStorage.getItem('comaic-script-page-search') ?? '')
+const pageStatusFilter = ref<'all' | 'passed' | 'pending' | 'failed'>('all')
+const pageTablePage = ref(1)
+const pageTablePageSize = ref(20)
 
 const selectedProject = computed(() =>
   projects.value.find((project) => project.id === selectedProjectId.value),
@@ -118,6 +149,27 @@ const displayedPages = computed(() => {
     return sortedPages.value
   }
   return sortedPages.value.filter((page) => page.section_no === selectedSectionNo.value)
+})
+const filteredPages = computed(() => {
+  const query = pageSearch.value.trim().toLowerCase()
+  return displayedPages.value.filter((page) => {
+    const statusMatches =
+      pageStatusFilter.value === 'all' ||
+      (pageStatusFilter.value === 'passed' && page.script_review_status === 'passed') ||
+      (pageStatusFilter.value === 'pending' &&
+        page.summary !== null &&
+        !['passed', 'failed'].includes(page.script_review_status)) ||
+      (pageStatusFilter.value === 'failed' && page.script_review_status === 'failed')
+    if (!statusMatches) return false
+    if (!query) return true
+    return [page.page_no, page.summary, page.scene, page.characters, page.dialogue]
+      .filter((value) => value !== null)
+      .some((value) => String(value).toLowerCase().includes(query))
+  })
+})
+const paginatedPages = computed(() => {
+  const start = (pageTablePage.value - 1) * pageTablePageSize.value
+  return filteredPages.value.slice(start, start + pageTablePageSize.value)
 })
 
 const taskTotalPages = computed(() => currentTask.value?.total_pages ?? totalPages.value)
@@ -171,12 +223,22 @@ const canGenerate = computed(
     selectedOutlineVersionId.value !== null &&
     isSelectedOutlineConfirmed.value &&
     !needsOutline.value &&
+    !loadingOutlineVersions.value &&
+    !loadingTasks.value &&
     !generatingBatch.value &&
     !continuingBatch.value &&
     !reviewingPages.value,
 )
 
 const generationDisabled = computed(() => !canGenerate.value)
+const streamRunning = computed(() => generatingBatch.value || continuingBatch.value || reviewingPages.value)
+const completedTask = computed(() => currentTask.value?.status === 'succeeded')
+const configurationExpanded = computed(() => !completedTask.value || showGenerationConfiguration.value)
+const runIsVisible = (context: ScriptRunContext) =>
+  selectedProjectId.value === context.projectId &&
+  selectedOutlineVersionId.value === context.outlineVersionId &&
+  selectedTaskId.value === context.taskId
+const runningElsewhere = computed(() => streamRunning.value && runContext.value !== null && !runIsVisible(runContext.value))
 const canEditScripts = computed(
   () =>
     selectedProjectId.value !== null &&
@@ -209,6 +271,14 @@ const canContinueBatch = computed(
     !continuingBatch.value &&
     !reviewingPages.value,
 )
+
+const normalizeTaskActivityStatus = (status: string): ActivityStatus => {
+  if (status === 'succeeded') return 'succeeded'
+  if (status === 'failed') return 'failed'
+  if (status === 'suspended') return 'suspended'
+  if (status === 'running') return 'running'
+  return 'pending'
+}
 
 const formatDateTime = (value: string) => {
   return formatLocalDateTime(value, locale.value, {
@@ -446,13 +516,16 @@ const eventType = (event: string): TimelineLevel => {
   return 'primary'
 }
 
-const addProgressEvent = (event: string, payload: Record<string, unknown> = {}) => {
+const eventTitle = (event: string) => {
   const titleKey = `scripts.events.${event}`
-  const title = t(titleKey) === titleKey ? event : t(titleKey)
+  return t(titleKey) === titleKey ? event : t(titleKey)
+}
+
+const addProgressEvent = (event: string, payload: Record<string, unknown> = {}) => {
 
   progressEvents.value.unshift({
     id: eventSequence.value,
-    title,
+    title: eventTitle(event),
     content: describePayload(event, payload),
     timestamp: nowLabel(),
     type: eventType(event),
@@ -461,6 +534,9 @@ const addProgressEvent = (event: string, payload: Record<string, unknown> = {}) 
 }
 
 const upsertPageInList = (page: ScriptPage) => {
+  if (page.project_id !== selectedProjectId.value || page.task_id !== selectedTaskId.value) return
+  pagesRequest += 1
+  loadingPages.value = false
   // 同一项目的不同脚本任务可以拥有相同页码，前端合并时必须以页面主键为准。
   const index = pages.value.findIndex((item) => item.id === page.id)
   if (index === -1) {
@@ -475,6 +551,9 @@ const upsertPageInList = (page: ScriptPage) => {
 }
 
 const upsertSectionInList = (section: ScriptSection) => {
+  if (section.task_id !== selectedTaskId.value) return
+  sectionsRequest += 1
+  loadingSections.value = false
   const index = sections.value.findIndex((item) => item.id === section.id)
   if (index === -1) {
     sections.value = [...sections.value, section].sort((left, right) => left.section_no - right.section_no)
@@ -484,11 +563,11 @@ const upsertSectionInList = (section: ScriptSection) => {
 }
 
 const loadProjects = async () => {
-  loadingProjects.value = true
   try {
-    projects.value = await listProjects()
+    // KeepAlive 中的工作台直接共享项目列表，新建或重命名后无需重建组件。
+    await projectContext.refreshProjects()
 
-    const queryProjectId = Number(route.query.project_id)
+    const queryProjectId = route.path === '/scripts' ? Number(route.query.project_id) : NaN
     if (Number.isFinite(queryProjectId) && projects.value.some((project) => project.id === queryProjectId)) {
       selectedProjectId.value = queryProjectId
       return
@@ -499,62 +578,96 @@ const loadProjects = async () => {
     }
   } catch {
     ElMessage.error(t('scripts.errors.loadProjects'))
-  } finally {
-    loadingProjects.value = false
   }
 }
 
+let pagesRequest = 0
+let sectionsRequest = 0
+let visualRequest = 0
+let tasksRequest = 0
+let outlineRequest = 0
+let routeSelectionRequest = 0
+let applyingRouteSelection = false
+
+const clearTaskView = () => {
+  pages.value = []
+  sections.value = []
+  scenes.value = []
+  visualCharacters.value = []
+  selectedSectionNo.value = null
+  selectedPage.value = null
+  detailVisible.value = false
+  scriptDialogVisible.value = false
+  progressEvents.value = runContext.value && runIsVisible(runContext.value) ? [...runContext.value.events] : []
+}
+
 const loadPages = async () => {
-  if (selectedTaskId.value === null) {
+  const request = ++pagesRequest
+  const projectId = selectedProjectId.value
+  const taskId = selectedTaskId.value
+  if (taskId === null) {
     pages.value = []
+    loadingPages.value = false
     return
   }
 
   loadingPages.value = true
   try {
-    pages.value = await listScriptTaskPages(selectedTaskId.value)
+    const items = await listScriptTaskPages(taskId)
+    if (request === pagesRequest && projectId === selectedProjectId.value && taskId === selectedTaskId.value) pages.value = items
   } catch {
-    ElMessage.error(t('scripts.errors.loadPages'))
+    if (request === pagesRequest && taskId === selectedTaskId.value) ElMessage.error(t('scripts.errors.loadPages'))
   } finally {
-    loadingPages.value = false
+    if (request === pagesRequest) loadingPages.value = false
   }
 }
 
 const loadSections = async () => {
-  if (selectedTaskId.value === null) {
+  const request = ++sectionsRequest
+  const projectId = selectedProjectId.value
+  const taskId = selectedTaskId.value
+  if (taskId === null) {
     sections.value = []
+    loadingSections.value = false
     return
   }
 
   loadingSections.value = true
   try {
-    sections.value = await listScriptTaskSections(selectedTaskId.value)
+    const items = await listScriptTaskSections(taskId)
+    if (request === sectionsRequest && projectId === selectedProjectId.value && taskId === selectedTaskId.value) sections.value = items
   } catch {
-    ElMessage.error(t('scripts.errors.loadSections'))
+    if (request === sectionsRequest && taskId === selectedTaskId.value) ElMessage.error(t('scripts.errors.loadSections'))
   } finally {
-    loadingSections.value = false
+    if (request === sectionsRequest) loadingSections.value = false
   }
 }
 
 const loadVisualSettings = async () => {
-  if (selectedTaskId.value === null) {
+  const request = ++visualRequest
+  const projectId = selectedProjectId.value
+  const taskId = selectedTaskId.value
+  if (taskId === null) {
     scenes.value = []
     visualCharacters.value = []
+    loadingVisualSettings.value = false
     return
   }
 
   loadingVisualSettings.value = true
   try {
     const [sceneItems, characterItems] = await Promise.all([
-      listScriptTaskScenes(selectedTaskId.value),
-      listScriptTaskCharacters(selectedTaskId.value),
+      listScriptTaskScenes(taskId),
+      listScriptTaskCharacters(taskId),
     ])
-    scenes.value = sceneItems
-    visualCharacters.value = characterItems
+    if (request === visualRequest && projectId === selectedProjectId.value && taskId === selectedTaskId.value) {
+      scenes.value = sceneItems
+      visualCharacters.value = characterItems
+    }
   } catch {
-    ElMessage.error(t('scripts.errors.loadVisualSettings'))
+    if (request === visualRequest && taskId === selectedTaskId.value) ElMessage.error(t('scripts.errors.loadVisualSettings'))
   } finally {
-    loadingVisualSettings.value = false
+    if (request === visualRequest) loadingVisualSettings.value = false
   }
 }
 
@@ -581,18 +694,26 @@ const refreshTaskStructure = () => {
 }
 
 const loadScriptTasks = async (preferredTaskId?: number | null) => {
-  if (selectedProjectId.value === null || selectedOutlineVersionId.value === null) {
+  const request = ++tasksRequest
+  const projectId = selectedProjectId.value
+  const outlineId = selectedOutlineVersionId.value
+  if (projectId === null || outlineId === null) {
     scriptTasks.value = []
     selectedTaskId.value = null
+    loadingTasks.value = false
     return
   }
 
   loadingTasks.value = true
   try {
-    scriptTasks.value = await listProjectScriptTasks(selectedProjectId.value, {
-      outlineVersionId: selectedOutlineVersionId.value,
+    const items = await listProjectScriptTasks(projectId, {
+      outlineVersionId: outlineId,
     })
-    const routeTaskId = Number(route.query.script_task_id)
+    if (request !== tasksRequest || projectId !== selectedProjectId.value || outlineId !== selectedOutlineVersionId.value) return
+    scriptTasks.value = items
+    const routeTaskId = route.path === '/scripts' && Number(route.query.project_id) === projectId ? Number(route.query.script_task_id) : NaN
+    const requestedTaskId = preferredTaskId ?? (Number.isSafeInteger(routeTaskId) && routeTaskId > 0 ? routeTaskId : null)
+    unavailableTaskId.value = requestedTaskId !== null && !items.some((task) => task.id === requestedTaskId) ? requestedTaskId : null
     const candidates = [
       preferredTaskId,
       Number.isFinite(routeTaskId) ? routeTaskId : null,
@@ -600,39 +721,43 @@ const loadScriptTasks = async (preferredTaskId?: number | null) => {
       scriptTasks.value[0]?.id ?? null,
     ]
     selectedTaskId.value =
-      candidates.find(
+      unavailableTaskId.value !== null || route.query.activity_legacy === '1' && preferredTaskId == null ? null : candidates.find(
         (taskId) => taskId !== null && scriptTasks.value.some((task) => task.id === taskId),
       ) ?? null
   } catch {
+    if (request !== tasksRequest || projectId !== selectedProjectId.value || outlineId !== selectedOutlineVersionId.value) return
     ElMessage.error(t('scripts.errors.loadTasks'))
     scriptTasks.value = []
     selectedTaskId.value = null
   } finally {
-    loadingTasks.value = false
+    if (request === tasksRequest) loadingTasks.value = false
   }
 }
 
 const syncProjectQuery = () => {
-  if (selectedProjectId.value === null) {
+  // KeepAlive 在离页后仍响应共享项目变化，不能因此把用户导航回脚本页。
+  if (!workspaceActive.value || route.path !== '/scripts' || applyingRouteSelection || selectedProjectId.value === null) {
     return
   }
 
-  router.replace({
-    path: '/scripts',
-    query: {
+  const query = {
       project_id: String(selectedProjectId.value),
       ...(selectedOutlineVersionId.value !== null
         ? { outline_version_id: String(selectedOutlineVersionId.value) }
         : {}),
-      ...(selectedTaskId.value !== null ? { script_task_id: String(selectedTaskId.value) } : {}),
-    },
-  })
+      ...(selectedTaskId.value !== null || unavailableTaskId.value !== null ? { script_task_id: String(selectedTaskId.value ?? unavailableTaskId.value) } : {}),
+      ...(route.query.activity_legacy === '1' && selectedTaskId.value === null ? { activity_legacy: '1' } : {}),
+  }
+  if (Object.keys(route.query).length === Object.keys(query).length && Object.entries(query).every(([key, value]) => route.query[key] === value)) return
+  void router.replace({ path: '/scripts', query })
 }
 
 const loadOutlineVersions = async (projectId: number) => {
+  const request = ++outlineRequest
   loadingOutlineVersions.value = true
   try {
     const session = await resolveOutlineSession(projectId)
+    if (request !== outlineRequest || projectId !== selectedProjectId.value) return
     outlineVersions.value = session.outline_versions
     const queryOutlineVersionId = Number(route.query.outline_version_id)
     const queryVersion = outlineVersions.value.find(
@@ -647,12 +772,13 @@ const loadOutlineVersions = async (projectId: number) => {
 
     needsOutline.value = outlineVersions.value.length === 0
   } catch {
+    if (request !== outlineRequest || projectId !== selectedProjectId.value) return
     outlineVersions.value = []
     selectedOutlineVersionId.value = null
     needsOutline.value = true
     ElMessage.error(t('scripts.errors.loadOutlineVersions'))
   } finally {
-    loadingOutlineVersions.value = false
+    if (request === outlineRequest) loadingOutlineVersions.value = false
   }
 }
 
@@ -696,6 +822,91 @@ const validateBatchGenerationInput = () => {
   return true
 }
 
+const updateRunActivity = (context: ScriptRunContext) => {
+  if (context.taskId === null) return
+  activityCenter.upsertActivity({
+    id: `script-${context.taskId}`,
+    kind: 'script',
+    label: `#${context.taskId} · ${context.completedPageIds.size}/${context.totalPages}`,
+    status: context.status,
+    progress: Math.min(100, context.completedPageIds.size / Math.max(1, context.totalPages) * 100),
+    route: `/scripts?project_id=${context.projectId}&script_task_id=${context.taskId}`,
+    projectId: context.projectId,
+    scriptTaskId: context.taskId,
+  })
+}
+
+const startRun = (taskId: number | null): ScriptRunContext => {
+  const context: ScriptRunContext = {
+    projectId: selectedProjectId.value!,
+    outlineVersionId: selectedOutlineVersionId.value,
+    totalPages: taskId === null ? totalPages.value : taskTotalPages.value,
+    taskId,
+    status: 'running',
+    completedPageIds: new Set(taskId === null ? [] : pages.value.filter((page) => page.script_review_status === 'passed').map((page) => page.id)),
+    events: [],
+  }
+  runContext.value = context
+  progressEvents.value = []
+  updateRunActivity(context)
+  return context
+}
+
+/** 先更新运行任务本身，再判断是否能更新当前浏览中的批次。 */
+const acceptRunEvent = (context: ScriptRunContext, event: string, payload: Record<string, unknown>) => {
+  if (runContext.value !== context) return false
+  if (event === 'task') {
+    const wasVisible = runIsVisible(context)
+    const taskId = Number(payload.task_id)
+    if (Number.isInteger(taskId) && taskId > 0) {
+      context.taskId = taskId
+      if (wasVisible) {
+        selectedTaskId.value = taskId
+        void loadScriptTasks(taskId)
+      }
+    }
+  }
+  const page = payload.page as ScriptPage | undefined
+  const receivedPages = Array.isArray(payload.pages) ? payload.pages as ScriptPage[] : page ? [page] : []
+  for (const item of receivedPages) {
+    if (item.project_id === context.projectId && item.task_id === context.taskId && item.script_review_status === 'passed') context.completedPageIds.add(item.id)
+  }
+  if (event === 'done') context.status = 'succeeded'
+  if (event === 'suspended') context.status = 'suspended'
+  const entry: ProgressEvent = {
+    id: eventSequence.value++,
+    title: eventTitle(event),
+    content: describePayload(event, payload),
+    timestamp: nowLabel(),
+    type: eventType(event),
+  }
+  context.events.unshift(entry)
+  updateRunActivity(context)
+  if (!runIsVisible(context)) return false
+  progressEvents.value = [...context.events]
+  return true
+}
+
+const runFailed = (context: ScriptRunContext, error: unknown, fallback: string) => {
+  if (runContext.value !== context) return
+  context.status = 'failed'
+  updateRunActivity(context)
+  if (runIsVisible(context)) handleGenerationError(error, fallback)
+}
+
+const refreshFinishedRun = async (context: ScriptRunContext) => {
+  if (context.taskId !== null) {
+    // 即使用户正在别的项目中浏览，也按捕获的项目读取真实终态并刷新任务中心。
+    const items = await listProjectScriptTasks(context.projectId).catch(() => [])
+    const task = items.find((item) => item.id === context.taskId)
+    if (task) context.status = normalizeTaskActivityStatus(task.status)
+    updateRunActivity(context)
+  }
+  if (!runIsVisible(context)) return
+  await loadScriptTasks(context.taskId)
+  if (runIsVisible(context)) await Promise.all([loadPages(), loadSections(), loadVisualSettings()])
+}
+
 const generateBatch = async () => {
   if (
     !validateBatchGenerationInput() ||
@@ -708,7 +919,6 @@ const generateBatch = async () => {
   generatingBatch.value = true
   needsOutline.value = false
   // 批量生成永远创建新任务；先清空旧任务视图，避免已有任务的页面/分段被误认为本轮结果。
-  currentTaskId.value = null
   selectedTaskId.value = null
   selectedSectionNo.value = null
   pages.value = []
@@ -717,27 +927,21 @@ const generateBatch = async () => {
   visualCharacters.value = []
   selectedPage.value = null
   detailVisible.value = false
-  addProgressEvent('phase', { message: t('scripts.events.batchStarted') })
+  const context = startRun(null)
+  acceptRunEvent(context, 'phase', { message: t('scripts.events.batchStarted') })
+  const requirement = userRequirement.value.trim() || undefined
 
   try {
     await streamBatchScriptGeneration(
       {
-        project_id: selectedProjectId.value,
-        total_pages: totalPages.value,
-        outline_version_id: selectedOutlineVersionId.value,
-        user_requirement: userRequirement.value.trim() || undefined,
+        project_id: context.projectId,
+        total_pages: context.totalPages,
+        outline_version_id: context.outlineVersionId ?? undefined,
+        user_requirement: requirement,
       },
       {
         onEvent: (event, payload) => {
-          addProgressEvent(event, payload)
-          if (event === 'task') {
-            const taskId = Number(payload.task_id)
-            currentTaskId.value = Number.isFinite(taskId) ? taskId : null
-            if (currentTaskId.value !== null) {
-              selectedTaskId.value = currentTaskId.value
-              void loadScriptTasks(currentTaskId.value)
-            }
-          }
+          if (!acceptRunEvent(context, event, payload)) return
           if (event === 'page') {
             const page = payload.page as ScriptPage | undefined
             if (page !== undefined) {
@@ -746,7 +950,8 @@ const generateBatch = async () => {
           }
           if (event === 'section_plan') {
             if (Array.isArray(payload.sections)) {
-              sections.value = payload.sections as ScriptSection[]
+              sectionsRequest += 1
+              sections.value = (payload.sections as ScriptSection[]).filter((section) => section.task_id === context.taskId)
             }
             refreshTaskStructure()
           }
@@ -766,28 +971,23 @@ const generateBatch = async () => {
             refreshTaskStructure()
           }
           if (event === 'done') {
-            void loadScriptTasks(currentTaskId.value)
-            void loadPages()
-            refreshTaskStructure()
             ElMessage.success(t('scripts.messages.batchSuccess'))
           }
           if (event === 'suspended') {
-            generatingBatch.value = false
-            suspendingBatch.value = false
             ElMessage.warning(t('scripts.messages.batchSuspended'))
           }
         },
         onError: (error) => {
-          handleGenerationError(error, t('scripts.errors.batchFailed'))
+          runFailed(context, error, t('scripts.errors.batchFailed'))
         },
       },
     )
   } catch (error) {
-    handleGenerationError(error, t('scripts.errors.batchFailed'))
+    runFailed(context, error, t('scripts.errors.batchFailed'))
   } finally {
     generatingBatch.value = false
     suspendingBatch.value = false
-    void loadScriptTasks(currentTaskId.value ?? selectedTaskId.value)
+    await refreshFinishedRun(context)
   }
 }
 
@@ -798,21 +998,23 @@ const continueBatch = async () => {
   }
 
   continuingBatch.value = true
-  currentTaskId.value = selectedTaskId.value
-  addProgressEvent('phase', { code: 'script.continue.started', task_id: selectedTaskId.value })
+  const context = startRun(selectedTaskId.value)
+  acceptRunEvent(context, 'phase', { code: 'script.continue.started', task_id: context.taskId })
+  const requirement = userRequirement.value.trim() || undefined
 
   try {
     await streamContinueScriptGeneration(
-      selectedTaskId.value,
+      context.taskId!,
       {
-        user_requirement: userRequirement.value.trim() || undefined,
+        user_requirement: requirement,
       },
       {
         onEvent: (event, payload) => {
-          addProgressEvent(event, payload)
+          if (!acceptRunEvent(context, event, payload)) return
           if (event === 'section_plan') {
             if (Array.isArray(payload.sections)) {
-              sections.value = payload.sections as ScriptSection[]
+              sectionsRequest += 1
+              sections.value = (payload.sections as ScriptSection[]).filter((section) => section.task_id === context.taskId)
             }
             refreshTaskStructure()
           }
@@ -832,29 +1034,23 @@ const continueBatch = async () => {
             refreshTaskStructure()
           }
           if (event === 'done') {
-            void loadScriptTasks(selectedTaskId.value)
-            void loadPages()
-            refreshTaskStructure()
             ElMessage.success(t('scripts.messages.continueSuccess'))
           }
           if (event === 'suspended') {
-            continuingBatch.value = false
-            suspendingBatch.value = false
-            void loadScriptTasks(selectedTaskId.value)
             ElMessage.warning(t('scripts.messages.batchSuspended'))
           }
         },
         onError: (error) => {
-          handleGenerationError(error, t('scripts.errors.continueFailed'))
+          runFailed(context, error, t('scripts.errors.continueFailed'))
         },
       },
     )
   } catch (error) {
-    handleGenerationError(error, t('scripts.errors.continueFailed'))
+    runFailed(context, error, t('scripts.errors.continueFailed'))
   } finally {
     continuingBatch.value = false
     suspendingBatch.value = false
-    void loadScriptTasks(selectedTaskId.value)
+    await refreshFinishedRun(context)
   }
 }
 
@@ -863,6 +1059,8 @@ const reviewPendingPages = async () => {
     ElMessage.warning(t('scripts.errors.noPagesToReview'))
     return
   }
+  const taskId = selectedTaskId.value
+  const projectId = selectedProjectId.value
 
   try {
     await ElMessageBox.confirm(
@@ -881,15 +1079,16 @@ const reviewPendingPages = async () => {
     throw error
   }
 
+  if (taskId !== selectedTaskId.value || projectId !== selectedProjectId.value || !canReviewPages.value) return
   reviewingPages.value = true
-  const taskId = selectedTaskId.value
+  const context = startRun(taskId)
   try {
     await streamReviewScriptPages(
       taskId,
       {},
       {
         onEvent: (event, payload) => {
-          addProgressEvent(event, payload)
+          if (!acceptRunEvent(context, event, payload)) return
           if (event === 'page') {
             const page = payload.page as ScriptPage | undefined
             if (page !== undefined) {
@@ -917,20 +1116,20 @@ const reviewPendingPages = async () => {
           }
         },
         onError: (error) => {
-          handleGenerationError(error, t('scripts.errors.reviewFailed'))
+          runFailed(context, error, t('scripts.errors.reviewFailed'))
         },
       },
     )
   } catch (error) {
-    handleGenerationError(error, t('scripts.errors.reviewFailed'))
+    runFailed(context, error, t('scripts.errors.reviewFailed'))
   } finally {
     reviewingPages.value = false
-    void loadPages()
+    await refreshFinishedRun(context)
   }
 }
 
 const suspendBatch = async () => {
-  const taskId = currentTaskId.value ?? selectedTaskId.value
+  const taskId = streamRunning.value ? runContext.value?.taskId ?? null : currentTask.value?.status === 'running' ? currentTask.value.id : null
   if (taskId === null) {
     ElMessage.warning(t('scripts.errors.noCurrentBatchTask'))
     return
@@ -944,6 +1143,19 @@ const suspendBatch = async () => {
     suspendingBatch.value = false
     ElMessage.error(t('scripts.errors.suspendFailed'))
   }
+}
+
+const returnToRunningTask = () => {
+  const context = runContext.value
+  if (!context) return
+  void router.push({
+    path: '/scripts',
+    query: {
+      project_id: String(context.projectId),
+      ...(context.outlineVersionId !== null ? { outline_version_id: String(context.outlineVersionId) } : {}),
+      ...(context.taskId !== null ? { script_task_id: String(context.taskId) } : {}),
+    },
+  })
 }
 
 const openDetail = (page: ScriptPage) => {
@@ -983,23 +1195,30 @@ const saveManualScript = async () => {
     return
   }
 
+  const projectId = selectedProjectId.value
+  const taskId = selectedTaskId.value
+  const pageNo = scriptFormPageNo.value
+  const mode = scriptDialogMode.value
+  const payload = buildScriptPayload()
   savingScript.value = true
   try {
     const page =
-      scriptDialogMode.value === 'create'
-        ? await createPageScript(selectedProjectId.value, {
-            page_no: scriptFormPageNo.value,
-            task_id: selectedTaskId.value,
-            ...buildScriptPayload(),
+      mode === 'create'
+        ? await createPageScript(projectId, {
+            page_no: pageNo,
+            task_id: taskId,
+            ...payload,
           })
-        : await updatePageScript(selectedProjectId.value, scriptFormPageNo.value, {
-            task_id: selectedTaskId.value,
-            ...buildScriptPayload(),
+        : await updatePageScript(projectId, pageNo, {
+            task_id: taskId,
+            ...payload,
           })
     upsertPageInList(page)
-    await loadSections()
-    scriptDialogVisible.value = false
-    ElMessage.success(t('scripts.messages.scriptSaved'))
+    if (projectId === selectedProjectId.value && taskId === selectedTaskId.value) {
+      await loadSections()
+      scriptDialogVisible.value = false
+      ElMessage.success(t('scripts.messages.scriptSaved'))
+    }
   } catch {
     ElMessage.error(t('scripts.errors.saveScriptFailed'))
   } finally {
@@ -1011,6 +1230,8 @@ const clearManualScript = async (page: ScriptPage) => {
   if (selectedProjectId.value === null) {
     return
   }
+  const projectId = page.project_id
+  const taskId = page.task_id
 
   try {
     await ElMessageBox.confirm(
@@ -1022,10 +1243,12 @@ const clearManualScript = async (page: ScriptPage) => {
         cancelButtonText: t('projects.cancel'),
       },
     )
-    const nextPage = await clearPageScript(selectedProjectId.value, page.page_no, selectedTaskId.value ?? undefined)
+    const nextPage = await clearPageScript(projectId, page.page_no, taskId ?? undefined)
     upsertPageInList(nextPage)
-    await loadSections()
-    ElMessage.success(t('scripts.messages.scriptCleared'))
+    if (projectId === selectedProjectId.value && taskId === selectedTaskId.value) {
+      await loadSections()
+      ElMessage.success(t('scripts.messages.scriptCleared'))
+    }
   } catch (error) {
     if (error !== 'cancel' && error !== 'close') {
       ElMessage.error(t('scripts.errors.clearScriptFailed'))
@@ -1038,6 +1261,7 @@ const deleteAllScripts = async () => {
     ElMessage.warning(t('scripts.errors.selectProject'))
     return
   }
+  const projectId = selectedProjectId.value
 
   try {
     await ElMessageBox.confirm(
@@ -1049,12 +1273,14 @@ const deleteAllScripts = async () => {
         cancelButtonText: t('projects.cancel'),
       },
     )
-    await deleteAllProjectPages(selectedProjectId.value)
-    pages.value = []
-    await loadSections()
-    selectedPage.value = null
-    detailVisible.value = false
-    ElMessage.success(t('scripts.messages.allScriptsDeleted'))
+    await deleteAllProjectPages(projectId)
+    if (projectId === selectedProjectId.value) {
+      pages.value = []
+      await loadSections()
+      selectedPage.value = null
+      detailVisible.value = false
+      ElMessage.success(t('scripts.messages.allScriptsDeleted'))
+    }
   } catch (error) {
     if (error !== 'cancel' && error !== 'close') {
       ElMessage.error(t('scripts.errors.deleteAllScriptsFailed'))
@@ -1080,6 +1306,7 @@ const deleteCurrentTaskSections = async () => {
       },
     )
     await deleteScriptTaskSections(taskId)
+    if (taskId !== selectedTaskId.value) return
     pages.value = []
     sections.value = []
     scenes.value = []
@@ -1112,50 +1339,92 @@ const goOutline = () => {
   })
 }
 
-watch(selectedProjectId, async (projectId) => {
-  needsOutline.value = false
-  if (projectId === null) {
-    pages.value = []
-    sections.value = []
-    scenes.value = []
-    visualCharacters.value = []
-    scriptTasks.value = []
-    outlineVersions.value = []
+const loadTaskView = () => Promise.all([loadSections(), loadVisualSettings(), loadPages()])
+
+/** 深链接先解析所属大纲，再选择批次；同路由导航与历史返回采用同一入口。 */
+const applyRouteSelection = async () => {
+  if (route.path !== '/scripts') return
+  const projectId = Number(route.query.project_id) || selectedProjectId.value
+  if (projectId === null || !projects.value.some((project) => project.id === projectId)) return
+  const taskId = Number(route.query.script_task_id) || null
+  const outlineId = Number(route.query.outline_version_id) || null
+  const legacy = route.query.activity_legacy === '1'
+  if (projectId === selectedProjectId.value && (!legacy || selectedTaskId.value === null) && (!taskId || taskId === selectedTaskId.value) && (!outlineId || outlineId === selectedOutlineVersionId.value) && outlineVersions.value.length > 0) return
+  const request = ++routeSelectionRequest
+  applyingRouteSelection = true
+  try {
+    selectedProjectId.value = projectId
     selectedOutlineVersionId.value = null
     selectedTaskId.value = null
-    currentTaskId.value = null
-    return
+    scriptTasks.value = []
+    clearTaskView()
+    await loadOutlineVersions(projectId)
+    if (request !== routeSelectionRequest || selectedProjectId.value !== projectId) return
+    if (taskId !== null) {
+      const projectTasks = await listProjectScriptTasks(projectId)
+      if (request !== routeSelectionRequest || selectedProjectId.value !== projectId) return
+      const target = projectTasks.find((task) => task.id === taskId)
+      if (target?.outline_version_id !== null && target?.outline_version_id !== undefined) selectedOutlineVersionId.value = target.outline_version_id
+    }
+    await loadScriptTasks(taskId)
+    if (request !== routeSelectionRequest || selectedProjectId.value !== projectId) return
+    const context = runContext.value
+    if (streamRunning.value && context?.taskId === null && context.projectId === projectId && context.outlineVersionId === selectedOutlineVersionId.value) selectedTaskId.value = null
+    await nextTick()
+    if (request !== routeSelectionRequest) return
+    clearTaskView()
+    await loadTaskView()
+  } catch (error) {
+    if (request === routeSelectionRequest) ElMessage.error(apiErrorMessage(error, t, t('scripts.errors.loadTasks')))
+  } finally {
+    if (request === routeSelectionRequest) {
+      applyingRouteSelection = false
+      syncProjectQuery()
+    }
   }
+}
 
+watch(selectedProjectId, async (projectId) => {
+  if (applyingRouteSelection) return
+  const request = ++routeSelectionRequest
+  needsOutline.value = false
   selectedOutlineVersionId.value = null
   selectedTaskId.value = null
-  currentTaskId.value = null
+  unavailableTaskId.value = null
+  scriptTasks.value = []
+  outlineVersions.value = []
+  clearTaskView()
+  if (projectId === null) return
   await loadOutlineVersions(projectId)
+  if (request !== routeSelectionRequest || projectId !== selectedProjectId.value) return
   await loadScriptTasks()
-  syncProjectQuery()
+  if (request === routeSelectionRequest) syncProjectQuery()
 })
 
 watch(selectedOutlineVersionId, async () => {
+  if (applyingRouteSelection) return
+  const projectId = selectedProjectId.value
+  const outlineId = selectedOutlineVersionId.value
   selectedTaskId.value = null
-  selectedSectionNo.value = null
-  pages.value = []
-  sections.value = []
-  scenes.value = []
-  visualCharacters.value = []
+  clearTaskView()
   await loadScriptTasks()
-  syncProjectQuery()
+  if (projectId === selectedProjectId.value && outlineId === selectedOutlineVersionId.value) syncProjectQuery()
 })
 
-watch(selectedTaskId, async (taskId) => {
-  currentTaskId.value = taskId
-  selectedSectionNo.value = null
-  if (currentTask.value !== null) {
-    totalPages.value = currentTask.value.total_pages
-  }
-  await loadSections()
-  await loadVisualSettings()
-  await loadPages()
-  syncProjectQuery()
+watch(selectedTaskId, async () => {
+  if (applyingRouteSelection) return
+  const taskId = selectedTaskId.value
+  if (taskId !== null) unavailableTaskId.value = null
+  const projectId = selectedProjectId.value
+  clearTaskView()
+  showGenerationConfiguration.value = false
+  if (currentTask.value !== null) totalPages.value = currentTask.value.total_pages
+  await loadTaskView()
+  if (projectId === selectedProjectId.value && taskId === selectedTaskId.value) syncProjectQuery()
+})
+
+watch(() => [route.path, route.query.project_id, route.query.script_task_id, route.query.outline_version_id, route.query.activity_legacy], () => {
+  if (route.path === '/scripts') void applyRouteSelection()
 })
 
 watch(groupedVisualCharacters, (groups) => {
@@ -1170,27 +1439,56 @@ watch(progressEvents, async () => {
   await nextTick()
 })
 
+watch([pageSearch, pageStatusFilter, selectedSectionNo], () => {
+  pageTablePage.value = 1
+  localStorage.setItem('comaic-script-page-search', pageSearch.value)
+})
+
+watch(activeScriptTab, (value) => localStorage.setItem('comaic-script-workspace-tab', value))
+
+watch(
+  [currentTask, completionPercentage],
+  ([task]) => {
+    if (!task) return
+    if (streamRunning.value && runContext.value?.taskId === task.id) {
+      updateRunActivity(runContext.value)
+      return
+    }
+    activityCenter.upsertActivity({
+      id: `script-${task.id}`,
+      kind: 'script',
+      label: `#${task.id} · ${completedPageCount.value}/${taskTotalPages.value}`,
+      status: normalizeTaskActivityStatus(task.status),
+      progress: completionPercentage.value,
+      route: `/scripts?project_id=${task.project_id}&script_task_id=${task.id}`,
+      projectId: task.project_id,
+      scriptTaskId: task.id,
+      updatedAt: task.updated_at,
+    })
+  },
+  { immediate: true },
+)
+
 onMounted(async () => {
-  const previousProjectId = selectedProjectId.value
   await loadProjects()
-  if (selectedProjectId.value !== null && selectedProjectId.value === previousProjectId) {
-    await loadOutlineVersions(selectedProjectId.value)
-    await loadScriptTasks()
-    syncProjectQuery()
-  }
+  await applyRouteSelection()
 })
 
 onActivated(async () => {
-  // 从其它页面切回脚本页时，SSE 内存状态仍在；这里额外刷新页面列表，兜底补齐隐藏期间已落库的脚本。
-  if (selectedTaskId.value !== null) {
-    await loadSections()
-    await loadPages()
-  }
+  workspaceActive.value = true
+  await applyRouteSelection()
+  // 返回时从数据库补齐隐藏期间的页面，运行连接和任务上下文仍由 KeepAlive 保存。
+  if (selectedTaskId.value !== null) await loadTaskView()
+})
+
+onDeactivated(() => {
+  workspaceActive.value = false
 })
 </script>
 
 <template>
   <section class="script-page">
+    <el-alert v-if="unavailableTaskId !== null" :title="t('activityCenter.targetUnavailable')" type="warning" show-icon :closable="false" />
     <el-alert
       v-if="needsOutline"
       class="script-page__alert"
@@ -1207,53 +1505,8 @@ onActivated(async () => {
       </template>
     </el-alert>
 
-    <section v-if="currentTask !== null" class="panel script-task-progress">
-      <div class="script-task-progress__meta">
-        <div>
-          <strong>{{ t('scripts.taskProgress.title') }}</strong>
-          <span>
-            {{
-              t('scripts.taskProgress.completed', {
-                completed: String(completedPageCount),
-                total: String(taskTotalPages),
-              })
-            }}
-          </span>
-        </div>
-        <el-tag effect="light">{{ taskStatusLabel(currentTask.status) }}</el-tag>
-      </div>
-      <el-progress :percentage="completionPercentage" :stroke-width="10" />
-    </section>
-
-    <div class="script-workspace">
-      <div class="script-sidebar">
-        <section class="panel script-config">
-          <div class="panel__heading">
-            <el-icon><EditPen /></el-icon>
-            <div>
-              <h2>{{ t('scripts.config.title') }}</h2>
-              <p>{{ t('scripts.config.description') }}</p>
-            </div>
-          </div>
-
-          <el-form label-position="top" class="script-config__form">
-            <el-form-item :label="t('scripts.config.project')">
-              <el-select
-                v-model="selectedProjectId"
-                :loading="loadingProjects"
-                :placeholder="t('scripts.config.projectPlaceholder')"
-                filterable
-                class="script-config__control"
-              >
-                <el-option
-                  v-for="project in projects"
-                  :key="project.id"
-                  :label="project.title"
-                  :value="project.id"
-                />
-              </el-select>
-            </el-form-item>
-
+    <section class="panel script-context">
+      <el-form label-position="top" class="script-context__form">
             <el-form-item :label="t('scripts.config.outlineVersion')">
               <el-select
                 v-model="selectedOutlineVersionId"
@@ -1302,6 +1555,59 @@ onActivated(async () => {
               </p>
             </el-form-item>
 
+      </el-form>
+      <div v-if="currentTask" class="script-context__actions">
+        <span>{{ t('ux.currentBatch') }} #{{ currentTask.id }}</span>
+        <el-tag effect="light">{{ taskStatusLabel(currentTask.status) }}</el-tag>
+        <el-button
+          v-if="completedTask"
+          type="primary"
+          @click="router.push({ path: '/visual-bible', query: { project_id: String(selectedProjectId), script_task_id: String(selectedTaskId) } })"
+        >{{ t('ux.nextStep') }} · {{ t('routeTitles.visualBible') }}</el-button>
+      </div>
+    </section>
+
+    <section v-if="currentTask !== null" class="panel script-task-progress">
+      <div class="script-task-progress__meta">
+        <div>
+          <strong>{{ t('scripts.taskProgress.title') }}</strong>
+          <span>
+            {{
+              t('scripts.taskProgress.completed', {
+                completed: String(completedPageCount),
+                total: String(taskTotalPages),
+              })
+            }}
+          </span>
+        </div>
+        <el-tag effect="light">{{ taskStatusLabel(currentTask.status) }}</el-tag>
+      </div>
+      <el-progress :percentage="completionPercentage" :stroke-width="10" />
+    </section>
+
+    <el-alert v-if="runningElsewhere" type="info" :closable="false" show-icon>
+      <template #title>{{ t('scripts.taskStatus.running') }} · {{ t('ux.currentBatch') }} #{{ runContext?.taskId ?? '…' }}</template>
+      <el-button link type="primary" @click="returnToRunningTask">{{ t('scripts.actions.viewDetail') }}</el-button>
+      <el-button v-if="!reviewingPages" link type="warning" :loading="suspendingBatch" :disabled="runContext?.taskId == null || suspendingBatch" @click="suspendBatch">{{ t('scripts.actions.suspendBatch') }}</el-button>
+    </el-alert>
+
+    <div class="script-workspace" :class="{ 'script-workspace--completed': completedTask }">
+      <div class="script-sidebar">
+        <section class="panel script-config">
+          <div class="panel__heading">
+            <el-icon><EditPen /></el-icon>
+            <div>
+              <h2>{{ t('scripts.config.title') }}</h2>
+              <p>{{ t('scripts.config.description') }}</p>
+            </div>
+          </div>
+
+          <div v-if="!configurationExpanded" class="script-config__summary">
+            <strong>{{ t('ux.currentBatch') }} #{{ currentTask?.id }}</strong>
+            <span>{{ t('scripts.taskProgress.completed', { completed: String(completedPageCount), total: String(taskTotalPages) }) }}</span>
+            <el-button link type="primary" @click="showGenerationConfiguration = true">{{ t('ux.showConfiguration') }}</el-button>
+          </div>
+          <el-form v-show="configurationExpanded" label-position="top" class="script-config__form">
             <el-form-item :label="t('scripts.config.totalPages')">
               <el-input-number v-model="totalPages" :min="1" :max="300" />
             </el-form-item>
@@ -1316,8 +1622,9 @@ onActivated(async () => {
             </el-form-item>
           </el-form>
 
-          <div class="script-config__actions">
+          <div v-if="configurationExpanded || pendingReviewCount > 0" class="script-config__actions">
             <el-button
+              v-if="configurationExpanded"
               class="ai-gradient-button"
               type="success"
               :icon="Tickets"
@@ -1348,11 +1655,11 @@ onActivated(async () => {
               {{ t('scripts.actions.reviewPending', { count: pendingReviewCount }) }}
             </el-button>
             <el-button
-              v-if="generatingBatch || continuingBatch"
+              v-if="(generatingBatch || continuingBatch) && !runningElsewhere || currentTask?.status === 'running' && !streamRunning"
               type="warning"
               :icon="VideoPause"
               :loading="suspendingBatch"
-              :disabled="(currentTaskId === null && selectedTaskId === null) || suspendingBatch"
+              :disabled="(streamRunning && runContext?.taskId == null) || suspendingBatch"
               @click="suspendBatch"
             >
               {{ t('scripts.actions.suspendBatch') }}
@@ -1397,6 +1704,12 @@ onActivated(async () => {
       </div>
 
       <div class="script-main">
+        <el-tabs v-model="activeScriptTab" class="workspace-tabs script-content-tabs">
+          <el-tab-pane name="pages">
+            <template #label>
+              <el-icon><Document /></el-icon>{{ t('scripts.tabs.pages') }}
+              <el-badge :value="filteredPages.length" :max="999" />
+            </template>
         <section class="panel script-sections">
           <div class="panel__heading script-sections__heading">
             <div class="panel__heading-main">
@@ -1406,20 +1719,18 @@ onActivated(async () => {
                 <p>{{ t('scripts.sections.description') }}</p>
               </div>
             </div>
-            <el-button
-              type="danger"
-              plain
-              :icon="Delete"
-              :disabled="
-                selectedTaskId === null ||
-                sections.length === 0 ||
-                generatingBatch ||
-                continuingBatch
-              "
-              @click="deleteCurrentTaskSections"
-            >
-              {{ t('scripts.actions.deleteAllSections') }}
-            </el-button>
+            <el-dropdown trigger="click">
+              <el-button :icon="MoreFilled" :aria-label="t('scripts.actions.more')" />
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item
+                    :icon="Delete"
+                    :disabled="selectedTaskId === null || sections.length === 0 || generatingBatch || continuingBatch"
+                    @click="deleteCurrentTaskSections"
+                  >{{ t('scripts.actions.deleteAllSections') }}</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
           </div>
           <div v-loading="loadingSections" class="script-sections__scroll">
             <el-empty
@@ -1464,21 +1775,58 @@ onActivated(async () => {
               <div>
                 <h2>{{ t('scripts.pages.title') }}</h2>
                 <p>
-                  {{ selectedProject?.title || t('scripts.pages.noProject') }}
+                  {{
+                    selectedProject
+                      ? t('scripts.filters.projectContext', { project: selectedProject.title })
+                      : t('scripts.pages.noProject')
+                  }}
                 </p>
               </div>
             </div>
             <el-button type="primary" :icon="Plus" :disabled="!canEditScripts" @click="openCreateScript">
               {{ t('scripts.actions.addScript') }}
             </el-button>
-            <el-button type="danger" plain :icon="Delete" :disabled="!canDeleteAllScripts" @click="deleteAllScripts">
-              {{ t('scripts.actions.deleteAllScripts') }}
-            </el-button>
+            <el-dropdown trigger="click">
+              <el-button :icon="MoreFilled" :aria-label="t('scripts.actions.more')" />
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item :icon="Delete" :disabled="!canDeleteAllScripts" @click="deleteAllScripts">
+                    {{ t('scripts.actions.deleteAllScripts') }}
+                  </el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
+          </div>
+
+          <div class="script-results__toolbar workspace-toolbar">
+            <el-input
+              v-model="pageSearch"
+              clearable
+              :prefix-icon="Search"
+              :placeholder="t('scripts.filters.search')"
+              :aria-label="t('scripts.filters.search')"
+            />
+            <el-select
+              v-model="pageStatusFilter"
+              :aria-label="t('scripts.filters.status')"
+            >
+              <el-option :label="t('scripts.filters.all')" value="all" />
+              <el-option :label="t('scripts.reviewStatus.passed')" value="passed" />
+              <el-option :label="t('scripts.filters.pending')" value="pending" />
+              <el-option :label="t('scripts.reviewStatus.failed')" value="failed" />
+            </el-select>
+            <el-tag v-if="selectedSectionNo !== null" closable @close="selectedSectionNo = null">
+              {{ t('scripts.sections.sectionNo', { sectionNo: selectedSectionNo }) }}
+            </el-tag>
+            <span class="workspace-toolbar__spacer" />
+            <span class="script-results__count">
+              {{ t('scripts.filters.resultCount', { count: filteredPages.length }) }}
+            </span>
           </div>
 
           <el-table
-            v-if="displayedPages.length > 0"
-            :data="displayedPages"
+            v-if="paginatedPages.length > 0"
+            :data="paginatedPages"
             class="script-results__table"
             height="520"
             :aria-label="t('scripts.pages.title')"
@@ -1507,7 +1855,7 @@ onActivated(async () => {
                 <span class="script-results__summary">{{ scriptSummary(row.summary) }}</span>
               </template>
             </el-table-column>
-            <el-table-column :label="t('scripts.pages.columns.actions')" width="210" fixed="right">
+            <el-table-column :label="t('scripts.pages.columns.actions')" width="200" fixed="right">
               <template #default="{ row }">
                 <el-button text type="primary" :icon="View" @click="openDetail(row)">
                   {{ t('scripts.actions.viewDetail') }}
@@ -1515,9 +1863,12 @@ onActivated(async () => {
                 <el-button text type="primary" :icon="EditPen" :disabled="!canEditScripts" @click="openEditScript(row)">
                   {{ t('projects.edit') }}
                 </el-button>
-                <el-button text type="danger" :icon="Delete" :disabled="!canEditScripts" @click="clearManualScript(row)">
-                  {{ t('scripts.actions.clearScript') }}
-                </el-button>
+                <el-dropdown trigger="click">
+                  <el-button text :icon="MoreFilled" :aria-label="t('ux.moreActions')" />
+                  <template #dropdown><el-dropdown-menu>
+                    <el-dropdown-item :icon="Delete" :disabled="!canEditScripts" @click="clearManualScript(row)">{{ t('scripts.actions.clearScript') }}</el-dropdown-item>
+                  </el-dropdown-menu></template>
+                </el-dropdown>
               </template>
             </el-table-column>
           </el-table>
@@ -1527,9 +1878,24 @@ onActivated(async () => {
             :description="t('scripts.pages.empty')"
             :image-size="108"
           />
+          <div v-if="filteredPages.length > pageTablePageSize" class="script-results__pagination">
+            <el-pagination
+              v-model:current-page="pageTablePage"
+              v-model:page-size="pageTablePageSize"
+              :total="filteredPages.length"
+              :page-sizes="[10, 20, 50]"
+              layout="total, sizes, prev, pager, next, jumper"
+              background
+            />
+          </div>
         </section>
-      </div>
+          </el-tab-pane>
 
+          <el-tab-pane name="visual">
+            <template #label>
+              <el-icon><View /></el-icon>{{ t('scripts.tabs.visual') }}
+              <el-badge :value="visualCharacters.length + scenes.length" :max="999" />
+            </template>
       <section class="panel visual-settings">
         <div class="panel__heading">
           <div class="panel__heading-main">
@@ -1556,12 +1922,16 @@ onActivated(async () => {
               >
                 <template #title>
                   <span class="visual-character-group__title">
-                    <span>{{ group.character_key }} · {{ group.name || t('imageGeneration.emptyText') }}</span>
+                    <span>{{ group.name || t('imageGeneration.emptyText') }}</span>
                     <el-tag size="small" effect="plain">
                       {{ group.items.length }}
                     </el-tag>
                   </span>
                 </template>
+                <details class="script-technical-details">
+                  <summary>{{ t('visualBible.review.technicalDetails') }}</summary>
+                  <p>{{ t('scripts.visual.characterKeys') }} · {{ group.character_key }}</p>
+                </details>
                 <article
                   v-for="character in group.items"
                   :key="character.id"
@@ -1582,14 +1952,21 @@ onActivated(async () => {
             <el-empty v-if="scenes.length === 0" :description="t('scripts.visual.emptyScenes')" :image-size="72" />
             <template v-else>
               <article v-for="scene in scenes" :key="scene.id" class="visual-card">
-                <strong>{{ scene.scene_key }} · {{ scene.name }}</strong>
+                <strong>{{ scene.name }}</strong>
                 <p>{{ scene.environment_details }}</p>
                 <small>{{ scene.visual_anchors }}</small>
+                <details class="script-technical-details">
+                  <summary>{{ t('visualBible.review.technicalDetails') }}</summary>
+                  <p>{{ t('scripts.visual.sceneKey') }} · {{ scene.scene_key }}</p>
+                </details>
               </article>
             </template>
           </div>
         </div>
       </section>
+          </el-tab-pane>
+        </el-tabs>
+      </div>
     </div>
 
     <el-dialog
@@ -1615,14 +1992,6 @@ onActivated(async () => {
           <p>{{ selectedPage.scene }}</p>
         </section>
         <section class="script-detail__block">
-          <strong>{{ t('scripts.visual.sceneKey') }}</strong>
-          <p>{{ selectedPage.scene_key || '-' }}</p>
-        </section>
-        <section class="script-detail__block">
-          <strong>{{ t('scripts.visual.characterKeys') }}</strong>
-          <p>{{ selectedPage.character_keys.join(', ') || '-' }}</p>
-        </section>
-        <section class="script-detail__block">
           <strong>{{ t('scripts.fields.composition') }}</strong>
           <p>{{ selectedPage.composition }}</p>
         </section>
@@ -1634,6 +2003,17 @@ onActivated(async () => {
           <strong>{{ t('scripts.fields.dialogue') }}</strong>
           <p>{{ selectedPage.dialogue }}</p>
         </section>
+        <details :key="selectedPage.id" class="script-technical-details">
+          <summary>{{ t('visualBible.review.technicalDetails') }}</summary>
+          <section class="script-detail__block">
+            <strong>{{ t('scripts.visual.sceneKey') }}</strong>
+            <p>{{ selectedPage.scene_key || '-' }}</p>
+          </section>
+          <section class="script-detail__block">
+            <strong>{{ t('scripts.visual.characterKeys') }}</strong>
+            <p>{{ selectedPage.character_keys.join(', ') || '-' }}</p>
+          </section>
+        </details>
       </div>
       <el-empty v-else :description="t('scripts.pages.noScript')" :image-size="96" />
       <template #footer>
@@ -1712,9 +2092,36 @@ onActivated(async () => {
   border-radius: 8px;
 }
 
+.script-context {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 18px;
+}
+
+.script-context__form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr);
+  flex: 1;
+  min-width: 0;
+  gap: 14px;
+}
+
+.script-context__form .el-form-item {
+  min-width: 0;
+  margin-bottom: 0;
+}
+
+.script-context__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
 .script-workspace {
   display: grid;
-  grid-template-columns: minmax(280px, 0.72fr) minmax(520px, 1.55fr) minmax(300px, 0.72fr);
+  grid-template-columns: minmax(0, 1.85fr) minmax(280px, 0.65fr);
   gap: 18px;
   align-items: start;
 }
@@ -1722,18 +2129,63 @@ onActivated(async () => {
 .script-sidebar {
   display: grid;
   gap: 18px;
-  order: 1;
+  order: 2;
 }
 
 .script-main {
   display: grid;
   min-width: 0;
   gap: 18px;
+  order: 1;
+}
+
+.script-workspace--completed {
+  grid-template-columns: 1fr;
+}
+
+.script-workspace--completed .script-sidebar {
+  grid-template-columns: minmax(280px, 1fr) minmax(0, 1.6fr);
+}
+
+.script-workspace--completed .script-results {
+  order: 1;
+}
+
+.script-workspace--completed .script-sections {
   order: 2;
 }
 
-.visual-settings {
-  order: 3;
+.script-config__summary {
+  display: grid;
+  gap: 10px;
+  padding: 18px 22px;
+}
+
+.script-config__summary .el-button {
+  justify-self: start;
+}
+
+.script-config__summary span {
+  color: var(--color-muted);
+}
+
+.script-content-tabs {
+  min-width: 0;
+}
+
+.script-content-tabs :deep(.el-tabs__item) {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.script-content-tabs :deep(.el-badge__content) {
+  transform: translateY(-5px) translateX(6px) scale(0.82);
+}
+
+.script-content-tabs :deep(.el-tab-pane) {
+  display: grid;
+  gap: 18px;
 }
 
 .panel {
@@ -1804,7 +2256,7 @@ onActivated(async () => {
 
 .visual-settings__grid {
   display: grid;
-  grid-template-columns: 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px;
   padding: 18px 22px 22px;
 }
@@ -1923,8 +2375,7 @@ onActivated(async () => {
 .script-sections__scroll {
   width: 100%;
   max-width: 100%;
-  overflow-x: auto;
-  overflow-y: hidden;
+  overflow: auto;
 }
 
 .script-sections__empty {
@@ -1932,20 +2383,20 @@ onActivated(async () => {
 }
 
 .script-sections__track {
-  display: flex;
-  width: max-content;
-  max-width: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  width: 100%;
+  max-height: 390px;
   gap: 12px;
   padding: 14px 16px 18px;
 }
 
 .script-section-item {
   display: flex;
-  flex: 0 0 280px;
   flex-direction: column;
   align-items: flex-start;
   gap: 8px;
-  width: 280px;
+  width: 100%;
   min-height: 148px;
   margin: 0 0 10px;
   padding: 12px;
@@ -2016,6 +2467,32 @@ onActivated(async () => {
   width: 100%;
 }
 
+.script-results__toolbar {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--color-border);
+  background: #fbfcff;
+}
+
+.script-results__toolbar :deep(.el-input) {
+  width: min(100%, 320px);
+}
+
+.script-results__toolbar :deep(.el-select) {
+  width: 160px;
+}
+
+.script-results__count {
+  color: var(--text-soft);
+  font-size: 13px;
+}
+
+.script-results__pagination {
+  display: flex;
+  justify-content: flex-end;
+  padding: 14px 16px 18px;
+  border-top: 1px solid var(--color-border);
+}
+
 .script-results__empty {
   min-height: 480px;
 }
@@ -2054,22 +2531,38 @@ onActivated(async () => {
   white-space: pre-wrap;
 }
 
+.script-technical-details {
+  color: var(--color-muted);
+  font-size: 13px;
+}
+
+.script-technical-details summary {
+  cursor: pointer;
+}
+
+.script-technical-details .script-detail__block {
+  margin-top: 10px;
+}
+
 @media (max-width: 1320px) {
-  .script-workspace {
-    grid-template-columns: minmax(300px, 0.8fr) minmax(420px, 1.2fr);
-  }
-
-  .visual-settings {
-    grid-column: 1 / -1;
-  }
-
-  .visual-settings__grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+  .script-workspace:not(.script-workspace--completed) {
+    grid-template-columns: minmax(420px, 1.28fr) minmax(280px, 0.72fr);
   }
 }
 
-@media (max-width: 860px) {
-  .script-workspace {
+@media (max-width: 980px) {
+  .script-context {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .script-context__form {
+    grid-template-columns: 1fr;
+  }
+
+  .script-workspace,
+  .script-workspace:not(.script-workspace--completed),
+  .script-workspace--completed .script-sidebar {
     grid-template-columns: 1fr;
   }
 
@@ -2078,8 +2571,7 @@ onActivated(async () => {
   }
 
   .script-section-item {
-    flex-basis: 260px;
-    width: 260px;
+    width: 100%;
   }
 
   .script-progress__scroll {

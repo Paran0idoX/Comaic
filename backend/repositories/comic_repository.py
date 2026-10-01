@@ -21,6 +21,8 @@ from backend.models.comic import (
 )
 from backend.models.enums import (
     ComicPageStatus,
+    GenerationMode,
+    GenerationTaskKind,
     GenerationTaskStatus,
     ImageGenerationProvider,
     ImagePromptType,
@@ -30,6 +32,7 @@ from backend.models.enums import (
     ScriptGenerationMode,
     ScriptGenerationTaskStatus,
     ScriptSectionStatus,
+    SeedStrategy,
     SessionPurpose,
 )
 from backend.models.time import utc_now
@@ -1601,6 +1604,13 @@ class ComicRepository:
         batch_size: int = 1,
         comfy_prompt_id: str | None = None,
         status: GenerationTaskStatus = GenerationTaskStatus.PENDING,
+        script_task_id: int | None = None,
+        tool_preset_id: int | None = None,
+        parent_task_id: int | None = None,
+        task_kind: GenerationTaskKind = GenerationTaskKind.LEGACY,
+        generation_mode: GenerationMode | None = None,
+        seed_strategy: SeedStrategy | None = None,
+        candidate_count: int = 1,
     ) -> GenerationTask:
         """记录一次出图任务，后续可根据 comfy_prompt_id 查询任务结果。"""
 
@@ -1610,12 +1620,42 @@ class ComicRepository:
             batch_size=batch_size,
             comfy_prompt_id=comfy_prompt_id,
             status=status,
+            script_task_id=script_task_id,
+            tool_preset_id=tool_preset_id,
+            parent_task_id=parent_task_id,
+            task_kind=task_kind,
+            generation_mode=generation_mode,
+            seed_strategy=seed_strategy,
+            candidate_count=candidate_count,
             heartbeat_at=utc_now() if status == GenerationTaskStatus.RUNNING else None,
         )
         self.session.add(task)
         self.session.commit()
         self.session.refresh(task)
         return task
+
+    def list_generation_batches(self, script_task_id: int) -> list[GenerationTask]:
+        """读取脚本任务的新式图片生成批次；legacy 任务不会被误判为候选轨道。"""
+
+        return list(
+            self.session.scalars(
+                select(GenerationTask)
+                .where(
+                    GenerationTask.script_task_id == script_task_id,
+                    GenerationTask.task_kind == GenerationTaskKind.BATCH,
+                )
+                .order_by(GenerationTask.created_at.desc(), GenerationTask.id.desc())
+            )
+        )
+
+    def get_generation_batch(self, batch_task_id: int) -> GenerationTask | None:
+        """读取明确标记为 batch 的生成任务。"""
+
+        statement = select(GenerationTask).where(
+            GenerationTask.id == batch_task_id,
+            GenerationTask.task_kind == GenerationTaskKind.BATCH,
+        )
+        return self.session.scalar(statement)
 
     def get_generation_task(self, task_id: int) -> GenerationTask | None:
         """根据主键读取 ComfyUI 生成任务。"""

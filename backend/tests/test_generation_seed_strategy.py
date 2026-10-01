@@ -19,10 +19,10 @@ class FakeGenerationRepository:
         self.calls = []
 
     def list_successful_runs(
-        self, *, page_id, prompt_type, generation_mode, image_spec_id
+        self, *, page_id, prompt_type, generation_mode, image_spec_id, batch_task_id=None
     ):
         del prompt_type, generation_mode
-        self.calls.append((page_id, image_spec_id))
+        self.calls.append((page_id, image_spec_id, batch_task_id))
         return self.runs_by_page.get(page_id, [])
 
 
@@ -84,7 +84,29 @@ def test_continue_uses_successful_generation_run_slots() -> None:
     assert [index for index, _ in result[1]] == [2]
     assert result[2] == []
     assert result[1][0][1] not in {101, 201, 202}
-    assert repository.calls == [(1, 11), (2, 12)]
+    assert repository.calls == [(1, 11, None), (2, 12, None)]
+
+
+def test_continue_scopes_existing_slots_to_the_selected_batch() -> None:
+    pages = [SimpleNamespace(id=1)]
+    repository = FakeGenerationRepository(
+        {1: [SimpleNamespace(candidate_index=1, seed=101)]}
+    )
+
+    result = _service()._structured_seed_pairs(
+        pages=pages,
+        generation_repository=repository,
+        prompt_type=ImagePromptType.NATURAL_LANGUAGE,
+        generation_mode=GenerationMode.FINAL,
+        image_spec_ids_by_page={1: 11},
+        candidates_per_page=2,
+        seed_strategy=SeedStrategy.PER_PAGE,
+        continue_existing=True,
+        batch_task_id=77,
+    )
+
+    assert [index for index, _ in result[1]] == [2]
+    assert repository.calls == [(1, 11, 77)]
 
 
 def test_generation_rejects_unreviewed_requested_pages() -> None:

@@ -20,6 +20,7 @@ from backend.models.comic import (
 from backend.models.enums import (
     GenerationMode,
     GenerationRunStatus,
+    GenerationTaskKind,
     GenerationTaskStatus,
     ImageGenerationProvider,
     ImagePromptType,
@@ -33,6 +34,7 @@ from backend.repositories.generation_repository import GenerationRepository
 from backend.repositories.image_spec_repository import ImageSpecRepository
 from backend.services.image_spec_service import ImageSpecService
 from backend.services.renderer_backends import backend_for_preset
+from backend.services.reference_inputs import prepare_renderer_spec, validate_renderer_spec, frozen_preset
 from backend.services.task_runtime import RuntimeTaskType, running_task_registry
 from backend.services.workflow_compiler import (
     WorkflowBindings,
@@ -248,7 +250,7 @@ class ImageGenerationService:
             wait_timeout_seconds=wait_timeout_seconds,
             generation_mode=generation_mode,
             seed_strategy=seed_strategy,
-            continue_existing=False,
+            existing_batch_task=None,
         ):
             yield event, payload
 
@@ -263,17 +265,74 @@ class ImageGenerationService:
         generation_mode: GenerationMode = GenerationMode.PREVIEW,
         seed_strategy: SeedStrategy = SeedStrategy.PER_PAGE,
     ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
-        script_task = self._get_script_task(task_id)
+        """兼容旧入口：只继续该脚本任务最近的新式批次，不再跨历史运行拼接。"""
+
+        batches = self.repository.list_generation_batches(task_id)
+        if not batches:
+            raise ValueError(
+                "No trackable generation batch exists for this script task; start a new batch."
+            )
+        async for event, payload in self.stream_continue_for_batch(
+            batch_task_id=batches[0].id,
+            tool_preset_id=tool_preset_id,
+            poll_interval_seconds=poll_interval_seconds,
+            wait_timeout_seconds=wait_timeout_seconds,
+            candidates_per_page=candidates_per_page,
+            generation_mode=generation_mode,
+            seed_strategy=seed_strategy,
+        ):
+            yield event, payload
+
+    async def stream_continue_for_batch(
+        self,
+        *,
+        batch_task_id: int,
+        tool_preset_id: int,
+        poll_interval_seconds: float = 2.0,
+        wait_timeout_seconds: float = 600.0,
+        candidates_per_page: int = 1,
+        generation_mode: GenerationMode = GenerationMode.PREVIEW,
+        seed_strategy: SeedStrategy = SeedStrategy.PER_PAGE,
+    ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
+        """在原批次内补齐缺失页面/候选，保持候选轨道身份稳定。"""
+
+        batch_task = self.repository.get_generation_batch(batch_task_id)
+        if batch_task is None or batch_task.script_task_id is None:
+            raise AppError(
+                code="image_generation.batch_not_found",
+                status_code=404,
+                debug_message=f"Generation batch not found: {batch_task_id}",
+            )
+        if batch_task.tool_preset_id != tool_preset_id:
+            mismatch = "tool_preset_id"
+        elif batch_task.generation_mode != generation_mode:
+            mismatch = "generation_mode"
+        elif batch_task.seed_strategy != seed_strategy:
+            mismatch = "seed_strategy"
+        elif batch_task.candidate_count != candidates_per_page:
+            mismatch = "candidate_count"
+        else:
+            mismatch = None
+        if mismatch is not None:
+            raise AppError(
+                code="image_generation.batch_configuration_mismatch",
+                status_code=409,
+                params={"field": mismatch},
+                debug_message=(
+                    f"Generation batch {mismatch} cannot change during continuation."
+                ),
+            )
+        script_task = self._get_script_task(batch_task.script_task_id)
         async for event, payload in self._stream_generate_pages(
             script_task=script_task,
-            pages=self.repository.list_script_task_pages(task_id),
+            pages=self.repository.list_script_task_pages(script_task.id),
             preset=self._get_tool_preset(tool_preset_id),
             candidates_per_page=candidates_per_page,
             poll_interval_seconds=poll_interval_seconds,
             wait_timeout_seconds=wait_timeout_seconds,
             generation_mode=generation_mode,
             seed_strategy=seed_strategy,
-            continue_existing=True,
+            existing_batch_task=batch_task,
         ):
             yield event, payload
 
@@ -301,7 +360,7 @@ class ImageGenerationService:
             wait_timeout_seconds=wait_timeout_seconds,
             generation_mode=generation_mode,
             seed_strategy=seed_strategy,
-            continue_existing=False,
+            existing_batch_task=None,
         ):
             yield event, payload
 
@@ -320,20 +379,28 @@ class ImageGenerationService:
         wait_timeout_seconds: float,
         generation_mode: GenerationMode,
         seed_strategy: SeedStrategy,
-        continue_existing: bool,
+        existing_batch_task: GenerationTask | None,
     ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
         """按工具 Prompt 类型读取最新规格，并为每个候选保存完整运行记录。"""
 
-        self._ensure_pages_reviewed(pages)
+        frozen_batch = json.loads(existing_batch_task.input_snapshot_json) if existing_batch_task and existing_batch_task.input_snapshot_json else None
+        if frozen_batch and frozen_batch.get("pages"):
+            preset = frozen_preset(preset, next(iter(frozen_batch["pages"].values()))["spec"])
+            pages = [self.repository.session.get(ComicPage, int(page_id)) for page_id in frozen_batch["pages"]]
+            if any(page is None for page in pages):
+                raise AppError("image_generation.page_not_found", status_code=404)
+        else:
+            self._ensure_pages_reviewed(pages)
         self._ensure_generation_tool_ready(preset)
         generation_repository = GenerationRepository(self.repository.session)
         spec_service = ImageSpecService(ImageSpecRepository(self.repository.session))
-        current_continuity_hash = spec_service.current_continuity_source_hash(
+        current_continuity_hash = None if frozen_batch else spec_service.current_continuity_source_hash(
             script_task.id
         )
         page_specs: dict[int, ImageSpec] = {}
         for page in pages:
-            spec = generation_repository.latest_spec_for_page(
+            saved_page = (frozen_batch or {}).get("pages", {}).get(str(page.id))
+            spec = self.repository.session.get(ImageSpec, saved_page["image_spec_id"]) if saved_page else generation_repository.latest_spec_for_page(
                 page_id=page.id,
                 prompt_type=preset.prompt_type,
                 generation_mode=generation_mode,
@@ -343,12 +410,13 @@ class ImageGenerationService:
                     f"ImageSpec not found for page {page.page_no}, prompt type "
                     f"{preset.prompt_type.value}, mode {generation_mode.value}."
                 )
-            if spec.snapshot.compilation.source_hash != current_continuity_hash:
+            if not saved_page and spec.snapshot.compilation.source_hash != current_continuity_hash:
                 raise ValueError(f"ImageSpec is stale for page: {page.page_no}")
-            if spec.source_hash != spec_service.current_image_spec_source_hash(spec):
+            if not saved_page and spec.source_hash != spec_service.current_image_spec_source_hash(spec):
                 raise ValueError(f"ImageSpec is stale for page: {page.page_no}")
             page_specs[page.id] = spec
 
+        continue_existing = existing_batch_task is not None
         page_seed_pairs = self._structured_seed_pairs(
             pages=pages,
             generation_repository=generation_repository,
@@ -358,14 +426,33 @@ class ImageGenerationService:
             candidates_per_page=candidates_per_page,
             seed_strategy=seed_strategy,
             continue_existing=continue_existing,
+            batch_task_id=(existing_batch_task.id if existing_batch_task else None),
         )
+        if frozen_batch:
+            successful = {(run.page_id, run.candidate_index) for run in generation_repository.list_batch_runs(existing_batch_task.id) if run.status == GenerationRunStatus.SUCCEEDED}
+            page_seed_pairs = {int(page_id): [(int(index), int(seed)) for index, seed in saved["seeds"] if (int(page_id), int(index)) not in successful] for page_id, saved in frozen_batch["pages"].items()}
+        prepared_pages: dict[int, dict[str, Any]] = {}
+        for page in pages:
+            saved_page = (frozen_batch or {}).get("pages", {}).get(str(page.id))
+            prepared = prepare_renderer_spec(saved_page["spec"] if saved_page else json.loads(page_specs[page.id].spec_json), preset, generation_mode)
+            validate_renderer_spec(prepared, preset, generation_mode)
+            prepared_pages[page.id] = prepared
         pages_to_generate = [page for page in pages if page_seed_pairs.get(page.id)]
         batch_size = sum(len(page_seed_pairs[page.id]) for page in pages_to_generate)
-        batch_task = self.repository.create_generation_task(
+        batch_task = existing_batch_task or self.repository.create_generation_task(
             project_id=script_task.project_id,
-            page_id=pages_to_generate[0].id if len(pages_to_generate) == 1 else None,
+            page_id=pages[0].id if len(pages) == 1 else None,
             batch_size=batch_size,
+            script_task_id=script_task.id,
+            tool_preset_id=preset.id,
+            task_kind=GenerationTaskKind.BATCH,
+            generation_mode=generation_mode,
+            seed_strategy=seed_strategy,
+            candidate_count=candidates_per_page,
         )
+        if not frozen_batch:
+            batch_task.input_snapshot_json = canonical_json({"schema_version": 1, "pages": {str(page.id): {"image_spec_id": page_specs[page.id].id, "spec": prepared_pages[page.id], "seeds": page_seed_pairs[page.id]} for page in pages}})
+            self.repository.session.commit()
         batch_task = self.repository.update_generation_task(
             task_id=batch_task.id,
             status=GenerationTaskStatus.RUNNING,
@@ -416,6 +503,13 @@ class ImageGenerationService:
                     project_id=script_task.project_id,
                     page_id=page.id,
                     batch_size=len(page_seed_pairs[page.id]),
+                    script_task_id=script_task.id,
+                    tool_preset_id=preset.id,
+                    parent_task_id=batch_task.id,
+                    task_kind=GenerationTaskKind.PAGE,
+                    generation_mode=generation_mode,
+                    seed_strategy=seed_strategy,
+                    candidate_count=candidates_per_page,
                 )
                 page_task = self.repository.update_generation_task(
                     task_id=page_task.id,
@@ -437,10 +531,11 @@ class ImageGenerationService:
                         "status": page_task.status.value,
                     }
                     for candidate_index, seed in page_seed_pairs[page.id]:
-                        spec_payload = json.loads(spec.spec_json)
+                        spec_payload = prepared_pages[page.id]
                         spec_degradations = list(spec_payload.get("warnings") or [])
                         run = generation_repository.create_run(
                             generation_task_id=page_task.id,
+                            batch_task_id=batch_task.id,
                             page_id=page.id,
                             image_spec_id=spec.id,
                             tool_preset_id=preset.id,
@@ -477,6 +572,7 @@ class ImageGenerationService:
                                 workflow_hash=submission.workflow_hash,
                                 degradation_json=canonical_json(degradations),
                                 applied_spec_json=canonical_json(submission.applied_spec),
+                                resolved_assets_json=canonical_json(self._resolved_assets(submission.applied_spec)),
                             )
                             self.repository.update_generation_task(
                                 task_id=page_task.id,
@@ -523,11 +619,12 @@ class ImageGenerationService:
                                     local_path=str(local_path),
                                     seed=seed,
                                     workflow_name=preset.name,
-                                    prompt=spec.positive_prompt,
-                                    negative_prompt=spec.negative_prompt,
+                                    prompt=submission.applied_spec["prompt"]["positive"],
+                                    negative_prompt=submission.applied_spec["prompt"].get("negative", ""),
                                     sha256=sha256,
                                     width=width,
                                     height=height,
+                                    artifact_index=index,
                                 )
                                 yield "image", self._image_payload(image, page)
                             generation_repository.update_run(
@@ -630,16 +727,22 @@ class ImageGenerationService:
         candidates_per_page: int,
         seed_strategy: SeedStrategy,
         continue_existing: bool,
+        batch_task_id: int | None = None,
     ) -> dict[int, list[CandidateSeedPair]]:
         existing_by_page: dict[int, dict[int, int]] = {}
         used_seeds: set[int] = set()
         shared_seeds: dict[int, int] = {}
         for page in pages:
+            query = {
+                "page_id": page.id,
+                "prompt_type": prompt_type,
+                "generation_mode": generation_mode,
+                "image_spec_id": image_spec_ids_by_page[page.id],
+            }
+            if batch_task_id is not None:
+                query["batch_task_id"] = batch_task_id
             runs = generation_repository.list_successful_runs(
-                page_id=page.id,
-                prompt_type=prompt_type,
-                generation_mode=generation_mode,
-                image_spec_id=image_spec_ids_by_page[page.id],
+                **query,
             )
             existing_by_page[page.id] = (
                 {
@@ -680,36 +783,10 @@ class ImageGenerationService:
 
     @staticmethod
     def _resolved_assets(value: Any) -> list[dict[str, Any]]:
-        assets: dict[int, dict[str, Any]] = {}
-
-        def visit(item: Any) -> None:
-            if isinstance(item, list):
-                for child in item:
-                    visit(child)
-                return
-            if not isinstance(item, dict):
-                return
-            if (
-                isinstance(item.get("id"), int)
-                and item.get("role")
-                and item.get("storage_kind")
-            ):
-                assets[item["id"]] = {
-                    key: item.get(key)
-                    for key in (
-                        "id",
-                        "role",
-                        "storage_kind",
-                        "sha256",
-                        "version",
-                        "renderer_locator",
-                    )
-                }
-            for child in item.values():
-                visit(child)
-
-        visit(value)
-        return [assets[key] for key in sorted(assets)]
+        """真实顺序只能来自冻结输入清单，历史递归资产列表不能冒充发送记录。"""
+        if isinstance(value, dict):
+            return list((value.get("reference_inputs") or {}).get("items", []))
+        return []
 
     @staticmethod
     def _unique_random_seed(used_seeds: set[int]) -> int:
@@ -820,6 +897,10 @@ class ImageGenerationService:
             }
 
         if provider == ImageGenerationProvider.OPENAI_IMAGES_COMPATIBLE:
+            custom_fields = [field.strip() for field in (seed_field_name, negative_prompt_field_name) if field and field.strip()]
+            reserved_fields = {"model", "prompt", "n", "size", "response_format", capability_model.reference_images.image_field_name}
+            if len(custom_fields) != len(set(custom_fields)) or set(custom_fields).intersection(reserved_fields):
+                raise AppError("reference.input.configuration_invalid")
             extra_json = None
             if self._optional_text(extra_body_json):
                 extra_json = json.dumps(

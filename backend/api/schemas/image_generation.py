@@ -92,6 +92,7 @@ class ComicImageResponse(BaseModel):
     id: int
     page_id: int
     generation_run_id: int | None
+    artifact_index: int
     image_url: str | None
     local_path: str | None
     seed: int | None
@@ -161,6 +162,13 @@ class GenerationTaskResponse(BaseModel):
     id: int
     project_id: int
     page_id: int | None
+    script_task_id: int | None
+    tool_preset_id: int | None
+    parent_task_id: int | None
+    task_kind: str
+    generation_mode: str | None
+    seed_strategy: str | None
+    candidate_count: int
     comfy_prompt_id: str | None
     status: str
     batch_size: int
@@ -169,11 +177,18 @@ class GenerationTaskResponse(BaseModel):
     updated_at: datetime
 
 
+class GenerationBatchListResponse(BaseModel):
+    """脚本任务下可形成稳定候选轨道的生成批次。"""
+
+    items: list[GenerationTaskResponse]
+
+
 class GenerationRunResponse(BaseModel):
     """单候选生成溯源响应；JSON 快照保持原始结构。"""
 
     id: int
     generation_task_id: int
+    batch_task_id: int | None
     page_id: int
     image_spec_id: int
     tool_preset_id: int

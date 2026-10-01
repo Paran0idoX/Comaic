@@ -13,6 +13,7 @@ from backend.models.comic import (
     LLMConfig,
     OutfitVariant,
     PageShotPlan,
+    ReferenceSubject,
     ScriptCharacter,
     ScriptGenerationTask,
     ScriptScene,
@@ -94,6 +95,11 @@ class ImageSpecRepository:
         if approved_only:
             statement = statement.where(VisualAsset.status == ApprovalStatus.APPROVED)
         return list(self.session.scalars(statement.order_by(VisualAsset.id)))
+
+    def list_project_reference_subjects(self, project_id: int) -> list[ReferenceSubject]:
+        """只读项目场景/物品目录，供镜头规划限制可见物品 Key。"""
+        statement = select(ReferenceSubject).where(ReferenceSubject.project_id == project_id)
+        return list(self.session.scalars(statement.order_by(ReferenceSubject.entity_type, ReferenceSubject.key, ReferenceSubject.id)))
 
     def list_project_outfits(
         self,

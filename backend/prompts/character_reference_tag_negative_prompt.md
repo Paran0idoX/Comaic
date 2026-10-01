@@ -1,0 +1,1 @@
+multiple characters, duplicate, extra limbs, malformed hands, inconsistent face, inconsistent identity, changed proportions, changed colors, text, caption, watermark, logo, border, busy background, dramatic perspective, motion blur, {negative_constraints}, {style_negative}

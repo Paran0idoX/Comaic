@@ -5,9 +5,18 @@ from pydantic import BaseModel, Field, model_validator
 
 from backend.models.enums import (
     ApprovalStatus,
+    CharacterVisualType,
     VisualAssetRole,
     VisualEntityType,
 )
+
+
+class UpdateCharacterVisualTypeRequest(BaseModel):
+    visual_type: CharacterVisualType
+
+
+class CharacterVisualTypeResponse(UpdateCharacterVisualTypeRequest):
+    id: int
 
 
 class OutfitVariantRequest(BaseModel):
@@ -101,6 +110,8 @@ class PromoteImageRequest(BaseModel):
     entity_key: str | None = None
     role: VisualAssetRole
     approve: bool = False
+    reference_subject_id: int | None = Field(default=None, gt=0)
+    outfit_variant_id: int | None = Field(default=None, gt=0)
 
 
 class VisualAssetResponse(BaseModel):
@@ -109,6 +120,8 @@ class VisualAssetResponse(BaseModel):
     entity_type: VisualEntityType
     entity_id: int | None
     entity_key: str | None
+    reference_subject_id: int | None = None
+    outfit_variant_id: int | None = None
     role: VisualAssetRole
     storage_kind: str
     local_path: str | None

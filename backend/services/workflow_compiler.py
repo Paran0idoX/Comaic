@@ -5,13 +5,13 @@ from typing import Any
 
 from pydantic import BaseModel, Field, model_validator
 
-from backend.models.enums import GenerationMode, WorkflowCapability
+from backend.models.enums import GenerationMode, WorkflowCapability, ReferenceImageTransport, ReferenceImageLabelFormat
 
 
 SOURCE_PATH_RE = re.compile(
     r"^[A-Za-z_][A-Za-z0-9_]*(?:(?:\.[A-Za-z_][A-Za-z0-9_]*)|(?:\[[0-9]+\]))*$"
 )
-ALLOWED_SOURCE_ROOTS = {"prompt", "render", "subjects", "scene", "style"}
+ALLOWED_SOURCE_ROOTS = {"prompt", "render", "subjects", "scene", "style", "reference_inputs"}
 
 
 class WorkflowBinding(BaseModel):
@@ -36,21 +36,58 @@ class WorkflowBinding(BaseModel):
         return self
 
 
+class WorkflowInputTarget(BaseModel):
+    """显式声明空参考槽需要断开的消费节点，不猜测工作流图结构。"""
+
+    node_id: str = Field(min_length=1)
+    input_name: str = Field(min_length=1)
+
+
+class WorkflowReferenceSlot(WorkflowInputTarget):
+    disconnect: list[WorkflowInputTarget] = Field(default_factory=list, min_length=1)
+
+
 class WorkflowBindings(BaseModel):
     schema_version: int = 1
     bindings: list[WorkflowBinding] = Field(default_factory=list)
+    reference_slots: list[WorkflowReferenceSlot] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_unique_targets(self):
-        targets = [(item.node_id, item.input_name) for item in self.bindings]
+        targets = [(item.node_id, item.input_name) for item in [*self.bindings, *self.reference_slots]]
         if len(targets) != len(set(targets)):
             raise ValueError("Workflow bindings contain duplicate node input targets")
+        if len({item.node_id for item in self.reference_slots}) != len(self.reference_slots):
+            raise ValueError("Each ordered reference slot requires its own image loader node")
+        disconnected = [(target.node_id, target.input_name) for slot in self.reference_slots for target in slot.disconnect]
+        if len(disconnected) != len(set(disconnected)) or set(disconnected).intersection(targets):
+            raise ValueError("Reference slots contain overlapping disconnect targets")
+        return self
+
+
+class ReferenceImageConfiguration(BaseModel):
+    """工具自身的图片传输约定，与具体图片模型无关。"""
+
+    max_images: int = Field(default=0, ge=0, le=100)
+    label_format: ReferenceImageLabelFormat = ReferenceImageLabelFormat.IMAGE_N
+    requires_canvas: bool = False
+    transport: ReferenceImageTransport = ReferenceImageTransport.NONE
+    edit_endpoint_path: str | None = None
+    image_field_name: str = "image[]"
+
+    @model_validator(mode="after")
+    def validate_configuration(self):
+        if self.transport != "none" and (not self.edit_endpoint_path or not self.image_field_name.strip()):
+            raise ValueError("Image editing endpoint and image field are required")
+        if self.image_field_name in {"model", "prompt", "n", "size", "response_format"}:
+            raise ValueError("Image field must not overwrite a generation parameter")
         return self
 
 
 class WorkflowCapabilities(BaseModel):
     features: list[WorkflowCapability] = Field(default_factory=list)
     limits: dict[str, int] = Field(default_factory=dict)
+    reference_images: ReferenceImageConfiguration = Field(default_factory=ReferenceImageConfiguration)
 
     @model_validator(mode="after")
     def validate_limits(self):
@@ -83,9 +120,18 @@ class WorkflowCompiler:
                     f"Workflow node input not found: {binding.node_id}.{binding.input_name}"
                 )
             if binding.input_name not in node["inputs"]:
-                raise ValueError(
-                    f"Workflow node input not found: {binding.node_id}.{binding.input_name}"
-                )
+                raise ValueError(f"Workflow node input not found: {binding.node_id}.{binding.input_name}")
+        for slot in bindings.reference_slots:
+            for target in [slot, *slot.disconnect]:
+                node = workflow.get(target.node_id)
+                if not isinstance(node, dict) or target.input_name not in node.get("inputs", {}):
+                    raise ValueError(f"Reference slot target not found: {target.node_id}.{target.input_name}")
+                if target is not slot:
+                    connection = node["inputs"][target.input_name]
+                    if not isinstance(connection, list) or len(connection) != 2 or str(connection[0]) != slot.node_id:
+                        raise ValueError("Workflow binding reference slot consumer does not connect to its declared image loader")
+            if not {WorkflowCapability.REFERENCE_IMAGE, WorkflowCapability.IMG2IMG}.intersection(capabilities.features):
+                raise ValueError("Reference slots require capability reference_image")
         sources = {binding.source for binding in bindings.bindings}
         if "prompt.positive" not in sources:
             raise ValueError("Workflow binding prompt.positive is required.")
@@ -127,6 +173,8 @@ class WorkflowCompiler:
         applied_spec.setdefault("render", {})["seed"] = seed
         required = set(applied_spec.get("required_capabilities", []))
         available = {item.value for item in capabilities.features}
+        if bindings.reference_slots and "img2img" in available:
+            available.add("reference_image")
         missing = sorted(required - available)
         degradations = [
             {
@@ -141,6 +189,10 @@ class WorkflowCompiler:
             for binding in bindings.bindings
             if (capability := self._binding_capability(binding.source)) is not None
         )
+        if bindings.reference_slots:
+            bound_capabilities.add(WorkflowCapability.REFERENCE_IMAGE.value)
+            if "img2img" in available:
+                bound_capabilities.add(WorkflowCapability.IMG2IMG.value)
         unbound = sorted(required - bound_capabilities)
         degradations.extend(
             {
@@ -152,8 +204,11 @@ class WorkflowCompiler:
         binding_sources = {binding.source for binding in bindings.bindings}
 
         def require_prefix(prefix: str, label: str) -> None:
+            # 历史工作流可将整个 references 数组绑定为 JSON；该绑定覆盖数组内每一项。
+            collection = re.sub(r"\[\d+\]$", "", prefix)
             if not any(
-                source == prefix or source.startswith(f"{prefix}[")
+                source == prefix or source.startswith(f"{prefix}[") or source.startswith(f"{prefix}.")
+                or (collection != prefix and source == collection)
                 for source in binding_sources
             ):
                 degradations.append(
@@ -173,23 +228,21 @@ class WorkflowCompiler:
                 ("identity.references", identity.get("references", [])),
                 ("outfit.references", outfit.get("references", [])),
             ):
-                if values:
-                    require_prefix(
-                        f"subjects[{index}].{field_name}",
-                        f"subject {index} {field_name}",
-                    )
+                if values and not applied_spec.get("reference_inputs"):
+                    for reference_index in range(len(values)):
+                        require_prefix(f"subjects[{index}].{field_name}[{reference_index}]", f"subject {index} {field_name}[{reference_index}]")
             for control_name in (subject.get("controls") or {}):
                 require_prefix(
                     f"subjects[{index}].controls.{control_name}",
                     f"subject {index} {control_name} control",
                 )
             for prop_index, prop in enumerate(subject.get("props", [])):
-                if prop.get("references"):
+                if prop.get("references") and not applied_spec.get("reference_inputs"):
                     require_prefix(
                         f"subjects[{index}].props[{prop_index}].references",
                         f"subject {index} prop {prop.get('prop_key', prop_index)} references",
                     )
-            if len(subjects) > 1:
+            if "regional_condition" in required:
                 require_prefix(
                     f"subjects[{index}].shot.region",
                     f"subject {index} region",
@@ -197,11 +250,9 @@ class WorkflowCompiler:
         for owner_name in ("scene", "style"):
             owner = applied_spec.get(owner_name) or {}
             for field_name in ("references",):
-                if owner.get(field_name):
-                    require_prefix(
-                        f"{owner_name}.{field_name}",
-                        f"{owner_name} {field_name}",
-                    )
+                if owner.get(field_name) and not applied_spec.get("reference_inputs"):
+                    for reference_index in range(len(owner[field_name])):
+                        require_prefix(f"{owner_name}.{field_name}[{reference_index}]", f"{owner_name} {field_name}[{reference_index}]")
             for control_name in (owner.get("controls") or {}):
                 require_prefix(
                     f"{owner_name}.controls.{control_name}",
@@ -243,8 +294,24 @@ class WorkflowCompiler:
                 if mode == GenerationMode.FINAL:
                     raise ValueError(degradation["message"]) from exc
                 degradations.append(degradation)
+                # 缺项必须清掉示例输入；保留样例图会悄悄改变真正发送的条件。
+                compiled[binding.node_id]["inputs"].pop(binding.input_name, None)
                 continue
             compiled[binding.node_id]["inputs"][binding.input_name] = value
+        references = (applied_spec.get("reference_inputs") or {}).get("items", [])
+        if len(references) > len(bindings.reference_slots) and applied_spec.get("reference_inputs"):
+            raise ValueError("Ordered reference inputs exceed configured workflow slots")
+        for index, slot in enumerate(bindings.reference_slots):
+            if index < len(references):
+                image_name = references[index].get("renderer_name")
+                if not image_name:
+                    raise ValueError(f"Reference input {index + 1} has not been resolved")
+                compiled[slot.node_id]["inputs"][slot.input_name] = image_name
+            else:
+                for target in [slot, *slot.disconnect]:
+                    compiled[target.node_id]["inputs"].pop(target.input_name, None)
+                # 槽的loader只用于此槽，空槽移除它，避免执行残留示例图片。
+                compiled.pop(slot.node_id, None)
         return CompiledWorkflow(
             workflow=compiled,
             applied_spec=applied_spec,
@@ -254,7 +321,16 @@ class WorkflowCompiler:
     @staticmethod
     def resolve_source(value: Any, path: str) -> Any:
         """解析经过正则约束的点号/数组路径；明确禁止 eval 和完整 JSONPath。"""
+        current = WorkflowCompiler.resolve_value(value, path)
+        if isinstance(current, dict) and current.get("renderer_name"):
+            return current["renderer_name"]
+        if isinstance(current, (dict, list)):
+            return json.dumps(current, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return current
 
+    @staticmethod
+    def resolve_value(value: Any, path: str) -> Any:
+        """同一受限路径的原始值，供提交前校验本地控制图使用。"""
         if not SOURCE_PATH_RE.fullmatch(path):
             raise ValueError(f"Unsupported workflow binding source path: {path}")
         current = value
@@ -267,11 +343,6 @@ class WorkflowCompiler:
                 if not isinstance(current, list):
                     raise TypeError(path)
                 current = current[int(index)]
-        if isinstance(current, dict) and current.get("renderer_name"):
-            return current["renderer_name"]
-        if isinstance(current, (dict, list)):
-            # ComfyUI 常见节点 input 只接受标量；需要 JSON 时显式注入规范字符串。
-            return json.dumps(current, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return current
 
     @staticmethod

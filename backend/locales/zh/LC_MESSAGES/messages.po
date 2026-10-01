@@ -8,3 +8,189 @@ msgstr ""
 msgid "common.internal_error"
 msgstr "服务暂时不可用，请稍后再试。"
 
+msgid "image_generation.batch_not_found"
+msgstr "图片生成批次不存在。"
+
+msgid "image_generation.batch_configuration_mismatch"
+msgstr "继续生成时不能修改原批次的工具、模式、Seed 策略或候选数。"
+
+msgid "consistency.runtime_not_ready"
+msgstr "ViStoryBench 依赖、权重或 CUDA 尚未就绪。"
+
+msgid "consistency.threshold_invalid"
+msgstr "一致性准出阈值不合法。"
+
+msgid "consistency.batch_not_found"
+msgstr "图片生成批次不存在。"
+
+msgid "consistency.batch_legacy"
+msgstr "旧版生成记录没有可靠轨道关系，请重新生成 FINAL 批次。"
+
+msgid "consistency.final_required"
+msgstr "只有 FINAL 图片生成批次可以进行准出评估。"
+
+msgid "consistency.batch_not_complete"
+msgstr "图片生成批次尚未完成。"
+
+msgid "consistency.script_task_not_found"
+msgstr "脚本任务不存在。"
+
+msgid "consistency.script_pages_incomplete"
+msgstr "脚本任务页面不完整。"
+
+msgid "consistency.no_complete_track"
+msgstr "当前批次没有覆盖全部页面的完整候选轨道。"
+
+msgid "consistency.character_binding_missing"
+msgstr "页面角色无法回溯到大纲角色。"
+
+msgid "consistency.characters_missing"
+msgstr "脚本任务没有结构化角色绑定。"
+
+msgid "consistency.reference_missing"
+msgstr "出场角色缺少已批准的本地身份参考图。"
+
+msgid "consistency.generated_file_missing"
+msgstr "候选轨道中的本地图片不存在。"
+
+msgid "consistency.reference_file_missing"
+msgstr "角色参考图片不存在。"
+
+msgid "consistency.generated_hash_mismatch"
+msgstr "候选图片内容已发生变化。"
+
+msgid "consistency.reference_hash_mismatch"
+msgstr "角色参考图片内容已发生变化。"
+
+msgid "consistency.task_not_found"
+msgstr "一致性评估任务不存在。"
+
+msgid "consistency.track_not_found"
+msgstr "一致性候选轨道不存在。"
+
+msgid "consistency.track_not_passed"
+msgstr "只有已通过的一致性候选轨道可以采用。"
+
+msgid "consistency.result_stale"
+msgstr "一致性结果已过期，请重新评估。"
+
+msgid "consistency.comfyui_busy_timeout"
+msgstr "等待 ComfyUI 队列空闲超时。"
+
+msgid "consistency.evaluation_failed"
+msgstr "ViStoryBench 一致性评估失败。"
+
+msgid "consistency.worker_result_missing"
+msgstr "评测进程没有返回该候选轨道的结果。"
+
+msgid "consistency.runtime_interrupted"
+msgstr "服务重启导致一致性评估中断，请重新提交。"
+
+msgid "character_reference.character_not_found"
+msgstr "角色基准设定不存在。"
+
+msgid "character_reference.task_not_found"
+msgstr "参考图生成任务不存在。"
+
+msgid "character_reference.tool_not_found"
+msgstr "生图工具不存在。"
+
+msgid "character_reference.style_not_approved"
+msgstr "所选风格不存在、未确认或不属于当前项目。"
+
+msgid "character_reference.txt2img_required"
+msgstr "所选工具不支持文生图能力。"
+
+msgid "character_reference.tool_invalid"
+msgstr "所选生图工具配置不完整。"
+
+msgid "character_reference.candidate_count_invalid"
+msgstr "每类候选参考图数量必须在 1 到 4 之间。"
+
+msgid "character_reference.prompts_invalid"
+msgstr "脸部、半身和全身参考图提示词必须完整且有效。"
+
+msgid "character_reference.task_state_invalid"
+msgstr "当前任务状态不允许执行此操作。"
+
+msgid "character_reference.no_image"
+msgstr "生图工具没有返回参考图片。"
+
+msgid "character_reference.partial_failure"
+msgstr "部分参考图生成失败，可继续补全缺失图片。"
+
+msgid "character_reference.candidate_incomplete"
+msgstr "所选候选参考图尚未生成完整。"
+
+msgid "character_reference.already_approved"
+msgstr "该任务已经确认了另一组参考图。"
+
+msgid "character_reference.image_not_found"
+msgstr "候选参考图不存在。"
+
+msgid "character_reference.image_missing"
+msgstr "候选参考图文件不存在。"
+
+msgid "character_reference.invalid_image"
+msgstr "生图工具返回了无效的图片文件。"
+
+msgid "character_reference.runtime_interrupted"
+msgstr "服务重启导致参考图生成中断，可继续补全缺失图片。"
+
+msgid "reference.project_not_found"
+msgstr "当前项目不存在。"
+
+msgid "reference.subject_not_found"
+msgstr "参考素材条目不存在。"
+
+msgid "reference.subject_type_invalid"
+msgstr "请选择人物、场景或物品参考类型。"
+
+msgid "reference.subject_invalid"
+msgstr "请填写有效的素材名称和标识。"
+
+msgid "reference.subject_key_exists"
+msgstr "该素材标识已存在，请使用另一个标识。"
+
+msgid "reference.scene_not_found"
+msgstr "脚本场景不存在。"
+
+msgid "reference.owner_invalid"
+msgstr "素材归属不存在或与当前项目、类型不一致。"
+
+msgid "reference.outfit_invalid"
+msgstr "请选择当前人物未归档的造型。"
+
+msgid "reference.roles_invalid"
+msgstr "请选择当前类型下有效且不重复的参考图类别。"
+
+msgid "reference.sources_invalid"
+msgstr "输入参考图必须为当前项目已确认的素材。"
+
+msgid "reference.prompts_invalid"
+msgstr "请为每个所选类别填写有效提示词。"
+
+msgid "reference.tool_capability_missing"
+msgstr "所选工具不能应用当前输入条件，请更换工具或调整输入。"
+
+msgid "reference.input.capacity_exceeded"
+msgstr "参考图数量超过工具可接收的上限，请减少输入或更换工具。"
+
+msgid "reference.input.canvas_required"
+msgstr "该工具需要明确的编辑原图，请先选择原图。"
+
+msgid "reference.input.file_unavailable"
+msgstr "参考图原文件不可用，请重新上传或选择其它图片。"
+
+msgid "reference.input.file_changed"
+msgstr "图片原文件已改变，请重新确认图片后创建新任务。"
+
+msgid "reference.input.configuration_invalid"
+msgstr "工具的参考图输入配置不完整，请检查工具设置。"
+
+msgid "reference.auto.text_only_tool"
+msgstr "该工具未配置可用的图片输入，本轮仅使用文字生成。"
+
+msgid "reference.auto.text_only_no_face"
+msgstr "还没有已确认的脸部参考图，本轮仅使用文字生成。"
+

@@ -11,15 +11,40 @@ from backend.api.schemas.settings import (
     UpdateAppSettingsRequest,
     UpdateLLMConfigRequest,
 )
+from backend.api.schemas.consistency_evaluation import (
+    ConsistencySettingsResponse,
+    UpdateConsistencyThresholdsRequest,
+)
+from backend.evaluation.runtime import METRIC_VERSION
 from backend.i18n.errors import http_exception
 from backend.i18n.locale import request_locale
 from backend.models.comic import LLMConfig
 from backend.models.database import SessionLocal
 from backend.repositories.comic_repository import ComicRepository
+from backend.repositories.consistency_evaluation_repository import (
+    ConsistencyEvaluationRepository,
+)
+from backend.services.consistency_evaluation_service import ConsistencyEvaluationService
 from backend.services.settings_service import SettingsService
 
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
+
+
+def consistency_settings_response(
+    service: ConsistencyEvaluationService,
+) -> ConsistencySettingsResponse:
+    config = service.get_config()
+    return ConsistencySettingsResponse(
+        cids_cross_min=config.cids_cross_min,
+        cids_self_min=config.cids_self_min,
+        csd_cross_min=config.csd_cross_min,
+        csd_self_min=config.csd_self_min,
+        occm_min=config.occm_min,
+        copy_paste_max=config.copy_paste_max,
+        runtime=service.runtime_readiness(),
+        metric_version=METRIC_VERSION,
+    )
 
 
 def create_service() -> tuple:
@@ -79,6 +104,40 @@ def update_app_settings(
         raise http_exception(exc, request_locale(http_request)) from exc
     finally:
         db_session.close()
+
+
+@router.get("/consistency-evaluation", response_model=ConsistencySettingsResponse)
+def get_consistency_evaluation_settings(
+    http_request: Request,
+) -> ConsistencySettingsResponse:
+    """读取一致性准出阈值与当前 comaic 环境 readiness。"""
+
+    with SessionLocal() as db_session:
+        service = ConsistencyEvaluationService(
+            ConsistencyEvaluationRepository(db_session)
+        )
+        try:
+            return consistency_settings_response(service)
+        except Exception as exc:
+            raise http_exception(exc, request_locale(http_request)) from exc
+
+
+@router.put("/consistency-evaluation", response_model=ConsistencySettingsResponse)
+def update_consistency_evaluation_settings(
+    request: UpdateConsistencyThresholdsRequest,
+    http_request: Request,
+) -> ConsistencySettingsResponse:
+    """更新可编辑阈值；阈值变化会让旧结果不再代表当前准出配置。"""
+
+    with SessionLocal() as db_session:
+        service = ConsistencyEvaluationService(
+            ConsistencyEvaluationRepository(db_session)
+        )
+        try:
+            service.update_config(**request.model_dump())
+            return consistency_settings_response(service)
+        except Exception as exc:
+            raise http_exception(exc, request_locale(http_request)) from exc
 
 
 @router.get("/llm", response_model=LLMConfigListResponse)
