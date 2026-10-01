@@ -20,14 +20,18 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from backend.models.database import Base
 from backend.models.enums import (
     ApprovalStatus,
+    CharacterVisualType,
     ComicPageStatus,
     CompilationStatus,
+    ConsistencyEvaluationStatus,
+    ConsistencyTrackStatus,
     ContinuityEventSource,
     ContinuityEventTiming,
     ContinuityEventType,
     ContinuityTargetType,
     GenerationMode,
     GenerationRunStatus,
+    GenerationTaskKind,
     GenerationTaskStatus,
     ImageGenerationProvider,
     ImagePromptType,
@@ -282,6 +286,11 @@ class OutlineCharacter(TimestampMixin, Base):
     default_clothing: Mapped[str] = mapped_column(Text, default="")
     default_accessories: Mapped[str] = mapped_column(Text, default="")
     default_color_palette: Mapped[str] = mapped_column(Text, default="")
+    visual_type: Mapped[CharacterVisualType] = enum_column(
+        CharacterVisualType,
+        default=CharacterVisualType.STYLIZED_HUMAN,
+        index=True,
+    )
 
     outline_version: Mapped["OutlineVersion"] = relationship(back_populates="characters")
     section_characters: Mapped[list["ScriptCharacter"]] = relationship(
@@ -401,6 +410,23 @@ class SceneVisualVersion(TimestampMixin, Base):
     )
 
 
+class ReferenceSubject(TimestampMixin, Base):
+    """项目内稳定命名的场景和物品；分类固定，条目不依赖脚本批次。"""
+
+    __tablename__ = "reference_subject"
+    __table_args__ = (
+        UniqueConstraint("project_id", "entity_type", "key", name="uq_reference_subject_project_type_key"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("comic_project.id"), index=True)
+    entity_type: Mapped[VisualEntityType] = enum_column(VisualEntityType, index=True)
+    key: Mapped[str] = mapped_column(String(120), index=True)
+    name: Mapped[str] = mapped_column(String(255))
+    description: Mapped[str] = mapped_column(Text, default="")
+    negative_constraints: Mapped[str] = mapped_column(Text, default="")
+
+
 class VisualAsset(TimestampMixin, Base):
     """视觉资产库：保存人工批准的图片条件或 ComfyUI 侧模型定位。"""
 
@@ -423,6 +449,13 @@ class VisualAsset(TimestampMixin, Base):
     # 多态归属由 Service 校验：character/outfit/scene/style 对应各自表 id。
     entity_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
     entity_key: Mapped[Optional[str]] = mapped_column(String(120), nullable=True, index=True)
+    # 新目录显式归属，避免把 scene.entity_id 从旧视觉版本 id 偷换成目录 id。
+    reference_subject_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("reference_subject.id"), nullable=True, index=True
+    )
+    outfit_variant_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("outfit_variant.id"), nullable=True, index=True
+    )
     role: Mapped[VisualAssetRole] = enum_column(VisualAssetRole, index=True)
     storage_kind: Mapped[VisualAssetStorageKind] = enum_column(VisualAssetStorageKind)
     local_path: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -451,6 +484,165 @@ class VisualAsset(TimestampMixin, Base):
     approved_at: Mapped[Optional[datetime]] = mapped_column(
         AwareUTCDateTime(), nullable=True
     )
+
+
+class CharacterReferenceGenerationTask(TimestampMixin, Base):
+    """人物/场景/物品参考图后台任务；复用历史表名，与分页图片任务分离。"""
+
+    __tablename__ = "character_reference_generation_task"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("comic_project.id"), index=True)
+    outline_character_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("outline_character.id"), nullable=True, index=True
+    )
+    entity_type: Mapped[VisualEntityType] = enum_column(
+        VisualEntityType, default=VisualEntityType.CHARACTER, index=True
+    )
+    entity_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    entity_key: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    reference_subject_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("reference_subject.id"), nullable=True, index=True
+    )
+    outfit_variant_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("outfit_variant.id"), nullable=True, index=True
+    )
+    selected_roles_json: Mapped[str] = mapped_column(Text, default="[]")
+    source_asset_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    subject_snapshot_json: Mapped[str] = mapped_column(Text, default="{}")
+    tool_preset_id: Mapped[int] = mapped_column(
+        ForeignKey("image_generation_tool_preset.id"), index=True
+    )
+    style_profile_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("style_profile.id"), nullable=True, index=True
+    )
+    status: Mapped[GenerationTaskStatus] = enum_column(
+        GenerationTaskStatus,
+        default=GenerationTaskStatus.PENDING,
+        index=True,
+    )
+    candidate_count: Mapped[int] = mapped_column(Integer, default=2)
+    prompt_type: Mapped[ImagePromptType] = enum_column(ImagePromptType)
+    prompt_snapshot_json: Mapped[str] = mapped_column(Text, default="{}")
+    progress_json: Mapped[str] = mapped_column(Text, default="{}")
+    approved_candidate_index: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True
+    )
+    error_code: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    heartbeat_at: Mapped[Optional[datetime]] = mapped_column(
+        AwareUTCDateTime(), nullable=True
+    )
+    finished_at: Mapped[Optional[datetime]] = mapped_column(
+        AwareUTCDateTime(), nullable=True
+    )
+
+    project: Mapped["ComicProject"] = relationship()
+    outline_character: Mapped[Optional["OutlineCharacter"]] = relationship()
+    reference_subject: Mapped[Optional["ReferenceSubject"]] = relationship()
+    tool_preset: Mapped["ImageGenerationToolPreset"] = relationship()
+    style_profile: Mapped[Optional["StyleProfile"]] = relationship()
+    runs: Mapped[list["CharacterReferenceGenerationRun"]] = relationship(
+        back_populates="task",
+        cascade="all, delete-orphan",
+        order_by=(
+            "CharacterReferenceGenerationRun.candidate_index, "
+            "CharacterReferenceGenerationRun.role"
+        ),
+    )
+
+
+class CharacterReferenceGenerationRun(TimestampMixin, Base):
+    """三件套中的单个角色构图请求，保存完整 Provider 与 Prompt 溯源。"""
+
+    __tablename__ = "character_reference_generation_run"
+    __table_args__ = (
+        UniqueConstraint(
+            "task_id",
+            "candidate_index",
+            "role",
+            name="uq_character_reference_run_candidate_role",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    task_id: Mapped[int] = mapped_column(
+        ForeignKey("character_reference_generation_task.id"), index=True
+    )
+    candidate_index: Mapped[int] = mapped_column(Integer)
+    role: Mapped[VisualAssetRole] = enum_column(VisualAssetRole, index=True)
+    seed: Mapped[int] = mapped_column(Integer)
+    provider: Mapped[ImageGenerationProvider] = enum_column(
+        ImageGenerationProvider, index=True
+    )
+    prompt_type: Mapped[ImagePromptType] = enum_column(ImagePromptType)
+    positive_prompt: Mapped[str] = mapped_column(Text)
+    negative_prompt: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[GenerationRunStatus] = enum_column(
+        GenerationRunStatus,
+        default=GenerationRunStatus.PENDING,
+        index=True,
+    )
+    review_status: Mapped[ApprovalStatus] = enum_column(
+        ApprovalStatus,
+        default=ApprovalStatus.DRAFT,
+        index=True,
+    )
+    seed_applied: Mapped[bool] = mapped_column(Boolean, default=True)
+    external_request_id: Mapped[Optional[str]] = mapped_column(
+        String(255), nullable=True, index=True
+    )
+    workflow_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    workflow_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    bindings_json: Mapped[str] = mapped_column(Text, default="{}")
+    degradation_json: Mapped[str] = mapped_column(Text, default="[]")
+    applied_spec_json: Mapped[str] = mapped_column(Text, default="{}")
+    error_code: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(
+        AwareUTCDateTime(), nullable=True
+    )
+
+    task: Mapped["CharacterReferenceGenerationTask"] = relationship(
+        back_populates="runs"
+    )
+    images: Mapped[list["CharacterReferenceImage"]] = relationship(
+        back_populates="run",
+        cascade="all, delete-orphan",
+        order_by="CharacterReferenceImage.artifact_index",
+    )
+
+
+class CharacterReferenceImage(TimestampMixin, Base):
+    """参考图候选原图；人工单图确认或兼容整套批准后提升为 VisualAsset。"""
+
+    __tablename__ = "character_reference_image"
+    __table_args__ = (
+        UniqueConstraint(
+            "run_id",
+            "artifact_index",
+            name="uq_character_reference_image_artifact",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[int] = mapped_column(
+        ForeignKey("character_reference_generation_run.id"), index=True
+    )
+    artifact_index: Mapped[int] = mapped_column(Integer, default=1)
+    local_path: Mapped[str] = mapped_column(Text)
+    mime_type: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    sha256: Mapped[str] = mapped_column(String(64), index=True)
+    width: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    height: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    promoted_asset_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("visual_asset.id"), nullable=True, unique=True
+    )
+
+    run: Mapped["CharacterReferenceGenerationRun"] = relationship(
+        back_populates="images"
+    )
+    promoted_asset: Mapped[Optional["VisualAsset"]] = relationship()
 
 
 class ComicPage(TimestampMixin, Base):
@@ -524,6 +716,8 @@ class ComicImage(Base):
     generation_run_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("generation_run.id"), nullable=True, index=True
     )
+    # 一个外部请求可能返回多张图；一致性轨道只消费 artifact_index=1 的主产物。
+    artifact_index: Mapped[int] = mapped_column(Integer, default=1)
     image_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     local_path: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     seed: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
@@ -551,9 +745,36 @@ class GenerationTask(TimestampMixin, Base):
 
     __tablename__ = "generation_task"
 
+    # 首个外部请求前冻结整批输入；暂停继续不重新选择素材或种子。
+    input_snapshot_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("comic_project.id"), index=True)
     page_id: Mapped[Optional[int]] = mapped_column(ForeignKey("comic_page.id"), nullable=True)
+    script_task_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("script_generation_task.id"), nullable=True, index=True
+    )
+    tool_preset_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("image_generation_tool_preset.id"), nullable=True, index=True
+    )
+    parent_task_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("generation_task.id"), nullable=True, index=True
+    )
+    task_kind: Mapped[GenerationTaskKind] = enum_column(
+        GenerationTaskKind,
+        default=GenerationTaskKind.LEGACY,
+        index=True,
+    )
+    generation_mode: Mapped[Optional[GenerationMode]] = enum_column(
+        GenerationMode,
+        nullable=True,
+        index=True,
+    )
+    seed_strategy: Mapped[Optional[SeedStrategy]] = enum_column(
+        SeedStrategy,
+        nullable=True,
+    )
+    candidate_count: Mapped[int] = mapped_column(Integer, default=1)
     comfy_prompt_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     status: Mapped[GenerationTaskStatus] = enum_column(
         GenerationTaskStatus,
@@ -572,7 +793,120 @@ class GenerationTask(TimestampMixin, Base):
     runs: Mapped[list["GenerationRun"]] = relationship(
         back_populates="generation_task",
         cascade="all, delete-orphan",
+        foreign_keys="GenerationRun.generation_task_id",
     )
+    parent_task: Mapped[Optional["GenerationTask"]] = relationship(
+        remote_side=[id],
+        back_populates="child_tasks",
+        foreign_keys=[parent_task_id],
+    )
+    child_tasks: Mapped[list["GenerationTask"]] = relationship(
+        back_populates="parent_task",
+        foreign_keys=[parent_task_id],
+    )
+    batch_runs: Mapped[list["GenerationRun"]] = relationship(
+        back_populates="batch_task",
+        foreign_keys="GenerationRun.batch_task_id",
+    )
+    tool_preset: Mapped[Optional["ImageGenerationToolPreset"]] = relationship()
+
+
+class ConsistencyEvaluationConfig(TimestampMixin, Base):
+    """全局一致性准出阈值；每次评估还会保存不可变快照。"""
+
+    __tablename__ = "consistency_evaluation_config"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    cids_cross_min: Mapped[float] = mapped_column(Float, default=0.45)
+    cids_self_min: Mapped[float] = mapped_column(Float, default=0.60)
+    csd_cross_min: Mapped[float] = mapped_column(Float, default=0.35)
+    csd_self_min: Mapped[float] = mapped_column(Float, default=0.60)
+    occm_min: Mapped[float] = mapped_column(Float, default=70.0)
+    copy_paste_max: Mapped[float] = mapped_column(Float, default=0.30)
+
+
+class ConsistencyEvaluationTask(TimestampMixin, Base):
+    """一次完整图片生成批次的 ViStoryBench 评估任务。"""
+
+    __tablename__ = "consistency_evaluation_task"
+    __table_args__ = (
+        UniqueConstraint(
+            "batch_task_id",
+            "source_hash",
+            "metric_version",
+            name="uq_consistency_evaluation_task_snapshot",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    batch_task_id: Mapped[int] = mapped_column(
+        ForeignKey("generation_task.id"), index=True
+    )
+    script_task_id: Mapped[int] = mapped_column(
+        ForeignKey("script_generation_task.id"), index=True
+    )
+    status: Mapped[ConsistencyEvaluationStatus] = enum_column(
+        ConsistencyEvaluationStatus,
+        default=ConsistencyEvaluationStatus.PENDING,
+        index=True,
+    )
+    source_hash: Mapped[str] = mapped_column(String(64), index=True)
+    thresholds_json: Mapped[str] = mapped_column(Text)
+    manifest_json: Mapped[str] = mapped_column(Text)
+    metric_version: Mapped[str] = mapped_column(String(64))
+    progress_json: Mapped[str] = mapped_column(Text, default="{}")
+    error_code: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    heartbeat_at: Mapped[Optional[datetime]] = mapped_column(
+        AwareUTCDateTime(), nullable=True
+    )
+    finished_at: Mapped[Optional[datetime]] = mapped_column(
+        AwareUTCDateTime(), nullable=True
+    )
+
+    batch_task: Mapped["GenerationTask"] = relationship(
+        foreign_keys=[batch_task_id]
+    )
+    tracks: Mapped[list["ConsistencyEvaluationTrack"]] = relationship(
+        back_populates="task",
+        cascade="all, delete-orphan",
+        order_by="ConsistencyEvaluationTrack.candidate_index",
+    )
+
+
+class ConsistencyEvaluationTrack(TimestampMixin, Base):
+    """候选序号跨全部页面形成的完整轨道及其准出结果。"""
+
+    __tablename__ = "consistency_evaluation_track"
+    __table_args__ = (
+        UniqueConstraint(
+            "evaluation_task_id",
+            "candidate_index",
+            name="uq_consistency_evaluation_track_candidate",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    evaluation_task_id: Mapped[int] = mapped_column(
+        ForeignKey("consistency_evaluation_task.id"), index=True
+    )
+    candidate_index: Mapped[int] = mapped_column(Integer)
+    status: Mapped[ConsistencyTrackStatus] = enum_column(
+        ConsistencyTrackStatus,
+        default=ConsistencyTrackStatus.PENDING,
+        index=True,
+    )
+    passed: Mapped[bool] = mapped_column(Boolean, default=False)
+    image_ids_json: Mapped[str] = mapped_column(Text)
+    metrics_json: Mapped[str] = mapped_column(Text, default="{}")
+    details_json: Mapped[str] = mapped_column(Text, default="{}")
+    error_code: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    adopted_at: Mapped[Optional[datetime]] = mapped_column(
+        AwareUTCDateTime(), nullable=True
+    )
+
+    task: Mapped["ConsistencyEvaluationTask"] = relationship(back_populates="tracks")
 
 
 class ScriptGenerationTask(TimestampMixin, Base):
@@ -660,6 +994,9 @@ class ScriptScene(TimestampMixin, Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     task_id: Mapped[int] = mapped_column(ForeignKey("script_generation_task.id"), index=True)
+    reference_subject_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("reference_subject.id"), nullable=True, index=True
+    )
     selected_visual_version_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("scene_visual_version.id"), nullable=True
     )
@@ -963,6 +1300,9 @@ class GenerationRun(TimestampMixin, Base):
     generation_task_id: Mapped[int] = mapped_column(
         ForeignKey("generation_task.id"), index=True
     )
+    batch_task_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("generation_task.id"), nullable=True, index=True
+    )
     page_id: Mapped[int] = mapped_column(ForeignKey("comic_page.id"), index=True)
     image_spec_id: Mapped[int] = mapped_column(ForeignKey("image_spec.id"), index=True)
     tool_preset_id: Mapped[int] = mapped_column(
@@ -1007,7 +1347,14 @@ class GenerationRun(TimestampMixin, Base):
         AwareUTCDateTime(), nullable=True
     )
 
-    generation_task: Mapped["GenerationTask"] = relationship(back_populates="runs")
+    generation_task: Mapped["GenerationTask"] = relationship(
+        back_populates="runs",
+        foreign_keys=[generation_task_id],
+    )
+    batch_task: Mapped[Optional["GenerationTask"]] = relationship(
+        back_populates="batch_runs",
+        foreign_keys=[batch_task_id],
+    )
     page: Mapped["ComicPage"] = relationship()
     image_spec: Mapped["ImageSpec"] = relationship(back_populates="generation_runs")
     tool_preset: Mapped["ImageGenerationToolPreset"] = relationship()

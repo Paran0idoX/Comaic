@@ -38,6 +38,42 @@ class GenerationTaskStatus(str, Enum):
     FAILED = "failed"
 
 
+class GenerationTaskKind(str, Enum):
+    """图片生成任务在批次中的层级。"""
+
+    LEGACY = "legacy"
+    BATCH = "batch"
+    PAGE = "page"
+
+
+class CharacterVisualType(str, Enum):
+    """ViStoryBench CIDS 选择角色特征编码器时使用的角色视觉类型。"""
+
+    REALISTIC_HUMAN = "realistic_human"
+    STYLIZED_HUMAN = "stylized_human"
+    NON_HUMAN = "non_human"
+
+
+class ConsistencyEvaluationStatus(str, Enum):
+    """一致性评估长任务的生命周期状态。"""
+
+    PENDING = "pending"
+    WAITING_RESOURCE = "waiting_resource"
+    RUNNING = "running"
+    SUSPENDED = "suspended"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+
+class ConsistencyTrackStatus(str, Enum):
+    """单条候选轨道的一致性准出结论。"""
+
+    PENDING = "pending"
+    PASSED = "passed"
+    FAILED = "failed"
+    ERROR = "error"
+
+
 class ScriptGenerationTaskStatus(str, Enum):
     """分页脚本生成任务的生命周期状态。"""
 
@@ -122,6 +158,8 @@ class VisualAssetRole(str, Enum):
     IDENTITY_FACE = "identity_face"
     IDENTITY_HALF_BODY = "identity_half_body"
     IDENTITY_FULL_BODY = "identity_full_body"
+    IDENTITY_SIDE = "identity_side"
+    IDENTITY_BACK = "identity_back"
     OUTFIT_FRONT = "outfit_front"
     OUTFIT_BACK = "outfit_back"
     OUTFIT_DETAIL = "outfit_detail"
@@ -135,6 +173,58 @@ class VisualAssetRole(str, Enum):
     SEGMENTATION = "segmentation"
     MASK = "mask"
     LORA = "lora"
+
+
+class ReferenceSourceMode(str, Enum):
+    """生成参考图时选择已有图片条件的方式。"""
+
+    AUTO = "auto"
+    NONE = "none"
+    MANUAL = "manual"
+
+
+class ReferenceImageTransport(str, Enum):
+    """外部生图接口消费独立参考原图的传输方式。"""
+
+    NONE = "none"
+    MULTIPART = "multipart"
+    JSON_DATA_URL = "json_data_url"
+
+
+class ReferenceImageLabelFormat(str, Enum):
+    """工具配置选择的有序图片编号表达。"""
+
+    IMAGE_N = "image_N"
+    PICTURE_N = "picture_N"
+    BRACKET_N = "bracket_N"
+
+
+class SubjectReferenceView(str, Enum):
+    """镜头规划确定的目标人物视角。"""
+
+    FRONT = "front"
+    THREE_QUARTER = "three_quarter"
+    SIDE = "side"
+    BACK = "back"
+    UNKNOWN = "unknown"
+
+
+class SubjectReferenceFraming(str, Enum):
+    """镜头规划确定的目标人物景别。"""
+
+    FACE = "face"
+    HALF_BODY = "half_body"
+    FULL_BODY = "full_body"
+    UNKNOWN = "unknown"
+
+
+class ReferencePurpose(str, Enum):
+    """模型无关的参考条件语义。"""
+
+    IDENTITY = "identity"
+    APPEARANCE = "appearance"
+    SCENE = "scene"
+    PROP = "prop"
 
 
 class VisualAssetSource(str, Enum):

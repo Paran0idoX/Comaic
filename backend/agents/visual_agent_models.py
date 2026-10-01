@@ -6,6 +6,8 @@ from backend.models.enums import (
     ContinuityEventTiming,
     ContinuityEventType,
     ContinuityTargetType,
+    SubjectReferenceFraming,
+    SubjectReferenceView,
 )
 
 
@@ -150,6 +152,9 @@ class SubjectShotPlan(BaseModel):
     region: NormalizedBox
     depth_order: int = Field(ge=0)
     control_requirements: list[str] = Field(default_factory=list)
+    reference_view: SubjectReferenceView = SubjectReferenceView.UNKNOWN
+    reference_framing: SubjectReferenceFraming = SubjectReferenceFraming.UNKNOWN
+    visible_prop_keys: list[str] = Field(default_factory=list)
 
 
 class SceneShotPlan(BaseModel):
@@ -157,6 +162,8 @@ class SceneShotPlan(BaseModel):
     focal_point: str
     negative_space: str = ""
     control_requirements: list[str] = Field(default_factory=list)
+    visible_prop_keys: list[str] = Field(default_factory=list)
+    background_visible: bool = True
 
 
 class ShotPlanResponse(BaseModel):

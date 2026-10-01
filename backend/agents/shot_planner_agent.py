@@ -12,7 +12,7 @@ from backend.utils.prompt_loader import PromptLoader
 class ShotPlannerAgent:
     """只决定当前页需要创造的镜头和动作，不复制视觉真值。"""
 
-    VERSION = "1"
+    VERSION = "2"
 
     def __init__(
         self,
@@ -43,6 +43,8 @@ class ShotPlannerAgent:
             for character in snapshot.get("characters", [])
         }
 
+        known_prop_keys = {str(item["key"]) for item in snapshot.get("prop_catalog", [])}
+
         def validate(response: ShotPlanResponse) -> None:
             planned_character_keys = {
                 subject.character_key for subject in response.subjects
@@ -53,6 +55,13 @@ class ShotPlannerAgent:
             missing = known_character_keys - planned_character_keys
             if missing:
                 raise ValueError(f"shot plan omits page characters: {sorted(missing)}")
+
+            visible_prop_keys = set(response.scene.visible_prop_keys)
+            for subject in response.subjects:
+                visible_prop_keys.update(subject.visible_prop_keys)
+            unknown_props = visible_prop_keys - known_prop_keys
+            if unknown_props:
+                raise ValueError(f"shot plan contains unknown prop keys: {sorted(unknown_props)}")
 
         response = await ainvoke_structured_with_retries(
             self._agent,

@@ -165,6 +165,7 @@ class ScriptSceneResponse(BaseModel):
     visual_anchors: str
     negative_constraints: str
     selected_visual_version_id: int | None = None
+    reference_subject_id: int | None = None
     created_at: datetime
     updated_at: datetime
 

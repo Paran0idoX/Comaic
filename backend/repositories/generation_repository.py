@@ -55,6 +55,7 @@ class GenerationRepository:
         self,
         *,
         generation_task_id: int,
+        batch_task_id: int | None,
         page_id: int,
         image_spec_id: int,
         tool_preset_id: int,
@@ -71,6 +72,7 @@ class GenerationRepository:
     ) -> GenerationRun:
         run = GenerationRun(
             generation_task_id=generation_task_id,
+            batch_task_id=batch_task_id,
             page_id=page_id,
             image_spec_id=image_spec_id,
             tool_preset_id=tool_preset_id,
@@ -102,6 +104,7 @@ class GenerationRepository:
         workflow_hash: str | None = None,
         degradation_json: str | None = None,
         applied_spec_json: str | None = None,
+        resolved_assets_json: str | None = None,
         error_code: str | None = None,
         error_message: str | None = None,
     ) -> GenerationRun:
@@ -116,6 +119,7 @@ class GenerationRepository:
             "workflow_hash": workflow_hash,
             "degradation_json": degradation_json,
             "applied_spec_json": applied_spec_json,
+            "resolved_assets_json": resolved_assets_json,
             "error_code": error_code,
             "error_message": error_message,
         }.items():
@@ -140,9 +144,11 @@ class GenerationRepository:
         sha256: str,
         width: int | None,
         height: int | None,
+        artifact_index: int = 1,
     ) -> ComicImage:
         image = ComicImage(
             generation_run_id=run_id,
+            artifact_index=artifact_index,
             page_id=page_id,
             local_path=local_path,
             seed=seed,
@@ -176,17 +182,35 @@ class GenerationRepository:
         prompt_type: ImagePromptType,
         generation_mode: GenerationMode,
         image_spec_id: int,
+        batch_task_id: int | None = None,
     ) -> list[GenerationRun]:
+        statement = select(GenerationRun).where(
+            GenerationRun.page_id == page_id,
+            GenerationRun.prompt_type == prompt_type,
+            GenerationRun.generation_mode == generation_mode,
+            GenerationRun.image_spec_id == image_spec_id,
+            GenerationRun.status == GenerationRunStatus.SUCCEEDED,
+        )
+        if batch_task_id is not None:
+            statement = statement.where(GenerationRun.batch_task_id == batch_task_id)
+        return list(
+            self.session.scalars(
+                statement.order_by(GenerationRun.created_at, GenerationRun.id)
+            )
+        )
+
+    def list_batch_runs(self, batch_task_id: int) -> list[GenerationRun]:
+        """读取一个明确批次中的全部候选运行，不混入其它生成历史。"""
+
         return list(
             self.session.scalars(
                 select(GenerationRun)
-                .where(
-                    GenerationRun.page_id == page_id,
-                    GenerationRun.prompt_type == prompt_type,
-                    GenerationRun.generation_mode == generation_mode,
-                    GenerationRun.image_spec_id == image_spec_id,
-                    GenerationRun.status == GenerationRunStatus.SUCCEEDED,
+                .where(GenerationRun.batch_task_id == batch_task_id)
+                .options(selectinload(GenerationRun.images))
+                .order_by(
+                    GenerationRun.candidate_index,
+                    GenerationRun.page_id,
+                    GenerationRun.id,
                 )
-                .order_by(GenerationRun.created_at, GenerationRun.id)
             )
         )

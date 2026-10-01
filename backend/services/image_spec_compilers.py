@@ -5,17 +5,17 @@ from typing import Any
 from backend.models.enums import (
     GenerationMode,
     ImagePromptType,
+    ReferencePurpose,
+    SubjectReferenceView,
     VisualAssetRole,
+    VisualEntityType,
     WorkflowCapability,
 )
 from backend.utils.json_utils import canonical_hash
+from backend.services.reference_selection_service import IDENTITY_ROLES, ReferenceSelectionService
 
 
-IDENTITY_REFERENCE_ROLES = {
-    VisualAssetRole.IDENTITY_FACE.value,
-    VisualAssetRole.IDENTITY_HALF_BODY.value,
-    VisualAssetRole.IDENTITY_FULL_BODY.value,
-}
+IDENTITY_REFERENCE_ROLES = IDENTITY_ROLES
 OUTFIT_REFERENCE_ROLES = {
     VisualAssetRole.OUTFIT_FRONT.value,
     VisualAssetRole.OUTFIT_BACK.value,
@@ -133,7 +133,7 @@ class BaseImageSpecCompiler:
     """模型无关 ImageSpec 编译器；差异只来自 Prompt 表达类型。"""
 
     compiler_key = "base"
-    compiler_version = "10"
+    compiler_version = "11"
     prompt_type = ImagePromptType.NATURAL_LANGUAGE
 
     def compile(
@@ -145,11 +145,12 @@ class BaseImageSpecCompiler:
         negative_prompts: dict[str, str],
         generation_mode: GenerationMode,
         source_hash: str,
+        reference_plan: dict[str, Any] | None = None,
     ) -> CompiledImageSpec:
-        warnings = self._readiness_warnings(
-            snapshot=snapshot,
-            style_profile=style_profile,
+        reference_plan = reference_plan or ReferenceSelectionService.select(
+            snapshot=snapshot, shot_plan=shot_plan,
         )
+        warnings = [dict(item) for item in reference_plan.get("warnings", [])]
         if generation_mode == GenerationMode.FINAL and warnings:
             codes = ", ".join(item["code"] for item in warnings)
             raise ValueError(f"Final image spec is missing canonical conditions: {codes}")
@@ -161,9 +162,10 @@ class BaseImageSpecCompiler:
             if isinstance(item, dict)
         )
 
-        subjects = self._subjects(snapshot, shot_plan)
-        scene = self._scene(snapshot, shot_plan)
-        style = self._style(style_profile or {})
+        subjects = self._subjects(snapshot, shot_plan, reference_plan)
+        scene = self._scene(snapshot, shot_plan, reference_plan)
+        # 历史风格版本仍保存用于审计，新准备链路不再施加独立风格条件。
+        style: dict[str, Any] = {}
         render_text = bool(shot_plan.get("render_text", False))
         prompt_subjects = subjects
         prompt_scene = scene
@@ -209,6 +211,7 @@ class BaseImageSpecCompiler:
             ]
         ).strip()
         negative_constraints = self._negative_constraints(snapshot)
+        negative_constraints.extend(prop.get("negative_constraints", "") for prop in scene.get("props", []) if prop.get("negative_constraints"))
         tag_negative = self._join_tags(
             [
                 LAYOUT_NEGATIVE_TAGS,
@@ -249,7 +252,7 @@ class BaseImageSpecCompiler:
             "negative_combined_text": self._combine(natural_negative, tag_negative),
         }
         spec = {
-            "schema_version": 2,
+            "schema_version": 3,
             "source_hash": source_hash,
             "prompt_type": self.prompt_type.value,
             "generation_mode": generation_mode.value,
@@ -258,6 +261,7 @@ class BaseImageSpecCompiler:
             "scene": scene,
             "style": style,
             "shot_plan": shot_plan,
+            "reference_plan": reference_plan,
             "required_capabilities": capabilities,
             "warnings": warnings,
             "compiler": {
@@ -511,6 +515,8 @@ class BaseImageSpecCompiler:
     def _is_back_facing(shot: dict[str, Any]) -> bool:
         """背对镜头时不强迫模型展示面部，否则容易复制人物来满足身份锚点。"""
 
+        if shot.get("reference_view") == SubjectReferenceView.BACK.value:
+            return True
         value = " ".join(
             str(shot.get(key, "")) for key in ("orientation", "pose")
         ).casefold()
@@ -541,25 +547,30 @@ class BaseImageSpecCompiler:
         cls,
         snapshot: dict[str, Any],
         shot_plan: dict[str, Any],
+        reference_plan: dict[str, Any],
     ) -> list[dict[str, Any]]:
         plans = {item["character_key"]: item for item in shot_plan.get("subjects", [])}
         subjects: list[dict[str, Any]] = []
         for character in snapshot.get("characters", []):
             subject = dict(character)
+            subject_plan = plans.get(character["character_key"], {})
+            if "visible_prop_keys" in subject_plan:
+                subject["held_props"] = [key for key in character.get("held_props", []) if key in subject_plan["visible_prop_keys"]]
             identity_assets = cls._usable_assets(list(character.get("identity_assets", [])))
             identity = dict(character.get("identity") or {})
-            identity["references"] = [
-                asset for asset in identity_assets if asset.get("role") in IDENTITY_REFERENCE_ROLES
+            selected = [
+                item for item in reference_plan["items"]
+                if item["owner"]["category"] == VisualEntityType.CHARACTER.value
+                and item["owner"]["key"] == character["character_key"]
             ]
+            identity["references"] = [item for item in selected if item["purpose"] == ReferencePurpose.IDENTITY.value]
             subject["identity_assets"] = identity_assets
             subject["identity"] = identity
 
             outfit = dict(character.get("outfit") or {})
             outfit_assets = cls._usable_assets(list(outfit.get("assets", [])))
             outfit["assets"] = outfit_assets
-            outfit["references"] = [
-                asset for asset in outfit_assets if asset.get("role") in OUTFIT_REFERENCE_ROLES
-            ]
+            outfit["references"] = [item for item in selected if item["purpose"] == ReferencePurpose.APPEARANCE.value]
             subject["outfit"] = outfit
 
             controls: dict[str, dict[str, Any]] = {}
@@ -573,24 +584,33 @@ class BaseImageSpecCompiler:
                     "prop_key": prop.get("prop_key"),
                     "assets": cls._usable_assets(list(prop.get("assets", []))),
                     "references": [
-                        asset
-                        for asset in cls._usable_assets(list(prop.get("assets", [])))
-                        if asset.get("role") == VisualAssetRole.PROP_REFERENCE.value
+                        item for item in reference_plan["items"]
+                        if item["owner"]["category"] == VisualEntityType.PROP.value
+                        and item["owner"]["key"] == prop.get("prop_key")
                     ],
                 }
                 for prop in character.get("held_prop_assets", [])
+                if any(item["owner"]["category"] == VisualEntityType.PROP.value and item["owner"]["key"] == prop.get("prop_key") for item in reference_plan["items"])
             ]
-            subject["shot"] = plans.get(character["character_key"], {})
+            subject["shot"] = subject_plan
             subjects.append(subject)
         return subjects
 
     @classmethod
-    def _scene(cls, snapshot: dict[str, Any], shot_plan: dict[str, Any]) -> dict[str, Any]:
+    def _scene(cls, snapshot: dict[str, Any], shot_plan: dict[str, Any], reference_plan: dict[str, Any]) -> dict[str, Any]:
         scene = dict(snapshot.get("scene") or {})
         assets = cls._usable_assets(list(scene.get("assets", [])))
         scene["assets"] = assets
-        scene["references"] = [
-            asset for asset in assets if asset.get("role") in SCENE_REFERENCE_ROLES
+        scene["references"] = [item for item in reference_plan["items"] if item["owner"]["category"] == VisualEntityType.SCENE.value]
+        # 可见目录物品即使在宽松模式缺图，也保留文字描述；隐藏物品不进入 Prompt。
+        visible = set((shot_plan.get("scene") or {}).get("visible_prop_keys", []))
+        for subject in shot_plan.get("subjects", []):
+            visible.update(subject.get("visible_prop_keys", []))
+        selected_prop_refs = [item for item in reference_plan["items"] if item["owner"]["category"] == VisualEntityType.PROP.value]
+        visible.update(item["owner"]["key"] for item in selected_prop_refs)
+        scene["props"] = [
+            {"prop_key": prop["key"], "name": prop.get("name") or prop["key"], "description": prop.get("description", ""), "negative_constraints": prop.get("negative_constraints", ""), "references": [item for item in selected_prop_refs if item["owner"]["key"] == prop["key"]]}
+            for prop in snapshot.get("prop_catalog", []) if prop["key"] in visible
         ]
         scene["controls"] = {
             str(asset["role"]): asset
@@ -631,6 +651,8 @@ class BaseImageSpecCompiler:
         scene = snapshot.get("scene") or {}
         if scene.get("negative_constraints"):
             values.append(str(scene["negative_constraints"]).strip())
+        if scene.get("reference_negative_constraints"):
+            values.append(str(scene["reference_negative_constraints"]).strip())
         return list(dict.fromkeys(value for value in values if value))
 
     @staticmethod
@@ -714,17 +736,20 @@ class BaseImageSpecCompiler:
             (
                 camera.get("shot_type"),
                 camera.get("angle"),
-                scene.get("environment_details"),
-                scene.get("visual_anchors"),
+                scene.get("environment_details") if scene_shot.get("background_visible", True) else "",
+                scene.get("reference_description") if scene_shot.get("background_visible", True) else "",
+                scene.get("visual_anchors") if scene_shot.get("background_visible", True) else "",
                 scene.get("lighting"),
-                scene.get("weather"),
+                scene.get("weather") if scene_shot.get("background_visible", True) else "",
                 scene_shot.get("framing_notes"),
                 scene_shot.get("focal_point"),
                 style.get("positive_tag"),
                 style.get("lighting"),
             )
         )
-        parts.extend(cls._scene_state_tokens(scene))
+        if scene_shot.get("background_visible", True):
+            parts.extend(cls._scene_state_tokens(scene))
+        parts.extend(f"visible object {prop.get('name')}: {prop.get('description', '')}" for prop in scene.get("props", []))
         return cls._join_tags(parts)
 
     @classmethod
@@ -752,8 +777,8 @@ class BaseImageSpecCompiler:
             )
             if cls._is_back_facing(shot):
                 appearance_sentence = (
-                    f"{subject.get('name') or subject.get('character_key')} is the only "
-                    "visible person and is shown strictly from behind; keep their face "
+                    f"{subject.get('name') or subject.get('character_key')} appears once "
+                    "and is shown strictly from behind; keep their face "
                     "entirely out of frame and do not add another view of them."
                 )
             else:
@@ -787,10 +812,13 @@ class BaseImageSpecCompiler:
         )
         scene_text = (
             f"The scene is {scene.get('name', '')}: {scene.get('environment_details', '')}. "
+            f"{scene.get('reference_description', '')}. "
             f"Keep these landmarks consistent: {scene.get('visual_anchors', '')}. "
             f"Lighting is {scene.get('lighting', '')}; weather is {scene.get('weather', '')}."
         )
-        scene_state = ", ".join(cls._scene_state_tokens(scene))
+        if not (scene.get("shot") or {}).get("background_visible", True):
+            scene_text = "This shot has no visible background; do not add scenery merely to reproduce a scene reference."
+        scene_state = ", ".join(cls._scene_state_tokens(scene)) if (scene.get("shot") or {}).get("background_visible", True) else ""
         if scene_state:
             scene_text = f"{scene_text} Current scene state: {scene_state}."
         return cls._join_sentences(
@@ -798,6 +826,7 @@ class BaseImageSpecCompiler:
                 "Create one coherent standalone cinematic splash illustration",
                 *subject_sentences,
                 scene_text,
+                *[f"The visible catalog object {prop.get('name')} is {prop.get('description', '')}" for prop in scene.get("props", [])],
                 f"Use this camera setup: {camera_text}" if camera_text else "",
                 style.get("positive_natural_language", ""),
                 style.get("lighting", ""),
@@ -811,70 +840,8 @@ class BaseImageSpecCompiler:
         snapshot: dict[str, Any],
         style_profile: dict[str, Any] | None,
     ) -> list[dict[str, str]]:
-        warnings: list[dict[str, str]] = []
-        for character in snapshot.get("characters", []):
-            identity_assets = cls._usable_assets(character.get("identity_assets", []))
-            if not any(asset.get("role") in IDENTITY_REFERENCE_ROLES for asset in identity_assets):
-                warnings.append(
-                    {
-                        "code": "image_spec.identity_asset_missing",
-                        "message": f"Character {character['character_key']} has no approved identity condition.",
-                    }
-                )
-            outfit = character.get("outfit") or {}
-            if outfit.get("variant_id") is None:
-                warnings.append(
-                    {
-                        "code": "image_spec.outfit_variant_missing",
-                        "message": f"Character {character['character_key']} has no approved outfit version.",
-                    }
-                )
-            elif not any(
-                asset.get("role") in OUTFIT_REFERENCE_ROLES
-                for asset in cls._usable_assets(outfit.get("assets", []))
-            ):
-                warnings.append(
-                    {
-                        "code": "image_spec.outfit_asset_missing",
-                        "message": f"Character {character['character_key']} outfit has no approved condition.",
-                    }
-                )
-        scene = snapshot.get("scene") or {}
-        if scene.get("visual_version_id") is None:
-            warnings.append(
-                {
-                    "code": "image_spec.scene_version_missing",
-                    "message": f"Scene {scene.get('scene_key', '')} has no approved visual version.",
-                }
-            )
-        if not any(
-            asset.get("role") in SCENE_ROLES
-            for asset in cls._usable_assets(scene.get("assets", []))
-        ):
-            warnings.append(
-                {
-                    "code": "image_spec.scene_asset_missing",
-                    "message": f"Scene {scene.get('scene_key', '')} has no approved master/control asset.",
-                }
-            )
-        if not style_profile or style_profile.get("status") != "approved":
-            warnings.append(
-                {
-                    "code": "image_spec.style_profile_missing",
-                    "message": "No approved style profile is selected.",
-                }
-            )
-        elif not any(
-            asset.get("role") in STYLE_ROLES
-            for asset in cls._usable_assets(style_profile.get("assets", []))
-        ):
-            warnings.append(
-                {
-                    "code": "image_spec.style_asset_missing",
-                    "message": "Selected style has no approved reference.",
-                }
-            )
-        return warnings
+        # 保留私有兼容入口，但就绪只取本页所需参考，不要求风格或独立服装图片。
+        return ReferenceSelectionService.select(snapshot=snapshot, shot_plan={})["warnings"]
 
     @staticmethod
     def _required_capabilities(
@@ -894,6 +861,8 @@ class BaseImageSpecCompiler:
                 references.extend(prop.get("references", []))
             controls.update(subject.get("controls", {}))
         references.extend(scene.get("references", []))
+        for prop in scene.get("props", []):
+            references.extend(prop.get("references", []))
         references.extend(style.get("references", []))
         controls.update(scene.get("controls", {}))
         if references:
@@ -906,8 +875,6 @@ class BaseImageSpecCompiler:
             for value in subject.get("control_requirements", [])
         } | set((shot_plan.get("scene") or {}).get("control_requirements", []))
         capabilities.update(requested_controls)
-        if len(subjects) > 1:
-            capabilities.add(WorkflowCapability.REGIONAL_CONDITION.value)
         return sorted(capabilities)
 
     @staticmethod

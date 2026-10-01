@@ -138,6 +138,10 @@ def test_three_prompt_types_share_truth_and_hybrid_preserves_both_forms() -> Non
 
     assert tag.positive_prompt != natural.positive_prompt
     assert tag.spec["subjects"] == natural.spec["subjects"] == hybrid.spec["subjects"]
+    assert tag.spec["reference_plan"] == natural.spec["reference_plan"] == hybrid.spec["reference_plan"]
+    assert tag.spec["style"] == natural.spec["style"] == hybrid.spec["style"] == {}
+    assert "clean anime line art" not in tag.positive_prompt
+    assert "photorealistic" not in natural.negative_prompt
     assert hybrid.spec["prompt"]["tag_text"] == tag.positive_prompt
     assert hybrid.spec["prompt"]["natural_language_text"] == natural.positive_prompt
     assert hybrid.positive_prompt == f"{natural.positive_prompt}\n{tag.positive_prompt}"
@@ -266,3 +270,51 @@ def test_accessory_is_named_once_when_shot_references_same_object_repeatedly() -
     assert "chest resting position is completely empty" in compiled.positive_prompt
     assert "hanging on the chest" not in compiled.positive_prompt
     assert "pocket watch" in compiled.spec["shot_plan"]["subjects"][0]["action"]
+
+
+def test_final_needs_only_page_references_and_does_not_require_outfit_or_style() -> None:
+    snapshot = _snapshot()
+    snapshot["characters"][0]["outfit"].pop("variant_id")
+    snapshot["characters"][0]["outfit"]["assets"] = []
+    snapshot["scene"]["assets"] = []
+    shot_plan = _shot_plan()
+    shot_plan["scene"]["background_visible"] = False
+    compiled = NaturalLanguageImageSpecCompiler().compile(
+        snapshot=snapshot, shot_plan=shot_plan, style_profile=None,
+        negative_prompts={}, generation_mode=GenerationMode.FINAL, source_hash="minimum",
+    )
+    assert compiled.warnings == []
+    assert [item["owner"]["category"] for item in compiled.spec["reference_plan"]["items"]] == ["character"]
+    assert "no visible background" in compiled.positive_prompt
+    assert "dense shelves" not in compiled.positive_prompt
+
+
+def test_explicit_visible_props_drive_prompt_and_strict_readiness() -> None:
+    snapshot = _snapshot()
+    snapshot["characters"][0]["held_props"] = ["hidden_key"]
+    snapshot["prop_catalog"] = [
+        {"key": "hidden_key", "name": "Hidden key", "description": "copper key", "assets": []},
+        {"key": "red_cube", "name": "Red cube", "description": "red ceramic cube", "negative_constraints": "never add a handle", "assets": []},
+    ]
+    shot_plan = _shot_plan()
+    shot_plan["subjects"][0]["visible_prop_keys"] = []
+    shot_plan["scene"]["visible_prop_keys"] = ["red_cube"]
+    common = dict(snapshot=snapshot, shot_plan=shot_plan, style_profile=None, negative_prompts={}, source_hash="props")
+    preview = NaturalLanguageImageSpecCompiler().compile(**common, generation_mode=GenerationMode.PREVIEW)
+    assert "red ceramic cube" in preview.positive_prompt
+    assert "Hidden key" not in preview.positive_prompt
+    assert "holding hidden_key" not in preview.positive_prompt
+    assert "never add a handle" in preview.negative_prompt
+    assert [item["code"] for item in preview.warnings] == ["image_spec.prop_asset_missing"]
+    with pytest.raises(ValueError, match="image_spec.prop_asset_missing"):
+        NaturalLanguageImageSpecCompiler().compile(**common, generation_mode=GenerationMode.FINAL)
+
+
+def test_multiple_people_do_not_implicitly_require_regional_condition() -> None:
+    snapshot = _snapshot()
+    second = {**snapshot["characters"][0], "character_key": "bob", "name": "Bob", "identity_assets": [{"id": 10, "role": "identity_face"}]}
+    snapshot["characters"].append(second)
+    shot_plan = _shot_plan()
+    shot_plan["subjects"].append({**shot_plan["subjects"][0], "character_key": "bob"})
+    compiled = TagImageSpecCompiler().compile(snapshot=snapshot, shot_plan=shot_plan, style_profile=None, negative_prompts={}, generation_mode=GenerationMode.FINAL, source_hash="two-people")
+    assert "regional_condition" not in compiled.required_capabilities

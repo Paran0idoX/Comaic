@@ -6,9 +6,9 @@
 
 `comaic` 是一个基于 LangChain 的 AI 漫画生成 Agent Demo。MVP 目标是跑通完整链路：
 
-用户输入剧情大纲和总页数 -> 生成每页漫画脚本 -> 维护视觉真值 -> 为每页编译三类 ImageSpec -> 调用所选生图 Provider -> 保存项目、页面、图片和任务状态 -> 人工选择每页最终图片。
+用户输入剧情大纲和总页数 -> 生成每页漫画脚本 -> 维护已确认的画面设定与独立参考原图 -> 为每页编译三类 ImageSpec -> 调用所选生图 Provider -> 保存项目、页面、图片和任务状态 -> 人工选择每页最终图片。
 
-当前阶段不要做复杂分镜、自动选图、复杂多 Agent 编排或过重架构。优先让链路清晰、可运行、可人工确认。
+当前阶段不要做复杂分镜、自动选择最终候选图、复杂多 Agent 编排或过重架构。参考原图按本页 ShotPlan 和确定规则自动选择，最终候选图仍由用户选择。优先让链路清晰、可运行、可人工确认。
 
 ## 顶层结构
 
@@ -39,7 +39,7 @@ comaic/
 ## 前端结构
 
 - `frontend/` 使用 Vue 3 + Vite + Element Plus。
-- 当前包含大纲、分页脚本、视觉圣经、Visual Specs、图片生成、设置等 MVP 工作台。
+- 当前包含故事大纲、分页脚本、画面设定、生图准备、漫画出图和设置等 MVP 工作台；历史文件、路由及数据库命名保持兼容。
 - 前端依赖和脚本写在 `frontend/package.json`。
 - 前端功能如果需要额外 npm 包，可以安装轻量、明确用途的依赖；安装后必须同步更新 `frontend/package.json` 和 `frontend/package-lock.json`，并在完成后运行前端类型检查或构建。
 - LLM 生成的大纲、脚本等富文本内容如果按 Markdown 展示，优先使用成熟 Markdown 渲染库；默认关闭原始 HTML 解析，避免把模型输出当成可执行 HTML。
@@ -196,26 +196,37 @@ pybabel compile -d backend/locales
   - `script_character` 归属于 `script_section`，`character_key` 在同一分段内唯一，并通过 `outline_character_id` 回溯到大纲角色基准。
   - `comic_page.scene_id` 和 `comic_page_character` 负责把页面绑定到具体场景和角色。
   - 页面自己的 `scene`、`characters`、`clothing` 只描述本页局部变化，不承担全局一致性职责。
-- Service 保存脚本视觉设定时，会自动派生视觉圣经草稿：
+- Service 保存脚本视觉设定时，会自动派生画面设定草稿：
   - 分段角色的当前服装、配件和大纲默认色彩生成 `OutfitVariant(DRAFT)`；相同角色的相同造型按内容 key 复用。
   - 中心化场景的视觉锚点、环境、色彩和光照生成 `SceneVisualVersion(DRAFT)`；重试和继续生成不得重复创建相同内容。
   - 自动草稿可以绑定到 `script_character` / `script_scene` 供前端审核，但只有 `APPROVED` 版本才能进入 Final ImageSpec。
   - 已有人工绑定不得被自动派生覆盖；无法回溯到 `outline_character` 的分段角色不自动创建服装版本。
-  - 风格和参考图片没有足够的脚本来源，仍由视觉圣经页面人工维护或后续独立生成流程负责。
+  - 参考图片通过画面设定页按类别生成或上传、预览和人工确认。历史画风配置保留审计，新准备不再消费画风。
 - 脚本 Agent prompt 放在 `backend/prompts/script_planning_prompt.md`、`script_writer_prompt.md` 和 `script_supervisor_prompt.md`。
 
 ## ImageSpec / Prompt 类型约定
 
-`backend/services/image_spec_service.py` 负责把视觉真值、连续性状态和 ShotPlan 编译成模型无关的 ImageSpec；这条链路不再使用 ImagePromptAgent，也不再向 `comic_page` 写单一 `image_prompt`。
+`backend/services/image_spec_service.py` 负责把已确认的画面设定、连续性状态和 ShotPlan 编译成模型无关的 ImageSpec；这条链路不再使用 ImagePromptAgent，也不再向 `comic_page` 写单一 `image_prompt`。
 
 - Prompt 表达只分为 `tag`、`natural_language`、`hybrid` 三类，统一使用 `ImagePromptType`，不得引入具体图片模型、checkpoint 或模型家族作为业务分支。
 - 每次按脚本任务编译时，每页必须共享同一个 ShotPlan，并分别生成三条 ImageSpec；同一页、同一 Prompt 类型只保留一条当前有效规格。
 - Hybrid 必须同时保存 tag 与自然语言组件；最终正向/负向 Prompt 的组合顺序都是“自然语言 + 换行 + tag”。
-- 风格配置分别保存 tag 和自然语言的正向/负向内容，不能假设两种表达可互换。
-- Negative Prompt preset 同样分别维护 tag 与自然语言内容；ShotPlanner preset 与 Negative Prompt preset 统一由 Visual Specs 页面管理。
+- 历史风格字段、记录和快照保留；新编译不应用 `style_profile_id` 或风格参考图，也不让历史画风改动影响新准备的来源 Hash。
+- Negative Prompt preset 分别维护 tag 与自然语言内容；ShotPlanner preset 与 Negative Prompt preset 统一由生图准备页面管理。
 - ImageSpec 必须组合大纲级 `outline_character`、分段级 `script_character`、任务级 `script_scene`、已批准视觉资产和单页结构化脚本。
 - 三种 ImageSpec 都成功后，页面状态才更新为 `ComicPageStatus.SPEC_READY`。
 - 历史 LoRA 资产只保留归档审计；新业务不创建、不提升、不绑定 LoRA。底模、LoRA、采样器等具体实现由 ComfyUI workflow 自行管理。
+
+## 参考原图与按页选择约定
+
+- 保存独立原图，不生成拼板。内置人物、场景、物品三类；人物用途为脸部、半身、全身、侧面和背面。分类在代码中集中声明，可扩展，但不增加用户自定义分类管理。
+- 人物归属 `OutlineCharacter`，身体图可用 `outfit_variant_id` 标注当前造型；场景和物品用 `ReferenceSubject` 目录，`ScriptScene.reference_subject_id` 显式绑定目录场景。历史场景资产的 `entity_id` 仍指向 `SceneVisualVersion`，不能重解释为目录 ID。
+- ShotPlanner 只输出人物 `reference_view` / `reference_framing` / `visible_prop_keys` 和场景 `background_visible` / `visible_prop_keys`，不挑 asset_id，不增加逐图视觉 AI。可见物品 key 必须属于输入目录；不入镜的持有物不自动选图。
+- `ReferenceSelectionService` 按用途顺序回退：脸部 `[脸,半身,全身]`；半身 `[半身,全身,脸]`；全身/未知 `[全身,半身,脸]`；侧面 `[侧面,全身,半身,脸]`；背面 `[背面,全身,半身,侧面,脸]`。先匹配类别，再取最新确认版本。明确属于不同造型的身体图排除；未标造型的身体图仅作身份/视角参考，不能覆盖本页确认服装。
+- 每个人物最多主图加一张辅助图，背面镜头不加脸部辅助。先按 ShotPlan `depth_order`、`character_key` 排列所有人物主图，再人物辅助、入镜场景和按 key 排列的可见物品。选用场景版本的图片优先于目录场景通用图片；通用图的 `entity_id` 必须为 NULL，版本专用图必须匹配当前选用版本，且 `reference_subject_id` 为 NULL 旧数据或当前绑定条目 ID。重新绑定条目后不能使用旧条目的版本专用图。
+- 每页三种 Prompt 共用一份 `reference_plan`，记录 asset_id/version、原图 metadata、owner、purpose、reason/reason_code、priority、is_primary/is_required，以及 omitted/fallbacks/warnings。中文界面用稳定 reason_code 翻译；Provider 用自然语言 reason 解释归属和用途。
+- 严格模式检查本页人物身份参考、入镜场景和可见目录物品，不强制独立服装图片、五类人物图齐备或独立画风条件；多人不会自动要求 `regional_condition`。
+- 素材确认/撤回/版本及归属、造型关联、目录绑定与 metadata 变化进入来源 Hash，使未开始的旧准备过期。人脸一致性评测排除背面，保留可检测到脸的正面、半身、全身和侧面候选。
 
 ## 图片生成 Provider 约定
 
@@ -224,6 +235,9 @@ pybabel compile -d backend/locales
 - 生图工具只按 Provider 分类：`comfyui` 与 `openai_images_compatible`；使用 `ImageGenerationProvider`，不得用具体图片模型定义项目级能力。
 - 每个工具必须选择自己消费的 `ImagePromptType`，生成时只读取页面下相同类型且未过期的最新 ImageSpec。
 - ComfyUI 工具通过受限 binding 把 `prompt.positive`、`prompt.negative`、`render.seed` 和可选参考条件注入 workflow；不要猜测节点，也不要暴露任意表达式求值。
+- 工具声明 `capabilities.reference_images` 的容量、编号格式、传输方式和画布需求。ComfyUI 用有序 `reference_slots`，每槽独立 loader，并显式列出空槽需断开的消费输入。外 API 只使用配置的 multipart 原图数组或 JSON data URL 数组及编辑接口，不按模型名称分支。
+- `reference_inputs` 是实际传输清单，由选图计划按工具容量/本地文件/绑定检查冻结。容量先保各对象主图再辅助；主图无法全部应用时严格模式在任何上传和提交之前失败。Prompt 编号与清单顺序一致，不能上传所有递归身份资产或把省略图片仍描述为已传入。
+- 新批次 `input_snapshot_json` 冻结页 ID、ImageSpec、实际参考顺序、编号 Prompt、工具参数与 seed；暂停继续读取冻结输入，不读取新素材重新选择或受当前工具参数变化影响。继续时仍校验原文件可读且 SHA256 未变，API Key 只读取当前本地工具，不进入快照。历史规格和缺少快照的批次按旧入口兼容，但其真实传图顺序必须标为未知，不能推断已经冻结。
 - ComfyUI 的底模、LoRA、采样器和调度器保留在 workflow JSON 内，不进入 ImageSpec、项目配置或运行 manifest。
 - OpenAI Images 兼容 Provider 可以在工具配置内部保存具体 `model`，但该值不得反向影响 ImageSpec 编译或项目数据模型。
 - 批量图片生成按“每页一次 ComfyUI `/prompt` 请求”提交，不一次性提交全部页面。
@@ -232,6 +246,12 @@ pybabel compile -d backend/locales
 - ComfyUI 调用只允许出现在 Tool/Service 层，Agent 不直接调用 ComfyUI。
 
 ## 开发与验证
+
+### 本地测试产物目录
+
+- 仓库根目录的 `.codex-artifacts/` 是自动化代理和本地验收统一使用的临时产物目录，只供本机使用，不得提交。
+- 浏览器 Profile、E2E 图片、测试数据库、pytest `--basetemp`、smoke 输出和临时日志必须写入 `.codex-artifacts/`，不要散落在仓库根目录或源码目录。
+- 可复用的测试代码和 fixture 必须放入正式测试目录；不要把需要版本控制的测试资源放进 `.codex-artifacts/`。
 
 后端安装依赖：
 

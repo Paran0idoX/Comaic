@@ -6,6 +6,7 @@ from fastapi.responses import FileResponse
 from backend.api.schemas.visual_bible import (
     ApprovalRequest,
     AssignOutfitRequest,
+    CharacterVisualTypeResponse,
     OutfitVariantRequest,
     OutfitVariantResponse,
     PromoteImageRequest,
@@ -14,6 +15,7 @@ from backend.api.schemas.visual_bible import (
     SelectSceneVersionRequest,
     StyleProfileRequest,
     StyleProfileResponse,
+    UpdateCharacterVisualTypeRequest,
     VisualAssetLocatorRequest,
     VisualAssetResponse,
 )
@@ -36,6 +38,32 @@ from backend.services.visual_bible_service import MAX_ASSET_BYTES, VisualBibleSe
 
 
 router = APIRouter(prefix="/api/visual-bible", tags=["visual-bible"])
+
+
+@router.put(
+    "/outline-characters/{character_id}/visual-type",
+    response_model=CharacterVisualTypeResponse,
+)
+def update_character_visual_type(
+    character_id: int,
+    payload: UpdateCharacterVisualTypeRequest,
+    http_request: Request,
+) -> CharacterVisualTypeResponse:
+    """设置角色在 ViStoryBench CIDS 中使用的人脸或 CLIP 路径。"""
+
+    with SessionLocal() as db_session:
+        service = VisualBibleService(VisualBibleRepository(db_session))
+        try:
+            character = service.update_character_visual_type(
+                character_id=character_id,
+                visual_type=payload.visual_type,
+            )
+        except Exception as exc:
+            raise http_exception(exc, request_locale(http_request)) from exc
+        return CharacterVisualTypeResponse(
+            id=character.id,
+            visual_type=character.visual_type,
+        )
 
 
 def outfit_response(item: OutfitVariant) -> OutfitVariantResponse:
@@ -107,6 +135,8 @@ def asset_response(item: VisualAsset) -> VisualAssetResponse:
         entity_type=item.entity_type,
         entity_id=item.entity_id,
         entity_key=item.entity_key,
+        reference_subject_id=item.reference_subject_id,
+        outfit_variant_id=item.outfit_variant_id,
         role=item.role,
         storage_kind=item.storage_kind.value,
         local_path=item.local_path,
@@ -325,6 +355,8 @@ async def upload_asset(
     role: VisualAssetRole = Form(...),
     entity_id: int | None = Form(None),
     entity_key: str | None = Form(None),
+    reference_subject_id: int | None = Form(None),
+    outfit_variant_id: int | None = Form(None),
     crop_metadata_json: str = Form("{}"),
     mask_asset_id: int | None = Form(None),
     approve: bool = Form(False),
@@ -342,6 +374,8 @@ async def upload_asset(
                 entity_type=entity_type,
                 entity_id=entity_id,
                 entity_key=entity_key,
+                reference_subject_id=reference_subject_id,
+                outfit_variant_id=outfit_variant_id,
                 role=role,
                 content=content,
                 crop_metadata=crop_metadata,

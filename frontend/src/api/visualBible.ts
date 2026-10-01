@@ -1,11 +1,14 @@
 import { apiHeaders, currentApiLocale, parseApiErrorResponse } from './errors'
 
 export type ApprovalStatus = 'draft' | 'approved' | 'archived'
+export type CharacterVisualType = 'realistic_human' | 'stylized_human' | 'non_human'
 export type VisualEntityType = 'character' | 'outfit' | 'scene' | 'style' | 'prop' | 'control'
 export type VisualAssetRole =
   | 'identity_face'
   | 'identity_half_body'
   | 'identity_full_body'
+  | 'identity_side'
+  | 'identity_back'
   | 'outfit_front'
   | 'outfit_back'
   | 'outfit_detail'
@@ -81,6 +84,8 @@ export type VisualAsset = {
   entity_type: VisualEntityType
   entity_id: number | null
   entity_key: string | null
+  reference_subject_id?: number | null
+  outfit_variant_id?: number | null
   role: VisualAssetRole
   storage_kind: 'local_file' | 'renderer_locator'
   local_path: string | null
@@ -161,6 +166,15 @@ export const assignOutfitVariant = (
     body: JSON.stringify({ outfit_variant_id: outfitVariantId }),
   })
 
+export const updateOutlineCharacterVisualType = (
+  characterId: number,
+  visualType: CharacterVisualType,
+): Promise<{ id: number; visual_type: CharacterVisualType }> =>
+  requestJson(`/api/visual-bible/outline-characters/${characterId}/visual-type`, {
+    method: 'PUT',
+    body: JSON.stringify({ visual_type: visualType }),
+  })
+
 export const selectSceneVisualVersion = (
   scriptSceneId: number,
   sceneVisualVersionId: number | null,
@@ -218,6 +232,8 @@ export const promoteGeneratedImage = (
     entity_type: VisualEntityType
     entity_id: number | null
     entity_key?: string | null
+    reference_subject_id?: number | null
+    outfit_variant_id?: number | null
     role: VisualAssetRole
     approve: boolean
   },

@@ -11,6 +11,7 @@ from backend.api.schemas.image_generation import (
     ComfyWorkflowPresetRequest,
     ComfyWorkflowPresetResponse,
     GenerateImagesRequest,
+    GenerationBatchListResponse,
     GenerationTaskResponse,
     GenerationRunResponse,
     ImageGenerationToolPresetListResponse,
@@ -77,6 +78,7 @@ def image_to_response(image: ComicImage) -> ComicImageResponse:
         id=image.id,
         page_id=image.page_id,
         generation_run_id=image.generation_run_id,
+        artifact_index=image.artifact_index,
         image_url=f"/api/image-generation/images/{image.id}/file",
         local_path=image.local_path,
         seed=image.seed,
@@ -143,6 +145,13 @@ def task_to_response(task: GenerationTask) -> GenerationTaskResponse:
         id=task.id,
         project_id=task.project_id,
         page_id=task.page_id,
+        script_task_id=task.script_task_id,
+        tool_preset_id=task.tool_preset_id,
+        parent_task_id=task.parent_task_id,
+        task_kind=task.task_kind.value,
+        generation_mode=task.generation_mode.value if task.generation_mode else None,
+        seed_strategy=task.seed_strategy.value if task.seed_strategy else None,
+        candidate_count=task.candidate_count,
         comfy_prompt_id=task.comfy_prompt_id,
         status=task.status.value,
         batch_size=task.batch_size,
@@ -158,6 +167,7 @@ def run_to_response(run: GenerationRun) -> GenerationRunResponse:
     return GenerationRunResponse(
         id=run.id,
         generation_task_id=run.generation_task_id,
+        batch_task_id=run.batch_task_id,
         page_id=run.page_id,
         image_spec_id=run.image_spec_id,
         tool_preset_id=run.tool_preset_id,
@@ -341,6 +351,28 @@ def list_generation_pages(
         )
 
 
+@router.get(
+    "/script-tasks/{task_id}/batches",
+    response_model=GenerationBatchListResponse,
+)
+def list_generation_batches(
+    task_id: int,
+    http_request: Request,
+) -> GenerationBatchListResponse:
+    """读取脚本任务下具有明确轨道身份的新式生成批次。"""
+
+    with SessionLocal() as db_session:
+        repo = ComicRepository(db_session)
+        if repo.get_script_task(task_id) is None:
+            raise http_exception(
+                ValueError(f"ScriptGenerationTask not found: {task_id}"),
+                request_locale(http_request),
+            )
+        return GenerationBatchListResponse(
+            items=[task_to_response(item) for item in repo.list_generation_batches(task_id)]
+        )
+
+
 @router.post("/script-tasks/{task_id}/generate/stream")
 def stream_generate_for_script_task(
     task_id: int,
@@ -387,6 +419,36 @@ def stream_continue_for_script_task(
             try:
                 async for event, payload in service.stream_continue_for_script_task(
                     task_id=task_id,
+                    tool_preset_id=request.effective_tool_preset_id,
+                    poll_interval_seconds=request.poll_interval_seconds,
+                    wait_timeout_seconds=request.wait_timeout_seconds,
+                    candidates_per_page=request.candidates_per_page,
+                    generation_mode=request.generation_mode,
+                    seed_strategy=request.seed_strategy,
+                ):
+                    yield sse_event(event, payload)
+            except Exception as exc:
+                yield sse_event("error", sse_error_payload(exc, locale))
+
+    return EventSourceResponse(event_generator(), headers=SSE_HEADERS, ping=5)
+
+
+@router.post("/batches/{batch_task_id}/continue/stream")
+def stream_continue_for_batch(
+    batch_task_id: int,
+    request: GenerateImagesRequest,
+    http_request: Request,
+) -> EventSourceResponse:
+    """只在指定批次内补齐候选，防止续生成跨批次拼接。"""
+
+    locale = request_locale(http_request)
+
+    async def event_generator():
+        with SessionLocal() as db_session:
+            service = ImageGenerationService(ComicRepository(db_session))
+            try:
+                async for event, payload in service.stream_continue_for_batch(
+                    batch_task_id=batch_task_id,
                     tool_preset_id=request.effective_tool_preset_id,
                     poll_interval_seconds=request.poll_interval_seconds,
                     wait_timeout_seconds=request.wait_timeout_seconds,
