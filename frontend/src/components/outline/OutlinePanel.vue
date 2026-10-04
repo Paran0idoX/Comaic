@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import InfoTip from '@/components/workspace/InfoTip.vue'
 import { Check, Clock } from '@element-plus/icons-vue'
 import MarkdownIt from 'markdown-it'
 import { computed, ref, watch } from 'vue'
@@ -14,7 +15,6 @@ export type OutlineCharacterItem = {
   role: string
   background: string
   appearance: string
-  visual_anchors: string
   negative_constraints: string
   default_hairstyle: string
   default_clothing: string
@@ -74,8 +74,7 @@ const formatDate = (value: string) => {
   <section v-loading="loading" class="outline-panel panel">
     <header class="outline-panel__header">
       <div>
-        <h3>{{ t('outline.panel.title') }}</h3>
-        <p>{{ t('outline.panel.description') }}</p>
+        <div class="title-with-info"><h3>{{ t('outline.panel.title') }}</h3><InfoTip :content="t('outline.panel.description')" :label="t('outline.panel.title')" /></div>
       </div>
       <el-button
         type="success"
@@ -97,10 +96,8 @@ const formatDate = (value: string) => {
           </el-scrollbar>
         </el-tab-pane>
 
-        <el-tab-pane :label="`${t('outline.characters.title')} (${currentCharacters.length})`" name="characters">
-          <div class="outline-panel__tab-intro">
-            <p>{{ t('outline.characters.description') }}</p>
-          </div>
+        <el-tab-pane name="characters">
+          <template #label><span>{{ t('outline.characters.title') }} ({{ currentCharacters.length }})</span><InfoTip :content="t('outline.characters.description')" :label="t('outline.characters.title')" /></template>
           <el-scrollbar class="outline-panel__tab-scroll">
             <el-empty
               v-if="currentCharacters.length === 0"
@@ -114,9 +111,6 @@ const formatDate = (value: string) => {
               >
                 <header>
                   <strong>{{ character.name }}</strong>
-                  <el-tooltip :content="character.character_key">
-                    <el-tag size="small" effect="plain">Key</el-tag>
-                  </el-tooltip>
                 </header>
                 <p><span>{{ t('outline.characters.role') }}</span>{{ character.role || '-' }}</p>
                 <p><span>{{ t('outline.characters.background') }}</span>{{ character.background || '-' }}</p>
@@ -127,7 +121,7 @@ const formatDate = (value: string) => {
                   character.default_accessories,
                   character.default_color_palette,
                 ].filter(Boolean).join(' / ') || '-' }}</p>
-                <p><span>{{ t('outline.characters.anchors') }}</span>{{ character.visual_anchors || '-' }}</p>
+                <p><span>{{ t('visualBible.details.negativeConstraints') }}</span>{{ character.negative_constraints || '-' }}</p>
               </article>
             </div>
           </el-scrollbar>
@@ -159,8 +153,8 @@ const formatDate = (value: string) => {
 .outline-panel {
   display: flex;
   min-width: 0;
-  height: clamp(620px, calc(100vh - 170px), 1100px);
-  min-height: 680px;
+  height: clamp(620px, calc(100vh - 272px), 1100px);
+  min-height: 620px;
   flex-direction: column;
 }
 
@@ -200,21 +194,34 @@ const formatDate = (value: string) => {
   flex-direction: column;
 }
 
-.outline-panel__tabs :deep(.el-tabs__content),
-.outline-panel__tabs :deep(.el-tab-pane) {
+.outline-panel__tabs :deep(.el-tabs__header) {
+  flex-shrink: 0;
+}
+
+/* 内容区必须传递剩余高度，才能让长大纲和角色列表在内部完整滚动。 */
+.outline-panel__tabs :deep(.el-tabs__content) {
+  display: flex;
   min-height: 0;
   flex: 1;
 }
 
 .outline-panel__tabs :deep(.el-tab-pane) {
   display: flex;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
   flex-direction: column;
 }
 
 .outline-panel__tab-scroll {
+  height: 0;
   min-height: 0;
   flex: 1;
   padding-right: 8px;
+}
+
+.outline-panel__tab-intro {
+  flex-shrink: 0;
 }
 
 .outline-panel__tab-intro p {
@@ -311,12 +318,16 @@ const formatDate = (value: string) => {
 
 .outline-panel__character-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
+  align-items: start;
   gap: 12px;
 }
 
 .outline-panel__character {
-  display: grid;
+  /* 长短不同的角色说明按内容排布，避免网格拉伸字段间距。 */
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
   gap: 8px;
   padding: 12px;
   border: 1px solid var(--panel-border);
@@ -332,14 +343,17 @@ const formatDate = (value: string) => {
 }
 
 .outline-panel__character p {
+  margin: 0;
   color: var(--text-regular);
   line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
-.outline-panel__character span {
+.outline-panel__character p > span {
   display: block;
   margin-bottom: 2px;
-  color: var(--text-soft);
+  color: var(--text-regular);
   font-size: 12px;
 }
 

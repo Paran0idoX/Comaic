@@ -1,3 +1,6 @@
+import asyncio
+from contextlib import aclosing
+from datetime import timedelta
 import hashlib
 from io import BytesIO
 import json
@@ -12,6 +15,7 @@ from backend.i18n.errors import AppError, app_error_from_exception
 from backend.models.comic import (
     ComicImage,
     ComicPage,
+    GenerationRun,
     GenerationTask,
     ImageGenerationToolPreset,
     ImageSpec,
@@ -29,13 +33,17 @@ from backend.models.enums import (
     SeedStrategy,
     WorkflowCapability,
 )
+from backend.models.time import utc_now
 from backend.repositories.comic_repository import ComicRepository
 from backend.repositories.generation_repository import GenerationRepository
 from backend.repositories.image_spec_repository import ImageSpecRepository
 from backend.services.image_spec_service import ImageSpecService
-from backend.services.renderer_backends import backend_for_preset
+from backend.services.renderer_backends import ComfyUIBackend, RendererSubmission, backend_for_preset
 from backend.services.reference_inputs import prepare_renderer_spec, validate_renderer_spec, frozen_preset
-from backend.services.task_runtime import RuntimeTaskType, running_task_registry
+from backend.services.reference_render_size import supports_reference_size
+from backend.services.task_runtime import (
+    RuntimeTaskType, ZOMBIE_TIMEOUT_SECONDS, running_task_registry,
+)
 from backend.services.workflow_compiler import (
     WorkflowBindings,
     WorkflowCapabilities,
@@ -239,20 +247,41 @@ class ImageGenerationService:
         candidates_per_page: int = 1,
         generation_mode: GenerationMode = GenerationMode.PREVIEW,
         seed_strategy: SeedStrategy = SeedStrategy.PER_PAGE,
+        page_ids: list[int] | None = None,
+        width: int | None = None,
+        height: int | None = None,
     ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
+        generation_mode = GenerationMode.PREVIEW
         script_task = self._get_script_task(task_id)
-        async for event, payload in self._stream_generate_pages(
+        pages = self._requested_pages(task_id, page_ids)
+        preset = self._get_tool_preset(tool_preset_id)
+        async with aclosing(self._stream_generate_pages(
             script_task=script_task,
-            pages=self.repository.list_script_task_pages(task_id),
-            preset=self._get_tool_preset(tool_preset_id),
+            pages=pages,
+            preset=preset,
             candidates_per_page=candidates_per_page,
             poll_interval_seconds=poll_interval_seconds,
             wait_timeout_seconds=wait_timeout_seconds,
             generation_mode=generation_mode,
             seed_strategy=seed_strategy,
             existing_batch_task=None,
-        ):
-            yield event, payload
+            render_size={"width": width, "height": height} if width is not None and height is not None else None,
+        )) as stream:
+            async for event, payload in stream:
+                yield event, payload
+
+    def _requested_pages(self, task_id: int, page_ids: list[int] | None) -> list[ComicPage]:
+        """仅允许本任务的页面，并保持脚本顺序，避免勾选顺序影响冻结输入。"""
+
+        pages = self.repository.list_script_task_pages(task_id)
+        if page_ids is not None:
+            requested = set(page_ids)
+            if not requested or not requested.issubset({page.id for page in pages}):
+                raise AppError("image_generation.page_scope_invalid", status_code=422)
+            pages = [page for page in pages if page.id in requested]
+        if not pages:
+            raise AppError("image_generation.page_scope_invalid", status_code=422)
+        return sorted(pages, key=lambda page: (page.page_no, page.id))
 
     async def stream_continue_for_script_task(
         self,
@@ -272,7 +301,7 @@ class ImageGenerationService:
             raise ValueError(
                 "No trackable generation batch exists for this script task; start a new batch."
             )
-        async for event, payload in self.stream_continue_for_batch(
+        async with aclosing(self.stream_continue_for_batch(
             batch_task_id=batches[0].id,
             tool_preset_id=tool_preset_id,
             poll_interval_seconds=poll_interval_seconds,
@@ -280,8 +309,9 @@ class ImageGenerationService:
             candidates_per_page=candidates_per_page,
             generation_mode=generation_mode,
             seed_strategy=seed_strategy,
-        ):
-            yield event, payload
+        )) as stream:
+            async for event, payload in stream:
+                yield event, payload
 
     async def stream_continue_for_batch(
         self,
@@ -303,10 +333,10 @@ class ImageGenerationService:
                 status_code=404,
                 debug_message=f"Generation batch not found: {batch_task_id}",
             )
+        # 续跑始终沿用历史批次模式，不能由已移除的客户端偏好改变冻结输入。
+        generation_mode = batch_task.generation_mode or GenerationMode.PREVIEW
         if batch_task.tool_preset_id != tool_preset_id:
             mismatch = "tool_preset_id"
-        elif batch_task.generation_mode != generation_mode:
-            mismatch = "generation_mode"
         elif batch_task.seed_strategy != seed_strategy:
             mismatch = "seed_strategy"
         elif batch_task.candidate_count != candidates_per_page:
@@ -322,19 +352,109 @@ class ImageGenerationService:
                     f"Generation batch {mismatch} cannot change during continuation."
                 ),
             )
-        script_task = self._get_script_task(batch_task.script_task_id)
-        async for event, payload in self._stream_generate_pages(
-            script_task=script_task,
-            pages=self.repository.list_script_task_pages(script_task.id),
-            preset=self._get_tool_preset(tool_preset_id),
-            candidates_per_page=candidates_per_page,
-            poll_interval_seconds=poll_interval_seconds,
-            wait_timeout_seconds=wait_timeout_seconds,
-            generation_mode=generation_mode,
-            seed_strategy=seed_strategy,
-            existing_batch_task=batch_task,
-        ):
-            yield event, payload
+        self._ensure_batch_idle(batch_task)
+        if not running_task_registry.try_register(RuntimeTaskType.GENERATION_TASK, batch_task.id):
+            raise AppError("image_generation.batch_busy", status_code=409)
+        try:
+            script_task = self._get_script_task(batch_task.script_task_id)
+            async with aclosing(self._stream_generate_pages(
+                script_task=script_task,
+                pages=self.repository.list_script_task_pages(script_task.id),
+                preset=self._get_tool_preset(tool_preset_id),
+                candidates_per_page=candidates_per_page,
+                poll_interval_seconds=poll_interval_seconds,
+                wait_timeout_seconds=wait_timeout_seconds,
+                generation_mode=generation_mode,
+                seed_strategy=seed_strategy,
+                existing_batch_task=batch_task,
+            )) as stream:
+                async for event, payload in stream:
+                    yield event, payload
+        finally:
+            # 领取后即使预检查失败、取消或 SSE 提前关闭，也必须由领取者释放。
+            running_task_registry.unregister(RuntimeTaskType.GENERATION_TASK, batch_task.id)
+
+    def _ensure_batch_idle(self, batch_task: GenerationTask) -> None:
+        """暂停仅停止后续页；仍在执行的页面及新鲜心跳必须阻挡继续请求。"""
+
+        self.repository.session.expire_all()
+        active_ids = running_task_registry.snapshot_ids()[1]
+        stale_before = utc_now() - timedelta(seconds=ZOMBIE_TIMEOUT_SECONDS)
+        for task in [batch_task, *batch_task.child_tasks]:
+            if task.id in active_ids or (
+                task.status == GenerationTaskStatus.RUNNING
+                and task.heartbeat_at is not None
+                and task.heartbeat_at >= stale_before
+            ):
+                raise AppError("image_generation.batch_busy", status_code=409)
+        # 心跳超时只说明本地执行者失联；外部请求是否结束还须查询 Provider。
+
+    async def _prepare_batch_recoveries(
+        self, batch_task_id: int, preset: ImageGenerationToolPreset,
+    ) -> dict[tuple[int, int], tuple[GenerationRun, ComfyUIBackend, RendererSubmission]]:
+        """先确认全部遗留请求状态，再允许提交；成功历史复用原 run 与外部 ID。"""
+
+        repository = GenerationRepository(self.repository.session)
+        runs = repository.list_batch_runs(batch_task_id)
+        succeeded = {(run.page_id, run.candidate_index) for run in runs if run.status == GenerationRunStatus.SUCCEEDED}
+        recoveries = {}
+        failed = []
+        for run in runs:
+            if run.status == GenerationRunStatus.SUCCEEDED:
+                continue
+            if run.status == GenerationRunStatus.FAILED and (
+                not run.external_request_id or run.error_code == "image_generation.comfyui_execution_failed"
+            ):
+                continue
+            if run.provider != ImageGenerationProvider.COMFYUI:
+                raise AppError("image_generation.batch_recovery_unsupported", status_code=409)
+            applied = json.loads(run.applied_spec_json)
+            config = applied.get("renderer_config") or {}
+            if not run.external_request_id or not config.get("comfy_base_url"):
+                raise AppError("image_generation.batch_recovery_unavailable", status_code=409)
+            frozen = frozen_preset(preset, applied)
+            renderer = ComfyUIBackend(frozen, self.comfy_client)
+            try:
+                queue = await asyncio.to_thread(renderer.client.get_queue)
+                queued_ids = ComfyUIClient.queued_prompt_ids(queue)
+                if run.external_request_id in queued_ids:
+                    raise AppError("image_generation.batch_busy", status_code=409)
+                history = await asyncio.to_thread(renderer.client.get_history, run.external_request_id)
+                entry = history.get(run.external_request_id) if isinstance(history, dict) else None
+                execution_error = ComfyUIClient.extract_execution_error(history, run.external_request_id)
+            except AppError:
+                raise
+            except Exception as exc:
+                raise AppError("image_generation.batch_recovery_unavailable", status_code=409) from exc
+            if execution_error:
+                failed.append((run, execution_error))
+                continue
+            status = entry.get("status") if isinstance(entry, dict) else None
+            if (
+                not isinstance(status, dict) or status.get("completed") is not True
+                or status.get("status_str") != "success"
+                or not ComfyUIClient.extract_output_images(history, run.external_request_id)
+            ):
+                raise AppError("image_generation.batch_recovery_unavailable", status_code=409)
+            key = (run.page_id, run.candidate_index)
+            if key in succeeded:
+                continue
+            submission = RendererSubmission(
+                external_id=run.external_request_id, applied_spec=applied,
+                workflow=json.loads(run.workflow_json) if run.workflow_json else None,
+                workflow_hash=run.workflow_hash, degradations=json.loads(run.degradation_json or "[]"),
+                seed_applied=bool(run.seed_applied),
+            )
+            previous = recoveries.get(key)
+            # 候选可能有多个历史尝试：成功历史优先于失败记录，已部分落图的 run 优先。
+            if previous is None or (bool(run.images), run.id) > (bool(previous[0].images), previous[0].id):
+                recoveries[key] = (run, renderer, submission)
+        for run, error in failed:
+            repository.update_run(
+                run_id=run.id, status=GenerationRunStatus.FAILED,
+                error_code="image_generation.comfyui_execution_failed", error_message=error,
+            )
+        return recoveries
 
     async def stream_generate_for_page(
         self,
@@ -346,23 +466,29 @@ class ImageGenerationService:
         candidates_per_page: int = 1,
         generation_mode: GenerationMode = GenerationMode.PREVIEW,
         seed_strategy: SeedStrategy = SeedStrategy.PER_PAGE,
+        width: int | None = None,
+        height: int | None = None,
     ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
+        generation_mode = GenerationMode.PREVIEW
         page = self._get_page(page_id)
         if page.section is None:
             raise ValueError(f"ComicPage has no script task: {page_id}")
         script_task = self._get_script_task(page.section.task_id)
-        async for event, payload in self._stream_generate_pages(
+        preset = self._get_tool_preset(tool_preset_id)
+        async with aclosing(self._stream_generate_pages(
             script_task=script_task,
             pages=[page],
-            preset=self._get_tool_preset(tool_preset_id),
+            preset=preset,
             candidates_per_page=candidates_per_page,
             poll_interval_seconds=poll_interval_seconds,
             wait_timeout_seconds=wait_timeout_seconds,
             generation_mode=generation_mode,
             seed_strategy=seed_strategy,
             existing_batch_task=None,
-        ):
-            yield event, payload
+            render_size={"width": width, "height": height} if width is not None and height is not None else None,
+        )) as stream:
+            async for event, payload in stream:
+                yield event, payload
 
     def select_image(self, *, page_id: int, image_id: int) -> ComicPage:
         return self.repository.select_image(page_id=page_id, image_id=image_id)
@@ -380,6 +506,7 @@ class ImageGenerationService:
         generation_mode: GenerationMode,
         seed_strategy: SeedStrategy,
         existing_batch_task: GenerationTask | None,
+        render_size: dict[str, int] | None = None,
     ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
         """按工具 Prompt 类型读取最新规格，并为每个候选保存完整运行记录。"""
 
@@ -389,13 +516,21 @@ class ImageGenerationService:
             pages = [self.repository.session.get(ComicPage, int(page_id)) for page_id in frozen_batch["pages"]]
             if any(page is None for page in pages):
                 raise AppError("image_generation.page_not_found", status_code=404)
+            # 规范 JSON 会按字符串键排序，不能把 "10" 排在 "2" 前的顺序用作续跑页序。
+            # 新批次冻结初始顺序；旧快照只回退到页码排序，不读取新的页面集合。
+            page_order = frozen_batch.get("page_order")
+            if page_order:
+                order_indexes = {int(page_id): index for index, page_id in enumerate(page_order)}
+                pages.sort(key=lambda page: (order_indexes.get(page.id, len(order_indexes)), page.page_no, page.id))
+            else:
+                pages.sort(key=lambda page: (page.page_no, page.id))
         else:
             self._ensure_pages_reviewed(pages)
         self._ensure_generation_tool_ready(preset)
         generation_repository = GenerationRepository(self.repository.session)
         spec_service = ImageSpecService(ImageSpecRepository(self.repository.session))
-        current_continuity_hash = None if frozen_batch else spec_service.current_continuity_source_hash(
-            script_task.id
+        current_context_hashes = {} if frozen_batch else spec_service.current_page_context_hashes(
+            script_task.id, page_ids=[page.id for page in pages],
         )
         page_specs: dict[int, ImageSpec] = {}
         for page in pages:
@@ -410,7 +545,7 @@ class ImageGenerationService:
                     f"ImageSpec not found for page {page.page_no}, prompt type "
                     f"{preset.prompt_type.value}, mode {generation_mode.value}."
                 )
-            if not saved_page and spec.snapshot.compilation.source_hash != current_continuity_hash:
+            if not saved_page and not spec_service.page_context_is_current(spec.snapshot, current_context_hashes[page.id]):
                 raise ValueError(f"ImageSpec is stale for page: {page.page_no}")
             if not saved_page and spec.source_hash != spec_service.current_image_spec_source_hash(spec):
                 raise ValueError(f"ImageSpec is stale for page: {page.page_no}")
@@ -434,9 +569,21 @@ class ImageGenerationService:
         prepared_pages: dict[int, dict[str, Any]] = {}
         for page in pages:
             saved_page = (frozen_batch or {}).get("pages", {}).get(str(page.id))
-            prepared = prepare_renderer_spec(saved_page["spec"] if saved_page else json.loads(page_specs[page.id].spec_json), preset, generation_mode)
+            spec = saved_page["spec"] if saved_page else json.loads(page_specs[page.id].spec_json)
+            if not saved_page and render_size:
+                # 新批次的漫画尺寸独立于参考原图；续跑只能使用原冻结尺寸。
+                if not supports_reference_size(preset):
+                    raise AppError("reference.size_unsupported", status_code=422)
+                spec["render"] = {**(spec.get("render") or {}), **render_size}
+            prepared = prepare_renderer_spec(spec, preset, generation_mode)
+            if not saved_page and render_size and preset.provider == ImageGenerationProvider.OPENAI_IMAGES_COMPATIBLE:
+                prepared["renderer_config"]["size"] = f"{render_size['width']}x{render_size['height']}"
             validate_renderer_spec(prepared, preset, generation_mode)
             prepared_pages[page.id] = prepared
+        recoveries = (
+            await self._prepare_batch_recoveries(existing_batch_task.id, preset)
+            if existing_batch_task is not None else {}
+        )
         pages_to_generate = [page for page in pages if page_seed_pairs.get(page.id)]
         batch_size = sum(len(page_seed_pairs[page.id]) for page in pages_to_generate)
         batch_task = existing_batch_task or self.repository.create_generation_task(
@@ -451,21 +598,22 @@ class ImageGenerationService:
             candidate_count=candidates_per_page,
         )
         if not frozen_batch:
-            batch_task.input_snapshot_json = canonical_json({"schema_version": 1, "pages": {str(page.id): {"image_spec_id": page_specs[page.id].id, "spec": prepared_pages[page.id], "seeds": page_seed_pairs[page.id]} for page in pages}})
+            batch_task.input_snapshot_json = canonical_json({"schema_version": 1, "page_order": [page.id for page in pages], "pages": {str(page.id): {"image_spec_id": page_specs[page.id].id, "spec": prepared_pages[page.id], "seeds": page_seed_pairs[page.id]} for page in pages}})
             self.repository.session.commit()
         batch_task = self.repository.update_generation_task(
             task_id=batch_task.id,
             status=GenerationTaskStatus.RUNNING,
         )
-        running_task_registry.register(RuntimeTaskType.GENERATION_TASK, batch_task.id)
-        renderer = backend_for_preset(
-            preset,
-            default_comfy_client=self.comfy_client,
-        )
+        if existing_batch_task is None:
+            running_task_registry.register(RuntimeTaskType.GENERATION_TASK, batch_task.id)
         succeeded = 0
         failed = 0
         completed = 0
         try:
+            renderer = backend_for_preset(
+                preset,
+                default_comfy_client=self.comfy_client,
+            )
             yield "start", {
                 "task_id": batch_task.id,
                 "script_task_id": script_task.id,
@@ -533,7 +681,8 @@ class ImageGenerationService:
                     for candidate_index, seed in page_seed_pairs[page.id]:
                         spec_payload = prepared_pages[page.id]
                         spec_degradations = list(spec_payload.get("warnings") or [])
-                        run = generation_repository.create_run(
+                        recovery = recoveries.get((page.id, candidate_index))
+                        run = recovery[0] if recovery else generation_repository.create_run(
                             generation_task_id=page_task.id,
                             batch_task_id=batch_task.id,
                             page_id=page.id,
@@ -553,12 +702,15 @@ class ImageGenerationService:
                             applied_spec_json=canonical_json(spec_payload),
                         )
                         try:
-                            submission = await renderer.submit(
-                                spec=spec_payload,
-                                seed=seed,
-                                mode=generation_mode,
-                            )
-                            degradations = spec_degradations + submission.degradations
+                            if recovery:
+                                _, candidate_renderer, submission = recovery
+                                seed = int(run.seed)
+                            else:
+                                candidate_renderer = renderer
+                                submission = await candidate_renderer.submit(
+                                    spec=spec_payload, seed=seed, mode=generation_mode,
+                                )
+                            degradations = submission.degradations if recovery else spec_degradations + submission.degradations
                             generation_repository.update_run(
                                 run_id=run.id,
                                 status=GenerationRunStatus.QUEUED,
@@ -594,7 +746,7 @@ class ImageGenerationService:
                                 run_id=run.id,
                                 status=GenerationRunStatus.RUNNING,
                             )
-                            artifacts = await renderer.wait(
+                            artifacts = await candidate_renderer.wait(
                                 submission,
                                 poll_interval_seconds=poll_interval_seconds,
                                 timeout_seconds=wait_timeout_seconds,
@@ -604,6 +756,17 @@ class ImageGenerationService:
                                     f"Renderer generated no images for page: {page.page_no}"
                                 )
                             for index, artifact in enumerate(artifacts, start=1):
+                                existing_image = next((image for image in run.images if image.artifact_index == index), None)
+                                if existing_image is not None:
+                                    # SSE 可能在 image 已提交而 run 尚未成功时断开，重入不重复建图。
+                                    if existing_image.sha256 != hashlib.sha256(artifact.content).hexdigest():
+                                        raise AppError("image_generation.batch_recovery_unavailable", status_code=409)
+                                    if not existing_image.local_path or not Path(existing_image.local_path).is_file():
+                                        raise AppError("image_generation.batch_recovery_unavailable", status_code=409)
+                                    if hashlib.sha256(Path(existing_image.local_path).read_bytes()).hexdigest() != existing_image.sha256:
+                                        raise AppError("image_generation.batch_recovery_unavailable", status_code=409)
+                                    yield "image", self._image_payload(existing_image, page)
+                                    continue
                                 local_path = self._save_image_file(
                                     project_id=page.project_id,
                                     page_no=page.page_no,
@@ -688,7 +851,8 @@ class ImageGenerationService:
 
             final_status = (
                 GenerationTaskStatus.FAILED
-                if succeeded == 0 and failed > 0
+                # 部分失败也必须保留继续入口；成功候选已落库，续跑会跳过它们。
+                if failed > 0
                 else GenerationTaskStatus.SUCCEEDED
             )
             batch_task = self.repository.update_generation_task(
@@ -702,6 +866,10 @@ class ImageGenerationService:
                 "succeeded": succeeded,
                 "failed": failed,
             }
+        except (GeneratorExit, asyncio.CancelledError):
+            # 不中断已提交的 Provider 请求；仅停止本 generator 后续提交。
+            self.repository.suspend_generation_task(batch_task.id)
+            raise
         except Exception as exc:
             self.repository.update_generation_task(
                 task_id=batch_task.id,
@@ -710,10 +878,11 @@ class ImageGenerationService:
             )
             raise
         finally:
-            running_task_registry.unregister(
-                RuntimeTaskType.GENERATION_TASK,
-                batch_task.id,
-            )
+            if existing_batch_task is None:
+                running_task_registry.unregister(
+                    RuntimeTaskType.GENERATION_TASK,
+                    batch_task.id,
+                )
 
     # Seed and provenance ---------------------------------------------
     def _structured_seed_pairs(

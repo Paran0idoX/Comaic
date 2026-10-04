@@ -1,1 +1,0 @@
-Avoid additional characters, duplicated body parts, malformed hands, inconsistent facial features, changed body proportions, changed colors, text, captions, watermarks, logos, borders, busy scenery, dramatic perspective, motion blur, and identity drift. Character-specific restrictions: {negative_constraints}. Style restrictions: {style_negative}.

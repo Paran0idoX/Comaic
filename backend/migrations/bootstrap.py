@@ -85,6 +85,8 @@ def _alembic_config() -> Config:
 
     root = Path(__file__).resolve().parents[2]
     config = Config(str(root / "alembic.ini"))
+    # 应用启动时沿用 Uvicorn/FastAPI 日志，不能由迁移关闭 logger 或替换其 handler。
+    config.attributes["configure_logging"] = False
     config.set_main_option("script_location", str(root / "backend" / "migrations"))
     config.set_main_option("sqlalchemy.url", DATABASE_URL.replace("%", "%%"))
     return config

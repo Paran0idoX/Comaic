@@ -47,6 +47,7 @@ const harness = () => {
   const stream = deferred()
   const confirm = { current: Promise.resolve() }
   const cleared = []
+  const saved = []
   const api = {
     listProjectScriptTasks: async (projectId, options = {}) => tasks.filter((item) => item.project_id === projectId && (!options.outlineVersionId || item.outline_version_id === options.outlineVersionId)),
     listScriptTaskPages: async (taskId) => pendingPages?.taskId === taskId ? pendingPages.promise : [page(taskId)],
@@ -57,6 +58,8 @@ const harness = () => {
     streamContinueScriptGeneration: async (id, _payload, callbacks) => { continued.push(id); streamCallbacks = callbacks; await stream.promise },
     suspendScriptTask: async (id) => { suspended.push(id) },
     clearPageScript: async (projectId, pageNo, taskId) => { cleared.push({ projectId, pageNo, taskId }); return page(taskId) },
+    updatePageScript: async (projectId, pageNo, payload) => { saved.push({ projectId, pageNo, payload }); return { ...page(payload.task_id), ...payload, page_no: pageNo, script_review_status: 'unreviewed' } },
+    createPageScript: async (projectId, payload) => { saved.push({ projectId, pageNo: payload.page_no, payload }); return { ...page(payload.task_id, payload.task_id * 10 + payload.page_no), ...payload, script_review_status: 'unreviewed' } },
   }
   const router = {
     replace: async (next) => { replacements.push(next); route.query = { ...next.query } },
@@ -66,6 +69,7 @@ const harness = () => {
     vue: { ...vue, onMounted: (fn) => { lifecycle.mounted = fn }, onActivated: (fn) => { lifecycle.activated = fn }, onDeactivated: (fn) => { lifecycle.deactivated = fn } },
     pinia: { storeToRefs: (store) => store },
     'vue-router': { useRoute: () => route, useRouter: () => router },
+    '@/components/workspace/InfoTip.vue': {},
     'vue-i18n': { useI18n: () => ({ locale: vue.ref('zh'), t: (key) => key }) },
     'element-plus': { ElMessage: { error() {}, warning() {}, success() {}, info() {} }, ElMessageBox: { confirm: () => confirm.current } },
     '@element-plus/icons-vue': {},
@@ -85,12 +89,64 @@ const harness = () => {
   const scope = vue.effectScope()
   const state = scope.run(() => runtime.exports.default.setup({}, { expose() {} }))
   const flush = async () => { for (let i = 0; i < 8; i++) { await vue.nextTick(); await new Promise(setImmediate) } }
-  return { state, route, selectedProjectId, projects, tasks, activities, suspended, continued, replacements, lifecycle, stream, confirm, cleared, page,
+  return { state, route, selectedProjectId, projects, tasks, activities, suspended, continued, replacements, lifecycle, stream, confirm, cleared, saved, api, page,
     get callbacks() { return streamCallbacks },
     holdPages(taskId) { pendingPages = { taskId, ...deferred() }; return pendingPages },
     flush, close: () => scope.stop(),
   }
 }
+
+test('脚本关联名称、详情和环境条件回填后一起保存，人物选择只包含当前分段', async () => {
+  const h = harness()
+  try {
+    await h.lifecycle.mounted(); await h.flush()
+    h.state.sections.value = [{ id: 101, section_no: 1, page_start: 1, page_end: 1 }, { id: 102, section_no: 2, page_start: 2, page_end: 2 }]
+    h.state.scenes.value = [{ id: 71, scene_key: 'room', name: '储物间', time_of_day: 'night' }, { id: 72, scene_key: 'library', name: '图书室' }]
+    h.state.visualCharacters.value = [{ id: 51, section_id: 101, section_no: 1, character_key: 'lin', name: '林', outline_character: { appearance: '短发' }, current_clothing: '校服' },
+      { id: 52, section_id: 102, section_no: 2, character_key: 'chen', name: '陈' }]
+    const conditions = { time_of_day: '白天', weather: '晴', lighting: '窗外自然光', atmosphere: '安静' }
+    const page = { ...h.page(11), section_id: 101, scene_id: 71, scene_name: '储物间', reference_subject_name: '教学楼储物间',
+      character_bindings: [{ id: 51, name: '林', outline_character_id: 31, outfit_variant_id: 41 }], scene_conditions: conditions,
+      characters: '林', clothing: '校服', scene: '原脚本文字', composition: '全景', character_action: '翻找', dialogue: '无' }
+    h.state.pages.value = [page]
+    assert.equal(h.state.pageSceneName(page), '教学楼储物间')
+    assert.deepEqual(h.state.pageCharacterBindings(page).map(item => item.name), ['林'])
+    assert.equal(h.state.pageCharacterDetails(page)[0].current_clothing, '校服')
+    h.state.openEditScript(page); await h.flush()
+    assert.deepEqual({ ...h.state.scriptForm.scene_conditions }, conditions)
+    assert.deepEqual([...h.state.scriptForm.character_ids], [51])
+    assert.deepEqual(h.state.editorCharacters.value.map(item => item.id), [51])
+    h.state.scriptForm.scene_id = 72; h.state.scriptForm.character_ids = []
+    h.state.scriptForm.scene_conditions.time_of_day = '夜晚'
+    await h.state.saveManualScript()
+    assert.equal(h.saved[0].payload.scene_id, 72)
+    assert.deepEqual(h.saved[0].payload.character_ids, [])
+    assert.equal(h.saved[0].payload.scene_conditions.time_of_day, '夜晚')
+    assert.equal(h.saved[0].payload.scene, '原脚本文字')
+    assert.equal(h.state.pages.value[0].script_review_status, 'unreviewed')
+  } finally { h.close() }
+})
+
+test('路由离页后长连接继续接收页面关联名称和条件，返回时保持内存结果', async () => {
+  const h = harness()
+  try {
+    await h.lifecycle.mounted(); await h.flush()
+    const running = h.state.generateBatch(); await h.flush()
+    h.tasks.push({ id: 13, project_id: 1, outline_version_id: 101, status: 'running', mode: 'batch', total_pages: 2 })
+    h.callbacks.onEvent('task', { task_id: 13 }); await h.flush()
+    h.route.path = '/visual-bible'; h.lifecycle.deactivated?.(); await h.flush()
+    const conditions = { time_of_day: '夜晚', weather: '雨', lighting: '室内灯光', atmosphere: '紧张' }
+    h.callbacks.onEvent('page', { page: { ...h.page(13), scene_name: '储物间', reference_subject_name: '教学楼储物间',
+      character_bindings: [{ id: 51, name: '林', outline_character_id: 31, outfit_variant_id: 41 }], scene_conditions: conditions } })
+    await h.flush()
+    const received = h.state.pages.value.find(page => page.task_id === 13)
+    assert.equal(h.state.pageSceneName(received), '教学楼储物间')
+    assert.deepEqual({ ...h.state.pageConditions(received) }, conditions)
+    assert.equal(h.state.pageCharacterBindings(received)[0].name, '林')
+    h.tasks.find(task => task.id === 13).status = 'succeeded'
+    h.callbacks.onEvent('done', {}); h.stream.resolve(); await running
+  } finally { h.stream.resolve(); h.close() }
+})
 
 test('脚本工作台在同路由深链接中选择原批次所属大纲', async () => {
   const h = harness()

@@ -26,9 +26,11 @@ from backend.models.database import SessionLocal
 from backend.models.enums import GenerationMode, ImagePromptType
 from backend.repositories.comic_repository import ComicRepository
 from backend.repositories.generation_repository import GenerationRepository
+from backend.repositories.image_spec_repository import ImageSpecRepository
 from backend.i18n.errors import AppError, http_exception, sse_error_payload
 from backend.i18n.locale import request_locale
 from backend.services.image_generation_service import ImageGenerationService
+from backend.services.image_spec_service import ImageSpecService
 
 
 router = APIRouter(prefix="/api/image-generation", tags=["image-generation"])
@@ -100,6 +102,7 @@ def page_to_response(
     *,
     prompt_type: ImagePromptType = ImagePromptType.NATURAL_LANGUAGE,
     generation_mode: GenerationMode = GenerationMode.PREVIEW,
+    current_context_hash: str | None = None,
 ) -> ImageGenerationPageResponse:
     """把页面和其生成图片列表转换为图片生成页面响应。"""
 
@@ -132,13 +135,19 @@ def page_to_response(
         status=page.status.value,
         selected_image_id=page.selected_image_id,
         latest_spec_id=spec.id if spec else None,
+        spec_stale=bool(spec is not None and current_context_hash is not None and (
+            not ImageSpecService(ImageSpecRepository(repo.session)).page_context_is_current(spec.snapshot, current_context_hash)
+            or spec.source_hash != ImageSpecService(ImageSpecRepository(repo.session)).current_image_spec_source_hash(spec)
+        )),
         spec_warnings=json.loads(spec.warnings_json) if spec else [],
         completed_candidates=completed_candidates,
         images=[image_to_response(image) for image in images],
     )
 
 
-def task_to_response(task: GenerationTask) -> GenerationTaskResponse:
+def task_to_response(
+    task: GenerationTask, *, progress: dict[str, int | None] | None = None,
+) -> GenerationTaskResponse:
     """把 ComfyUI 生成任务转换为 API 响应。"""
 
     return GenerationTaskResponse(
@@ -158,6 +167,7 @@ def task_to_response(task: GenerationTask) -> GenerationTaskResponse:
         error_message=task.error_message,
         created_at=task.created_at,
         updated_at=task.updated_at,
+        progress=progress,
     )
 
 
@@ -328,11 +338,17 @@ def list_generation_pages(
 ) -> ImageGenerationPageListResponse:
     """读取脚本任务下的图片生成页面状态和已有图片。"""
 
+    # 接受旧查询参数，但新任务只有一套可选参考图提示词。
+    generation_mode = GenerationMode.PREVIEW
     with SessionLocal() as db_session:
         repo = ComicRepository(db_session)
         service = ImageGenerationService(repo)
         try:
             pages = service.list_script_task_pages(task_id)
+            # 只检查当前来源，让就绪度与生成前校验一致；不调用模型或重新准备。
+            current_hashes = ImageSpecService(ImageSpecRepository(db_session)).current_page_context_hashes(
+                task_id, page_ids=[page.id for page in pages],
+            ) if pages else {}
         except ValueError as exc:
             raise http_exception(exc, request_locale(http_request)) from exc
         project_id = pages[0].project_id if pages else 0
@@ -345,6 +361,7 @@ def list_generation_pages(
                     repo,
                     prompt_type=prompt_type,
                     generation_mode=generation_mode,
+                    current_context_hash=current_hashes.get(page.id),
                 )
                 for page in pages
             ],
@@ -363,13 +380,15 @@ def list_generation_batches(
 
     with SessionLocal() as db_session:
         repo = ComicRepository(db_session)
-        if repo.get_script_task(task_id) is None:
+        if not repo.script_task_exists(task_id):
             raise http_exception(
                 ValueError(f"ScriptGenerationTask not found: {task_id}"),
                 request_locale(http_request),
             )
+        batches = repo.list_generation_batches(task_id)
+        progress = GenerationRepository(db_session).batch_progress([item.id for item in batches])
         return GenerationBatchListResponse(
-            items=[task_to_response(item) for item in repo.list_generation_batches(task_id)]
+            items=[task_to_response(item, progress=progress[item.id]) for item in batches]
         )
 
 
@@ -379,7 +398,7 @@ def stream_generate_for_script_task(
     request: GenerateImagesRequest,
     http_request: Request,
 ) -> EventSourceResponse:
-    """批量生成脚本任务下所有页面图片，并用 SSE 返回进度。"""
+    """使用已准备好的提示词生成所选页面；未传页码时兼容整批生成。"""
 
     locale = request_locale(http_request)
 
@@ -389,6 +408,9 @@ def stream_generate_for_script_task(
             try:
                 async for event, payload in service.stream_generate_for_script_task(
                     task_id=task_id,
+                    page_ids=request.page_ids,
+                    width=request.width,
+                    height=request.height,
                     tool_preset_id=request.effective_tool_preset_id,
                     poll_interval_seconds=request.poll_interval_seconds,
                     wait_timeout_seconds=request.wait_timeout_seconds,
@@ -479,6 +501,8 @@ def stream_generate_for_page(
             try:
                 async for event, payload in service.stream_generate_for_page(
                     page_id=page_id,
+                    width=request.width,
+                    height=request.height,
                     tool_preset_id=request.effective_tool_preset_id,
                     poll_interval_seconds=request.poll_interval_seconds,
                     wait_timeout_seconds=request.wait_timeout_seconds,

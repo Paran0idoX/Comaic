@@ -1,4 +1,4 @@
-"""ViStoryBench 一致性评估、准出状态和整轨采用 API。"""
+"""ViStoryBench 旁路评测、历史查询和人工采用候选 API。"""
 
 from __future__ import annotations
 
@@ -76,7 +76,7 @@ def task_to_response(task: ConsistencyEvaluationTask) -> ConsistencyTaskResponse
     response_model=ConsistencyReadinessResponse,
 )
 def get_batch_readiness(batch_task_id: int) -> ConsistencyReadinessResponse:
-    """返回批次覆盖、严格参考图和本机评估环境的完整预检。"""
+    """只检查评测需要的批次、基准图和环境，不影响出图或选图。"""
 
     with SessionLocal() as session:
         result = ConsistencyEvaluationService(
@@ -170,7 +170,7 @@ def stream_evaluation_events(task_id: int, http_request: Request) -> EventSource
 
 @router.post("/tracks/{track_id}/adopt", response_model=ConsistencyTrackResponse)
 def adopt_track(track_id: int, http_request: Request) -> ConsistencyTrackResponse:
-    """只允许采用通过且输入未过期的整条候选轨道。"""
+    """人工采用已完成评测且输入未过期的候选，分数不构成门槛。"""
 
     with SessionLocal() as session:
         try:

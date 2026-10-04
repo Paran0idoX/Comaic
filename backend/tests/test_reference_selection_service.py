@@ -26,11 +26,11 @@ def _plan(view="front", framing="full_body") -> dict:
 
 
 @pytest.mark.parametrize("view,framing,roles", [
-    ("front", "face", ["identity_face", "identity_half_body", "identity_full_body"]),
-    ("front", "half_body", ["identity_half_body", "identity_full_body", "identity_face"]),
-    ("front", "full_body", ["identity_full_body", "identity_half_body", "identity_face"]),
-    ("side", "full_body", ["identity_side", "identity_full_body", "identity_half_body", "identity_face"]),
-    ("back", "full_body", ["identity_back", "identity_full_body", "identity_half_body", "identity_side", "identity_face"]),
+    ("front", "face", ["identity_face", "identity_full_body"]),
+    ("front", "half_body", ["identity_full_body", "identity_face"]),
+    ("front", "full_body", ["identity_full_body", "identity_face"]),
+    ("side", "full_body", ["identity_side", "identity_full_body", "identity_face"]),
+    ("back", "full_body", ["identity_back", "identity_full_body", "identity_side", "identity_face"]),
 ])
 def test_reference_roles_follow_fixed_fallback_order_before_latest_version(view, framing, roles) -> None:
     snapshot = _snapshot()
@@ -53,6 +53,21 @@ def test_unknown_framing_uses_full_body_and_old_camera_view_is_normalized() -> N
     selected = ReferenceSelectionService.select(snapshot=_snapshot(), shot_plan=plan)
     assert selected["items"][0]["role"] == "identity_back"
     assert not any(item["role"] == "identity_face" for item in selected["items"])
+
+
+@pytest.mark.parametrize("view,framing", [("front", "face"), ("front", "half_body"), ("side", "full_body"), ("back", "full_body")])
+def test_retired_half_body_is_never_selected_even_when_latest_or_only_reference(view, framing):
+    snapshot = _snapshot()
+    old_half = _asset(99, "identity_half_body", version=999)
+    snapshot["characters"][0]["identity_assets"].append(old_half)
+    original = deepcopy(snapshot)
+    selected = ReferenceSelectionService.select(snapshot=snapshot, shot_plan=_plan(view, framing))
+    assert all(item["asset_id"] != 99 and item["role"] != "identity_half_body" for item in selected["items"])
+    assert snapshot == original
+    snapshot["characters"][0]["identity_assets"] = [old_half]
+    selected = ReferenceSelectionService.select(snapshot=snapshot, shot_plan=_plan(view, framing))
+    assert not any(item["owner"]["category"] == "character" for item in selected["items"])
+    assert any(item["code"] == "image_spec.identity_asset_missing" for item in selected["warnings"])
 
 
 def test_changed_outfit_excludes_marked_old_body_but_unscoped_body_keeps_identity_only_use() -> None:

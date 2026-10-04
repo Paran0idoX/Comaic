@@ -1,0 +1,5 @@
+{
+  "projected_environment": "Depict this moment's visible environment and object placement: {framing_notes}. Scene references guide architecture, spatial layout, materials and fixed furnishings. Use this page's environment conditions for time, weather, illumination and atmosphere instead of copying incidental conditions from reference images. Do not copy incidental movable objects or earlier object positions from scene references unless they are explicitly present in this moment's description. If this moment includes a closed container, keep its contents concealed; do not reveal its interior or place a copy of its contents outside.",
+  "reference_scope_tags": "current-moment environment and object placement, scene references for architecture and materials, page conditions override reference weather and lighting, only explicitly visible objects, no incidental reference objects, faithful current object states",
+  "page_conditions": "Environment conditions on this page: {conditions}. These conditions take precedence over incidental lighting or weather in scene references."
+}

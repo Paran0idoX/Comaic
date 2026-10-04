@@ -5,6 +5,7 @@ from uuid import uuid4
 from backend.i18n.errors import AppError
 from backend.models.comic import ComicProject, ReferenceSubject, ScriptScene
 from backend.models.enums import VisualEntityType
+from backend.models.scene_conditions import SCENE_DEFINITION_VERSION
 from backend.repositories.reference_subject_repository import ReferenceSubjectRepository
 
 
@@ -23,7 +24,8 @@ class ReferenceSubjectService:
         return subject
 
     def create(self, *, project_id: int, entity_type: VisualEntityType, name: str,
-               description: str = "", negative_constraints: str = "", key: str | None = None):
+               description: str = "", negative_constraints: str = "", key: str | None = None,
+               scene_definition_version: int = SCENE_DEFINITION_VERSION):
         self.require_project(project_id)
         if entity_type not in {VisualEntityType.SCENE, VisualEntityType.PROP}:
             raise AppError("reference.subject_type_invalid", status_code=422)
@@ -34,7 +36,8 @@ class ReferenceSubjectService:
         if self.repository.get_by_key(project_id, entity_type, normalized_key):
             raise AppError("reference.subject_key_exists", status_code=409)
         return self.repository.save(ReferenceSubject(project_id=project_id, entity_type=entity_type,
-            key=normalized_key, name=name, description=description, negative_constraints=negative_constraints))
+            key=normalized_key, name=name, description=description, negative_constraints=negative_constraints,
+            scene_definition_version=scene_definition_version))
 
     def update(self, subject_id: int, *, name: str, description: str = "", negative_constraints: str = ""):
         subject = self.get(subject_id)
@@ -62,8 +65,10 @@ class ReferenceSubjectService:
                 subject = ReferenceSubject(project_id=project_id, entity_type=VisualEntityType.SCENE,
                     key=key, name=scene.name or scene.scene_key,
                     description="\n".join(value for value in (scene.location_type, scene.environment_details,
-                        scene.time_of_day, scene.lighting, scene.weather, scene.color_palette, scene.visual_anchors) if value),
-                    negative_constraints=scene.negative_constraints)
+                        scene.color_palette, *((scene.time_of_day, scene.lighting, scene.weather)
+                        if scene.task.scene_definition_version < SCENE_DEFINITION_VERSION else ())) if value),
+                    negative_constraints=scene.negative_constraints,
+                    scene_definition_version=scene.task.scene_definition_version)
                 self.repository.session.add(subject)
                 self.repository.session.flush()
             scene.reference_subject_id = subject.id

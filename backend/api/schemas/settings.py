@@ -5,6 +5,24 @@ from pydantic import BaseModel, Field
 from backend.models.enums import LLMProvider
 
 
+class SystemPromptResponse(BaseModel):
+    """设置树叶节点；同时提供默认值供恢复及预览。"""
+
+    key: str
+    content: str
+    default_content: str
+    is_overridden: bool
+    default_files: list[str]
+
+
+class UpdateSystemPromptRequest(BaseModel):
+    content: str | None = Field(max_length=200000)
+
+
+class UpdateModelSystemPromptRequest(UpdateSystemPromptRequest):
+    model: str = Field(min_length=1, max_length=255)
+
+
 class LLMConfigResponse(BaseModel):
     """单组模型 API 配置响应；本地 MVP 设置页允许回显明文 API Key。"""
 

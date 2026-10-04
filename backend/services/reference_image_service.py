@@ -15,7 +15,9 @@ from backend.models.enums import (ApprovalStatus, GenerationMode, GenerationRunS
 from backend.repositories.visual_bible_repository import VisualBibleRepository
 from backend.services.character_reference_service import CharacterReferenceService, MAX_PROMPT_LENGTH
 from backend.services.reference_catalog import REFERENCE_CATALOG
-from backend.services.reference_inputs import prepare_renderer_spec
+from backend.services.reference_inputs import prepare_renderer_spec, validate_renderer_spec
+from backend.services.reference_render_size import reference_sizes
+from backend.services.reference_visual_profile_service import ReferenceVisualProfileService
 from backend.services.visual_bible_service import VisualBibleService
 from backend.services.workflow_compiler import parse_bindings, parse_capabilities
 from backend.utils.prompt_loader import PromptLoader
@@ -47,12 +49,12 @@ class ReferenceImageService(CharacterReferenceService):
             if outfit_variant_id is not None:
                 outfit = self.repository.session.get(OutfitVariant, outfit_variant_id)
                 if (outfit is None or outfit.project_id != project_id or outfit.outline_character_id != character.id
-                        or outfit.status == ApprovalStatus.ARCHIVED):
+                        or outfit.status in {ApprovalStatus.ARCHIVED, ApprovalStatus.DELETED}):
                     raise AppError("reference.outfit_invalid", status_code=422)
             snapshot = {"name": character.name or character.character_key,
                 "description": character.appearance, "negative_constraints": character.negative_constraints,
                 "character_key": character.character_key,
-                "appearance": character.appearance, "visual_anchors": character.visual_anchors,
+                "appearance": character.appearance,
                 "hairstyle": character.default_hairstyle, "clothing": character.default_clothing,
                 "accessories": character.default_accessories, "color_palette": character.default_color_palette}
             return character, outfit, snapshot, None
@@ -65,6 +67,8 @@ class ReferenceImageService(CharacterReferenceService):
             snapshot = {"name": subject.name, "description": subject.description,
                 "negative_constraints": subject.negative_constraints, "key": subject.key}
             if entity_id is not None:
+                if entity_type == VisualEntityType.SCENE and subject.scene_definition_version >= 2:
+                    raise AppError("reference.owner_invalid", status_code=422)
                 version = self.repository.session.get(SceneVisualVersion, entity_id) if entity_type == VisualEntityType.SCENE else None
                 if (version is None or version.project_id != project_id
                         or version.script_scene.task.project_id != project_id
@@ -87,7 +91,7 @@ class ReferenceImageService(CharacterReferenceService):
             if version is not None and version.project_id == project_id:
                 scene = version.script_scene
                 return version, None, {"name": scene.name or scene.scene_key,
-                    "description": "\n".join(value for value in (scene.environment_details, scene.visual_anchors,
+                    "description": "\n".join(value for value in (scene.environment_details,
                         scene.lighting, scene.color_palette) if value),
                     "negative_constraints": scene.negative_constraints}, None
         raise AppError("reference.owner_invalid", status_code=422)
@@ -115,19 +119,21 @@ class ReferenceImageService(CharacterReferenceService):
         result = []
         for asset_id in source_asset_ids:
             asset = self.repository.session.get(VisualAsset, asset_id)
-            if asset is None or asset.project_id != project_id or asset.status != ApprovalStatus.APPROVED:
+            if asset is None or asset.project_id != project_id or asset.status != ApprovalStatus.APPROVED or asset.role == VisualAssetRole.IDENTITY_HALF_BODY:
                 raise AppError("reference.sources_invalid", status_code=422)
             result.append(asset)
         return result
 
     def preview_reference_prompts(self, *, project_id, entity_type, entity_id=None,
             reference_subject_id=None, outfit_variant_id=None, tool_preset_id, roles,
-            source_mode=ReferenceSourceMode.AUTO, source_asset_ids=None, canvas_asset_id=None):
+            source_mode=ReferenceSourceMode.AUTO, source_asset_ids=None, canvas_asset_id=None, sizes=None,
+            refresh_visual_profiles=False, _compile=True):
         owner, outfit, snapshot, key = self._owner(project_id=project_id, entity_type=entity_type,
             entity_id=entity_id, reference_subject_id=reference_subject_id, outfit_variant_id=outfit_variant_id)
         roles = self._roles(entity_type, roles)
         tool = self._get_tool(tool_preset_id)
         self._ensure_txt2img_tool(tool)
+        sizes = reference_sizes(tool, roles, sizes)
         sources = self._source_assets(project_id=project_id, entity_type=entity_type, entity_id=entity_id,
             roles=roles, source_mode=source_mode, source_asset_ids=source_asset_ids or [])
         capabilities = parse_capabilities(tool.capabilities_json)
@@ -147,20 +153,37 @@ class ReferenceImageService(CharacterReferenceService):
         canvas = None
         if canvas_asset_id is not None:
             canvas = self.repository.session.get(VisualAsset, canvas_asset_id)
-            if canvas is None or canvas.project_id != project_id or canvas.status != ApprovalStatus.APPROVED:
+            if canvas is None or canvas.project_id != project_id or canvas.status != ApprovalStatus.APPROVED or canvas.role == VisualAssetRole.IDENTITY_HALF_BODY:
                 raise AppError("reference.sources_invalid", status_code=422)
         if entity_type == VisualEntityType.CHARACTER:
-            prompts = self.prompt_service.compile(character=owner, prompt_type=tool.prompt_type, roles=roles, outfit=outfit)
-        else:
-            common = {"subject_type": entity_type.value, **snapshot}
-            natural = PromptLoader.load("reference_subject_natural_prompt.md").format(**common)
-            tags = PromptLoader.load("reference_subject_tag_prompt.md").format(**common)
-            negative_natural = PromptLoader.load("reference_subject_natural_negative_prompt.md").format(**common)
-            negative_tags = PromptLoader.load("reference_subject_tag_negative_prompt.md").format(**common)
-            prompts = {role.value: {"positive": self.prompt_service._combine(tool.prompt_type, natural, tags),
-                "negative": self.prompt_service._combine(tool.prompt_type, negative_natural, negative_tags)} for role in roles}
+            identity_sources = [asset for asset in [*sources, *([canvas] if canvas else [])]
+                if asset.entity_type == VisualEntityType.CHARACTER and asset.entity_id == entity_id
+                and asset.role in {VisualAssetRole.IDENTITY_FACE, VisualAssetRole.IDENTITY_FULL_BODY,
+                    VisualAssetRole.IDENTITY_SIDE, VisualAssetRole.IDENTITY_BACK}]
+            # 自动模式的脸图始终从文字生成；同一请求中的身体图才使用自动脸图。
+            reference_roles = {role for role in roles if identity_sources
+                and not (source_mode == ReferenceSourceMode.AUTO and role == VisualAssetRole.IDENTITY_FACE and canvas is None)}
+        if entity_type != VisualEntityType.CHARACTER:
+            reference_roles = set()
+        profiles, prompts = [], {}
+        if _compile:
+            profile_service = ReferenceVisualProfileService(self.repository.session)
+            identities = profile_service.identities(entity_type=entity_type, entity_id=entity_id,
+                reference_subject_id=reference_subject_id, outfit_variant_id=outfit_variant_id)
+            profiles, profile_warnings = profile_service.prepare(project_id, identities, force=refresh_visual_profiles)
+            # 模型调用释放事务后重新读取工具和绑定，避免使用提炼期间改变的配置。
+            context = self.preview_reference_prompts(project_id=project_id, entity_type=entity_type, entity_id=entity_id,
+                reference_subject_id=reference_subject_id, outfit_variant_id=outfit_variant_id, tool_preset_id=tool_preset_id,
+                roles=roles, source_mode=source_mode, source_asset_ids=source_asset_ids,
+                canvas_asset_id=canvas_asset_id, sizes=sizes, _compile=False)
+            context["prompts"] = self.prompt_service.compile(profiles=profiles, prompt_type=context["tool"].prompt_type, roles=roles,
+                identity_from_reference_roles=context["reference_roles"])
+            context["visual_profiles"] = profiles
+            context["warnings"].extend(profile_warnings)
+            return context
         return {"tool": tool, "owner": owner, "snapshot": snapshot, "key": key,
-            "roles": roles, "sources": sources, "prompts": prompts, "canvas": canvas, "warnings": warnings}
+            "roles": roles, "sources": sources, "prompts": prompts, "canvas": canvas, "warnings": warnings,
+            "sizes": sizes, "visual_profiles": profiles, "reference_roles": reference_roles}
 
     def _reference_item(self, asset, order):
         category = asset.entity_type.value
@@ -191,8 +214,28 @@ class ReferenceImageService(CharacterReferenceService):
             "purpose": purpose.value, "reason": "Preserve the approved reference subject",
             "priority": order, "is_primary": True, "is_required": True}
 
-    def create_reference_task(self, *, project_id, candidate_count, prompts, **selection):
-        context = self.preview_reference_prompts(project_id=project_id, **selection)
+    def create_reference_tasks(self, *, project_id: int, items: list[dict]):
+        """整批验证并冻结任务；失败全部回滚，提交后由现有后台队列串行执行。"""
+        if not items or len(items) > 100:
+            raise AppError("reference.batch_invalid", status_code=422)
+        identities = [(item.get("entity_type"), item.get("entity_id"), item.get("reference_subject_id")) for item in items]
+        if len(set(identities)) != len(identities):
+            raise AppError("reference.batch_duplicate", status_code=422)
+        try:
+            tasks = [self.create_reference_task(project_id=project_id, commit=False, **item) for item in items]
+            self.repository.session.commit()
+            return tasks
+        except Exception:
+            self.repository.session.rollback()
+            raise
+
+    def create_reference_task(self, *, project_id, candidate_count, prompts, commit=True,
+            visual_profile_refs=None, refresh_visual_profiles=False, **selection):
+        # 创建和继续只冻结已经人工检查的输入，绝不重新提炼或替换 Prompt。
+        context = self.preview_reference_prompts(project_id=project_id, _compile=False, **selection)
+        profile_service = ReferenceVisualProfileService(self.repository.session)
+        context["snapshot"]["visual_profiles"] = profile_service.check_refs(
+            project_id, profile_service.identities(**selection), visual_profile_refs)
         roles = context["roles"]
         if not 1 <= candidate_count <= 4:
             raise AppError("character_reference.candidate_count_invalid", status_code=422)
@@ -218,14 +261,23 @@ class ReferenceImageService(CharacterReferenceService):
                     required_feature == WorkflowCapability.REFERENCE_IMAGE and WorkflowCapability.IMG2IMG in capabilities.features):
                 raise AppError("reference.tool_capability_missing", status_code=409)
             items = [self._reference_item(asset, index) for index, asset in enumerate(sources, start=1)]
-            spec = {"prompt": normalized[role.value], "render": {}, "subjects": [], "scene": {}, "style": {},
+            spec = {"prompt": normalized[role.value], "render": dict(context["sizes"].get(role.value, {})), "subjects": [], "scene": {}, "style": {},
+                "reference_target": {"category": selection["entity_type"].value, "key": context["snapshot"].get("character_key") or context["key"],
+                    "name": context["snapshot"]["name"], "role": role.value},
                 "required_capabilities": [required_feature.value],
                 "reference_plan": {"schema_version": 1, "items": items, "omitted": [], "warnings": context["warnings"]}}
             if context["canvas"] is not None:
                 if not capabilities.reference_images.requires_canvas:
                     raise AppError("reference.input.configuration_invalid", status_code=422)
                 spec["reference_canvas"] = self._reference_item(context["canvas"], 1)
+            # 参考图任务显式选择的输入仍须完整冻结，不能悄悄省略人工选择的原图。
             spec = prepare_renderer_spec(spec, tool, GenerationMode.FINAL)
+            if role.value in context["sizes"] and tool.provider == ImageGenerationProvider.OPENAI_IMAGES_COMPATIBLE:
+                size = context["sizes"][role.value]
+                # 尺寸与工作流一起冻结；继续生成不能读当前工具的新 size。
+                spec["renderer_config"]["size"] = f"{size['width']}x{size['height']}"
+            # 工具配置错误在任务创建前拦截；未绑定可选 seed/负向条件只作提示。
+            validate_renderer_spec(spec, tool, GenerationMode.PREVIEW, 0)
             specs[role.value] = spec
             actual_ids.extend(item["asset_id"] for item in spec.get("reference_inputs", {}).get("items", []) if item.get("asset_id"))
         seeds = []
@@ -234,12 +286,22 @@ class ReferenceImageService(CharacterReferenceService):
             if seed not in seeds:
                 seeds.append(seed)
         entity_type = selection["entity_type"]
-        return self.repository.create_task(project_id=project_id,
+        task = self.repository.create_task(project_id=project_id,
             character_id=selection.get("entity_id") if entity_type == VisualEntityType.CHARACTER else None,
             entity_type=entity_type, entity_id=selection.get("entity_id"), entity_key=context["key"],
             reference_subject_id=selection.get("reference_subject_id"), outfit_variant_id=selection.get("outfit_variant_id"),
             tool=tool, style_profile_id=None, candidate_count=candidate_count, prompts=normalized, seeds=seeds,
-            roles=roles, source_asset_ids=list(dict.fromkeys(actual_ids)), subject_snapshot=context["snapshot"], specs=specs)
+            roles=roles, source_asset_ids=list(dict.fromkeys(actual_ids)), subject_snapshot=context["snapshot"], specs=specs,
+            commit=False)
+        # flush 已取得写事务；再次核对修订，防止冻结输入期间的来源更新混入任务。
+        try:
+            profile_service.check_refs(project_id, profile_service.identities(**selection), visual_profile_refs)
+            if commit:
+                self.repository.session.commit()
+        except Exception:
+            self.repository.session.rollback()
+            raise
+        return self.get_task(task.id)
 
     def list_project_tasks(self, project_id, *, entity_type=None, entity_id=None, reference_subject_id=None):
         if self.repository.get_project(project_id) is None:
@@ -255,8 +317,6 @@ class ReferenceImageService(CharacterReferenceService):
         image = self.repository.get_image(image_id)
         if image is None:
             raise AppError("character_reference.image_not_found", status_code=404)
-        if image.promoted_asset_id is not None:
-            return self.repository.session.get(VisualAsset, image.promoted_asset_id)
         run = image.run
         if run.status != GenerationRunStatus.SUCCEEDED:
             raise AppError("character_reference.candidate_incomplete", status_code=409)
@@ -267,6 +327,9 @@ class ReferenceImageService(CharacterReferenceService):
             raise AppError("reference.input.file_changed", status_code=409)
         service = VisualBibleService(VisualBibleRepository(self.repository.session), asset_root=self.asset_root)
         try:
+            if image.promoted_asset_id is not None:
+                # 旧图被新确认撤回后，再选它只恢复原素材，不重复转存原图或增加版本。
+                return service.set_asset_status(asset_id=image.promoted_asset_id, status=ApprovalStatus.APPROVED)
             asset = service.upload_asset(project_id=task.project_id, entity_type=task.entity_type,
                 entity_id=task.entity_id if task.entity_id is not None else task.outline_character_id,
                 entity_key=task.entity_key, reference_subject_id=task.reference_subject_id,

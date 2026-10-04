@@ -28,6 +28,7 @@ from backend.models.enums import (
     ApprovalStatus,
     ComicPageStatus,
     GenerationMode,
+    ImageSpecStaleReason,
     OutlineVersionStatus,
     PageScriptReviewStatus,
     ScriptGenerationMode,
@@ -44,32 +45,6 @@ from backend.repositories.comic_repository import ComicRepository
 from backend.services.image_spec_service import ImageSpecService
 from backend.services.script_service import ScriptService
 from backend.i18n.errors import AppError
-
-
-class FakeContinuityEventAgent:
-    VERSION = "test"
-
-    async def extract(self, **_kwargs):
-        return [
-            {
-                "page_no": 1,
-                "sequence_no": 1,
-                "event_type": "pick_up_prop",
-                "target_type": "character",
-                "target_key": "alice",
-                "timing": "after_page",
-                "payload": {"prop_key": "brass_key"},
-            },
-            {
-                "page_no": 1,
-                "sequence_no": 2,
-                "event_type": "set_door_state",
-                "target_type": "scene",
-                "target_key": "workshop",
-                "timing": "after_page",
-                "payload": {"door_key": "north_door", "value": "open"},
-            },
-        ]
 
 
 class FakeShotPlannerAgent:
@@ -144,7 +119,6 @@ def _seed_project(session):
         name="Alice",
         role="mechanic",
         appearance="amber eyes and a small left-eyebrow scar",
-        visual_anchors="small scar below the left eyebrow",
         negative_constraints="never change eye color",
         default_hairstyle="short black bob",
         default_clothing="work shirt",
@@ -174,7 +148,6 @@ def _seed_project(session):
         lighting="warm desk lamp",
         weather="rain",
         environment_details="dense shelves and a rusted generator",
-        visual_anchors="arched east window",
         negative_constraints="no extra windows",
     )
     session.add_all([project, outline_character, task, section, scene])
@@ -405,10 +378,6 @@ async def test_full_compile_generates_three_prompt_specs_from_shared_visual_trut
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
-        "backend.services.image_spec_service.ContinuityEventAgent",
-        FakeContinuityEventAgent,
-    )
-    monkeypatch.setattr(
         "backend.services.image_spec_service.ShotPlannerAgent",
         FakeShotPlannerAgent,
     )
@@ -441,13 +410,13 @@ async def test_full_compile_generates_three_prompt_specs_from_shared_visual_trut
 
     assert "free text that must not override" not in tag_spec["positive_prompt"]
     assert "navy repair coat" in tag_spec["positive_prompt"]
-    assert "holding brass_key" in tag_spec["positive_prompt"]
-    assert "object north_door open" in tag_spec["positive_prompt"]
+    assert "holding brass_key" not in tag_spec["positive_prompt"]
+    assert "object north_door closed" in tag_spec["positive_prompt"]
     assert "never change eye color" in tag_spec["negative_prompt"]
     assert "no red coat" in tag_spec["negative_prompt"]
     assert "no extra windows" in tag_spec["negative_prompt"]
     assert "lora" not in tag_spec["required_capabilities"]
-    assert tag_spec["spec"]["subjects"][0]["props"][0]["prop_key"] == "brass_key"
+    assert tag_spec["spec"]["subjects"][0]["props"] == []
     assert hybrid_spec["positive_prompt"] == (
         f"{natural_spec['positive_prompt']}\n{tag_spec['positive_prompt']}"
     )
@@ -465,44 +434,94 @@ async def test_full_compile_generates_three_prompt_specs_from_shared_visual_trut
         for snapshot in compilation.snapshots
     }
     assert page_states[1]["scene"]["object_states"]["north_door"] == "closed"
-    assert page_states[2]["scene"]["object_states"]["north_door"] == "open"
-    assert page_states[2]["characters"][0]["held_props"] == ["brass_key"]
+    assert page_states[2]["scene"]["object_states"]["north_door"] == "closed"
+    assert page_states[2]["characters"][0]["held_props"] == []
+    assert compilation.events == []
+    assert compilation.llm_config_id is None and compilation.llm_model is None
+    assert not {"continuity", "continuity_progress"} & {name for name, _ in events}
+    assert page_states[1]["page_script"]["summary"] == pages[0].summary
+    assert page_states[1]["characters"][0]["identity"] == page_states[2]["characters"][0]["identity"]
+    assert all("amber eyes and a small left-eyebrow scar" in item["positive_prompt"] for item in specs)
+
+
+@pytest.mark.asyncio
+async def test_spec_list_reports_current_pages_and_stale_reasons(monkeypatch) -> None:
+    """就绪度读取实时来源，页面修改只使本页失效，历史提示词和快照保持不变。"""
+
+    monkeypatch.setattr("backend.services.image_spec_service.ShotPlannerAgent", FakeShotPlannerAgent)
+    session = _session()
+    task, pages, _style = _seed_project(session)
+    service = ImageSpecService(ImageSpecRepository(session))
+    async for _event in service.stream_compile_task(
+        task_id=task.id, style_profile_id=None, shot_planner_preset_id=None,
+        negative_prompt_preset_id=None, generation_mode=GenerationMode.PREVIEW,
+    ):
+        pass
+    original = service.list_task_specs(task_id=task.id)
+    assert len(original) == 6
+    assert all(not item["spec_stale"] and not item["stale_reasons"] for item in original)
+    pages[0].summary += " revised"
+    session.commit()
+    updated = service.list_task_specs(task_id=task.id)
+    assert all(item["spec_stale"] for item in updated if item["page_id"] == pages[0].id)
+    assert all(not item["spec_stale"] for item in updated if item["page_id"] == pages[1].id)
+    assert all(ImageSpecStaleReason.PAGE_SCRIPT_CHANGED in item["stale_reasons"]
+               for item in updated if item["page_id"] == pages[0].id)
+    asset = session.scalar(select(VisualAsset).where(VisualAsset.role == VisualAssetRole.IDENTITY_FACE))
+    asset.version += 1
+    session.commit()
+    updated = service.list_task_specs(task_id=task.id)
+    assert all(ImageSpecStaleReason.CHARACTER_INPUTS_CHANGED in item["stale_reasons"] for item in updated)
+    scene = pages[0].script_scene.selected_visual_version
+    scene.status = ApprovalStatus.DRAFT
+    session.commit()
+    updated = service.list_task_specs(task_id=task.id)
+    assert all(ImageSpecStaleReason.SCENE_INPUTS_CHANGED in item["stale_reasons"] for item in updated)
+    for item in updated:
+        spec = session.get(ImageSpec, item["id"])
+        spec.source_hash = "old-rules"
+    session.commit()
+    updated = service.list_task_specs(task_id=task.id)
+    assert all(ImageSpecStaleReason.PROMPT_RULES_CHANGED in item["stale_reasons"] for item in updated)
+    assert [(item["id"], item["positive_prompt"], item["snapshot_id"]) for item in updated] == [
+        (item["id"], item["positive_prompt"], item["snapshot_id"]) for item in original
+    ]
 
 
 def test_reference_changes_stale_source_and_historical_style_changes_do_not() -> None:
     session = _session()
     task, pages, style = _seed_project(session)
     service = ImageSpecService(ImageSpecRepository(session))
-    initial = service.current_continuity_source_hash(task.id)
+    initial = service.current_page_context_source_hash(task.id)
     style.positive_tag = "changed historical style"
     style_asset = session.scalar(select(VisualAsset).where(VisualAsset.role == VisualAssetRole.STYLE_REFERENCE))
     style_asset.version += 1
     session.commit()
-    assert service.current_continuity_source_hash(task.id) == initial
+    assert service.current_page_context_source_hash(task.id) == initial
 
     character_asset = session.scalar(select(VisualAsset).where(VisualAsset.role == VisualAssetRole.IDENTITY_FACE))
     character_asset.version += 1
     session.commit()
-    revised = service.current_continuity_source_hash(task.id)
+    revised = service.current_page_context_source_hash(task.id)
     assert revised != initial
     character_asset.status = ApprovalStatus.DRAFT
     session.commit()
-    revoked = service.current_continuity_source_hash(task.id)
+    revoked = service.current_page_context_source_hash(task.id)
     assert revoked != revised
     character_asset.status = ApprovalStatus.APPROVED
     session.commit()
-    assert service.current_continuity_source_hash(task.id) == revised
+    assert service.current_page_context_source_hash(task.id) == revised
 
     subject = ReferenceSubject(project_id=task.project_id, entity_type=VisualEntityType.SCENE, key="catalog_room", name="Catalog room", description="round skylight")
     session.add(subject)
     session.flush()
     pages[0].script_scene.reference_subject_id = subject.id
     session.commit()
-    bound = service.current_continuity_source_hash(task.id)
+    bound = service.current_page_context_source_hash(task.id)
     assert bound != revised
     subject.description = "square skylight"
     session.commit()
-    assert service.current_continuity_source_hash(task.id) != bound
+    assert service.current_page_context_source_hash(task.id) != bound
 
 
 def test_asset_metadata_clothing_and_subject_association_are_part_of_source_hash() -> None:
@@ -510,11 +529,11 @@ def test_asset_metadata_clothing_and_subject_association_are_part_of_source_hash
     task, pages, _style = _seed_project(session)
     service = ImageSpecService(ImageSpecRepository(session))
     asset = session.scalar(select(VisualAsset).where(VisualAsset.role == VisualAssetRole.IDENTITY_FACE))
-    previous = service.current_continuity_source_hash(task.id)
+    previous = service.current_page_context_source_hash(task.id)
     for field, value in [("outfit_variant_id", pages[0].visual_characters[0].outfit_variant_id), ("mime_type", "image/webp"), ("width", 240), ("height", 360), ("local_path", "independent-original.webp")]:
         setattr(asset, field, value)
         session.commit()
-        current = service.current_continuity_source_hash(task.id)
+        current = service.current_page_context_source_hash(task.id)
         assert current != previous
         previous = current
 
@@ -566,140 +585,6 @@ def test_scene_baseline_separates_generic_and_version_specific_subject_assets() 
 
 
 @pytest.mark.asyncio
-async def test_llm_cannot_override_locked_accessory_description(monkeypatch) -> None:
-    class AccessoryOverrideAgent:
-        VERSION = "test"
-
-        async def extract(self, **_kwargs):
-            return [
-                {
-                    "page_no": 1,
-                    "sequence_no": 1,
-                    "event_type": "set_accessory",
-                    "target_type": "character",
-                    "target_key": "alice",
-                    "timing": "after_page",
-                    "payload": {
-                        "accessory_key": "tool_belt",
-                        "value": "removed and placed on the desk",
-                    },
-                }
-            ]
-
-    monkeypatch.setattr(
-        "backend.services.image_spec_service.ContinuityEventAgent",
-        AccessoryOverrideAgent,
-    )
-    monkeypatch.setattr(
-        "backend.services.image_spec_service.ShotPlannerAgent",
-        FakeShotPlannerAgent,
-    )
-    session = _session()
-    task, _pages, style = _seed_project(session)
-    service = ImageSpecService(ImageSpecRepository(session))
-
-    async for _event in service.stream_compile_task(
-        task_id=task.id,
-        style_profile_id=style.id,
-        shot_planner_preset_id=None,
-        negative_prompt_preset_id=None,
-        generation_mode=GenerationMode.FINAL,
-    ):
-        pass
-
-    compilation = service.repository.list_compilations(task.id)[0]
-    page_two = next(item for item in compilation.snapshots if item.page.page_no == 2)
-    character = json.loads(page_two.state_json)["characters"][0]
-    assert character["accessories"]["description"] == "red tool belt"
-    assert character["accessories"]["states"] == {}
-
-
-@pytest.mark.asyncio
-async def test_manual_event_revision_recomputes_current_system_events(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "backend.services.image_spec_service.ContinuityEventAgent",
-        FakeContinuityEventAgent,
-    )
-    monkeypatch.setattr(
-        "backend.services.image_spec_service.ShotPlannerAgent",
-        FakeShotPlannerAgent,
-    )
-    session = _session()
-    task, _pages, style = _seed_project(session)
-    service = ImageSpecService(ImageSpecRepository(session))
-    async for _event in service.stream_compile_task(
-        task_id=task.id,
-        style_profile_id=style.id,
-        shot_planner_preset_id=None,
-        negative_prompt_preset_id=None,
-        generation_mode=GenerationMode.FINAL,
-    ):
-        pass
-    original = service.repository.list_compilations(task.id)[0]
-
-    character = session.scalar(select(ScriptCharacter))
-    character.current_state = "calm"
-    session.commit()
-    revised = await service.replace_events(compilation_id=original.id, events=[])
-    first_snapshot = min(revised.snapshots, key=lambda item: item.page.page_no)
-    state = json.loads(first_snapshot.state_json)
-
-    assert state["characters"][0]["conditions"]["section_state"] == "calm"
-
-
-@pytest.mark.asyncio
-async def test_continuity_reducer_failure_retries_with_persisted_audit(monkeypatch) -> None:
-    class RetryContinuityAgent:
-        VERSION = "test"
-        calls = 0
-
-        async def extract(self, **_kwargs):
-            type(self).calls += 1
-            if type(self).calls == 1:
-                return [
-                    {
-                        "page_no": 1,
-                        "sequence_no": 1,
-                        "event_type": "drop_prop",
-                        "target_type": "character",
-                        "target_key": "alice",
-                        "timing": "before_page",
-                        "payload": {"prop_key": "brass_key"},
-                    }
-                ]
-            return []
-
-    monkeypatch.setattr(
-        "backend.services.image_spec_service.ContinuityEventAgent",
-        RetryContinuityAgent,
-    )
-    monkeypatch.setattr(
-        "backend.services.image_spec_service.ShotPlannerAgent",
-        FakeShotPlannerAgent,
-    )
-    session = _session()
-    task, _pages, style = _seed_project(session)
-    service = ImageSpecService(ImageSpecRepository(session))
-
-    events = [
-        item
-        async for item in service.stream_compile_task(
-            task_id=task.id,
-            style_profile_id=style.id,
-            shot_planner_preset_id=None,
-            negative_prompt_preset_id=None,
-            generation_mode=GenerationMode.PREVIEW,
-        )
-    ]
-
-    assert events[-1][0] == "done"
-    attempts = service.repository.list_compilations(task.id)
-    assert [item.status.value for item in attempts[:2]] == ["succeeded", "failed"]
-    assert "does not hold prop" in (attempts[1].error_message or "")
-    assert RetryContinuityAgent.calls == 2
-
-
-@pytest.mark.asyncio
 async def test_partial_shot_plans_are_persisted_and_next_compile_resumes(monkeypatch) -> None:
     class PartialShotPlanner(FakeShotPlannerAgent):
         async def plan(self, *, page, **kwargs):
@@ -714,10 +599,6 @@ async def test_partial_shot_plans_are_persisted_and_next_compile_resumes(monkeyp
             type(self).calls.append(page["page_no"])
             return await super().plan(**kwargs)
 
-    monkeypatch.setattr(
-        "backend.services.image_spec_service.ContinuityEventAgent",
-        FakeContinuityEventAgent,
-    )
     monkeypatch.setattr(
         "backend.services.image_spec_service.ShotPlannerAgent",
         PartialShotPlanner,
@@ -770,7 +651,7 @@ async def test_partial_shot_plans_are_persisted_and_next_compile_resumes(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_prompt_mode_change_reuses_model_independent_shot_plans(monkeypatch) -> None:
+async def test_retired_mode_parameter_reuses_the_same_prepared_prompts(monkeypatch) -> None:
     class CountingShotPlanner(FakeShotPlannerAgent):
         calls: list[int] = []
 
@@ -778,10 +659,6 @@ async def test_prompt_mode_change_reuses_model_independent_shot_plans(monkeypatc
             type(self).calls.append(page["page_no"])
             return await super().plan(**kwargs)
 
-    monkeypatch.setattr(
-        "backend.services.image_spec_service.ContinuityEventAgent",
-        FakeContinuityEventAgent,
-    )
     monkeypatch.setattr(
         "backend.services.image_spec_service.ShotPlannerAgent",
         CountingShotPlanner,
@@ -816,5 +693,26 @@ async def test_prompt_mode_change_reuses_model_independent_shot_plans(monkeypatc
     reused_plans = [
         payload for event, payload in final_events if event == "shot_plan"
     ]
-    assert len(reused_plans) == 2
-    assert all(item["reused"] for item in reused_plans)
+    assert reused_plans == []
+    resume = next(payload for event, payload in final_events if event == "resume")
+    assert resume["completed_specs"] == 6
+    assert next(payload for event, payload in final_events if event == "start")["generation_mode"] == "preview"
+
+
+@pytest.mark.parametrize("kind,model", [(VisualEntityType.OUTFIT, OutfitVariant), (VisualEntityType.SCENE, SceneVisualVersion)])
+def test_retiring_selected_settings_invalidates_source_hash_without_removing_images(kind, model):
+    from backend.repositories.visual_bible_repository import VisualBibleRepository
+    from backend.services.visual_bible_service import VisualBibleService
+    session = _session()
+    task, pages, _style = _seed_project(session)
+    spec_service = ImageSpecService(ImageSpecRepository(session))
+    previous = spec_service.current_page_context_source_hash(task.id)
+    entity = session.scalar(select(model))
+    asset_ids = list(session.scalars(select(VisualAsset.id)))
+    VisualBibleService(VisualBibleRepository(session)).set_configuration_status(
+        kind=kind.value, item_id=entity.id, status=ApprovalStatus.ARCHIVED,
+    )
+    assert spec_service.current_page_context_source_hash(task.id) != previous
+    assert list(session.scalars(select(VisualAsset.id))) == asset_ids
+    assert all(page.script_scene is not None and page.visual_characters for page in pages)
+    session.close()

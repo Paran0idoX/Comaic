@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Annotated
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -117,6 +118,7 @@ class ImageGenerationPageResponse(BaseModel):
     status: str
     selected_image_id: int | None
     latest_spec_id: int | None = None
+    spec_stale: bool = False
     spec_warnings: list[dict] = Field(default_factory=list)
     completed_candidates: int = 0
     images: list[ComicImageResponse]
@@ -133,13 +135,18 @@ class ImageGenerationPageListResponse(BaseModel):
 class GenerateImagesRequest(BaseModel):
     """批量或单页图片生成请求体。"""
 
+
     tool_preset_id: int | None = Field(default=None, gt=0)
     workflow_preset_id: int | None = Field(default=None, gt=0)
     poll_interval_seconds: float = Field(default=2.0, ge=0.5, le=20)
     wait_timeout_seconds: float = Field(default=600.0, ge=30, le=3600)
     candidates_per_page: int = Field(default=1, ge=1, le=4)
-    generation_mode: GenerationMode = GenerationMode.PREVIEW
+    width: int = Field(default=1024, ge=256, le=2048, multiple_of=32, strict=True)
+    height: int = Field(default=1536, ge=256, le=2048, multiple_of=32, strict=True)
+    # 旧参数仅为兼容接受；新任务不按模式分流，续跑读取冻结批次。
+    generation_mode: GenerationMode = Field(default=GenerationMode.PREVIEW, deprecated=True)
     seed_strategy: SeedStrategy = SeedStrategy.PER_PAGE
+    page_ids: list[Annotated[int, Field(gt=0)]] | None = Field(default=None, min_length=1)
 
     @model_validator(mode="after")
     def validate_preset_id(self):
@@ -154,6 +161,15 @@ class GenerateImagesRequest(BaseModel):
         """读取实际使用的工具配置 id。"""
 
         return self.tool_preset_id or self.workflow_preset_id or 0
+
+
+class GenerationBatchProgress(BaseModel):
+    """不携带 Prompt 或快照的批次进度，供外部生成时轻量轮询。"""
+
+    completed_candidates: int = Field(ge=0)
+    images_count: int = Field(ge=0)
+    latest_image_id: int | None = None
+    active_runs: int = Field(ge=0)
 
 
 class GenerationTaskResponse(BaseModel):
@@ -175,6 +191,7 @@ class GenerationTaskResponse(BaseModel):
     error_message: str | None
     created_at: datetime
     updated_at: datetime
+    progress: GenerationBatchProgress | None = None
 
 
 class GenerationBatchListResponse(BaseModel):

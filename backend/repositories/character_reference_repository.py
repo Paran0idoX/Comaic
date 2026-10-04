@@ -28,14 +28,11 @@ from backend.models.enums import (
     VisualEntityType,
 )
 from backend.models.time import utc_now
+from backend.services.reference_catalog import DEFAULT_CHARACTER_REFERENCE_ROLES
 from backend.utils.json_utils import canonical_json
 
 
-REFERENCE_ROLES = (
-    VisualAssetRole.IDENTITY_FACE,
-    VisualAssetRole.IDENTITY_HALF_BODY,
-    VisualAssetRole.IDENTITY_FULL_BODY,
-)
+REFERENCE_ROLES = DEFAULT_CHARACTER_REFERENCE_ROLES
 
 
 class CharacterReferenceRepository:
@@ -107,6 +104,7 @@ class CharacterReferenceRepository:
         source_asset_ids: list[int] | None = None,
         subject_snapshot: dict | None = None,
         specs: dict[str, dict] | None = None,
+        commit: bool = True,
     ) -> CharacterReferenceGenerationTask:
         task = CharacterReferenceGenerationTask(
             project_id=project_id,
@@ -156,8 +154,9 @@ class CharacterReferenceRepository:
                         seed=seed,
                         provider=tool.provider,
                         prompt_type=tool.prompt_type,
-                        positive_prompt=prompt["positive"],
-                        negative_prompt=prompt["negative"],
+                        # 候选详情展示实际冻结 Prompt，任务表仍保留用户编辑的原始输入。
+                        positive_prompt=spec["prompt"]["positive"],
+                        negative_prompt=spec["prompt"]["negative"],
                         status=GenerationRunStatus.PENDING,
                         review_status=ApprovalStatus.DRAFT,
                         bindings_json=tool.bindings_json,
@@ -165,7 +164,11 @@ class CharacterReferenceRepository:
                         applied_spec_json=canonical_json(spec),
                     )
                 )
-        self.session.commit()
+        # 批量创建由 Service 一次提交，任何输入错误都不能留下半批收费任务。
+        if commit:
+            self.session.commit()
+        else:
+            self.session.flush()
         return self.get_task(task.id)  # type: ignore[return-value]
 
     def get_task(self, task_id: int) -> CharacterReferenceGenerationTask | None:

@@ -37,6 +37,7 @@ from backend.models.enums import (
     ImagePromptType,
     ImagePromptPresetKind,
     LLMProvider,
+    ReferenceProfileKind,
     OutlineVersionStatus,
     PageScriptReviewStatus,
     SeedStrategy,
@@ -64,6 +65,23 @@ def enum_column(enum_type: type[Enum], **kwargs):
         ),
         **kwargs,
     )
+
+
+class ReferenceVisualProfile(Base):
+    """参考图专用摘要缓存；任务另存完整快照，修改摘要不改变历史生成。"""
+
+    __tablename__ = "reference_visual_profile"
+    __table_args__ = (UniqueConstraint("project_id", "kind", "owner_id", name="uq_reference_profile_owner"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("comic_project.id"), index=True)
+    kind: Mapped[ReferenceProfileKind] = enum_column(ReferenceProfileKind)
+    owner_id: Mapped[int] = mapped_column(Integer)
+    source_hash: Mapped[str] = mapped_column(String(64))
+    format_version: Mapped[int] = mapped_column(Integer, default=1)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    data_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(AwareUTCDateTime(), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(AwareUTCDateTime(), default=utc_now, onupdate=utc_now)
 
 
 class TimestampMixin:
@@ -193,6 +211,10 @@ class LLMConfig(TimestampMixin, Base):
     base_url: Mapped[str] = mapped_column(String(1024))
     # JSON 字符串数组，例如 ["deepseek-v4-flash", "deepseek-chat"]。
     model_names: Mapped[str] = mapped_column(Text, default="[]")
+    # 按本 API 组中的模型名保存全局提示词覆盖；缺省时使用 Provider 默认模板。
+    model_system_prompts_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # 默认模板关联仅在配置初始化时确定；请求注入不根据 Provider 或模型名分支。
+    model_system_prompt_defaults_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     default_model: Mapped[str] = mapped_column(String(255))
     # 本地 MVP 直接保存在 SQLite；设置页允许回显明文，data/ 不能提交。
     api_key: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -207,6 +229,8 @@ class AppSettings(TimestampMixin, Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
     # 分页脚本生成按 section 并发执行时的最高 worker 数。
     script_section_max_concurrency: Mapped[int] = mapped_column(Integer, default=3)
+    # 仅保存任务提示词覆盖，恢复默认时删除对应 key，继续读取仓库 Markdown。
+    system_prompts_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
 
 class Session(TimestampMixin, Base):
@@ -279,7 +303,6 @@ class OutlineCharacter(TimestampMixin, Base):
     role: Mapped[str] = mapped_column(String(255), default="")
     background: Mapped[str] = mapped_column(Text, default="")
     appearance: Mapped[str] = mapped_column(Text, default="")
-    visual_anchors: Mapped[str] = mapped_column(Text, default="")
     negative_constraints: Mapped[str] = mapped_column(Text, default="")
     # 这些字段是脚本阶段可覆盖的默认造型，不作为永久锁死项。
     default_hairstyle: Mapped[str] = mapped_column(Text, default="")
@@ -423,6 +446,8 @@ class ReferenceSubject(TimestampMixin, Base):
     entity_type: Mapped[VisualEntityType] = enum_column(VisualEntityType, index=True)
     key: Mapped[str] = mapped_column(String(120), index=True)
     name: Mapped[str] = mapped_column(String(255))
+    # 旧条目为 1；业务入口显式创建版本 2，避免重解释历史日夜场景。
+    scene_definition_version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
     description: Mapped[str] = mapped_column(Text, default="")
     negative_constraints: Mapped[str] = mapped_column(Text, default="")
 
@@ -667,6 +692,7 @@ class ComicPage(TimestampMixin, Base):
     characters: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     clothing: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     scene: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    scene_conditions_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     composition: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     character_action: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     dialogue: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -926,6 +952,7 @@ class ScriptGenerationTask(TimestampMixin, Base):
     )
     mode: Mapped[ScriptGenerationMode] = enum_column(ScriptGenerationMode)
     total_pages: Mapped[int] = mapped_column(Integer)
+    scene_definition_version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
     target_page_no: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     user_requirement: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     section_plan: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -1008,10 +1035,10 @@ class ScriptScene(TimestampMixin, Base):
     weather: Mapped[str] = mapped_column(String(255), default="")
     environment_details: Mapped[str] = mapped_column(Text, default="")
     color_palette: Mapped[str] = mapped_column(Text, default="")
-    visual_anchors: Mapped[str] = mapped_column(Text, default="")
     negative_constraints: Mapped[str] = mapped_column(Text, default="")
 
     task: Mapped["ScriptGenerationTask"] = relationship(back_populates="scenes")
+    reference_subject: Mapped[Optional["ReferenceSubject"]] = relationship()
     pages: Mapped[list["ComicPage"]] = relationship(back_populates="script_scene")
     visual_versions: Mapped[list["SceneVisualVersion"]] = relationship(
         back_populates="script_scene",
@@ -1051,7 +1078,6 @@ class ScriptCharacter(TimestampMixin, Base):
     current_state: Mapped[str] = mapped_column(Text, default="")
     emotion: Mapped[str] = mapped_column(Text, default="")
     temporary_changes: Mapped[str] = mapped_column(Text, default="")
-    visual_anchors: Mapped[str] = mapped_column(Text, default="")
     negative_constraints: Mapped[str] = mapped_column(Text, default="")
 
     section: Mapped["ScriptSection"] = relationship(back_populates="characters")
@@ -1068,7 +1094,7 @@ class ScriptCharacter(TimestampMixin, Base):
 
 
 class ContinuityCompilation(TimestampMixin, Base):
-    """一次脚本任务的连续性编译；历史版本不可覆盖，便于生成结果回溯。"""
+    """保留历史表名承载页输入编译；新记录不产生事件，旧连续性记录仍可读取。"""
 
     __tablename__ = "continuity_compilation"
 
@@ -1149,7 +1175,7 @@ class ImageSpecCompilation(TimestampMixin, Base):
 
 
 class ContinuityEvent(Base):
-    """由 LLM、人工或分段差异产生的受控连续性事件。"""
+    """历史连续性事件，仅供生成记录回溯；新流程不再写入或修改。"""
 
     __tablename__ = "continuity_event"
     __table_args__ = (
@@ -1186,7 +1212,7 @@ class ContinuityEvent(Base):
 
 
 class VisualStateSnapshot(Base):
-    """某页进入生图阶段前的不可变视觉状态和已锁定资产版本。"""
+    """某页不可变的脚本、绑定设定和资产版本；历史状态快照保持原样。"""
 
     __tablename__ = "visual_state_snapshot"
     __table_args__ = (

@@ -32,6 +32,8 @@ from backend.models.enums import (
 from backend.repositories.comic_repository import ComicRepository
 from backend.services.visual_bible_service import VisualBibleService
 from backend.services.script_service import ScriptService
+from backend.repositories.visual_bible_repository import VisualBibleRepository
+from backend.i18n.errors import AppError
 
 
 class FakeRepository:
@@ -74,7 +76,6 @@ def _seed_script_context(session):
         character_key="lin",
         name="林",
         appearance="黑色短发，琥珀色眼睛",
-        visual_anchors="左眉尾小痣",
         negative_constraints="不要改变眼睛颜色",
         default_hairstyle="黑色短发",
         default_clothing="深蓝风衣",
@@ -112,7 +113,6 @@ def _scene_payload(scene_key: str = "old_station") -> dict[str, str]:
         "weather": "暴雨",
         "environment_details": "潮湿站台、旧木长椅和锈蚀站牌",
         "color_palette": "蓝灰、暗红",
-        "visual_anchors": "中央圆钟与三号站牌",
         "negative_constraints": "不要增加现代电子屏",
     }
 
@@ -128,7 +128,6 @@ def _character_payload(clothing: str = "深蓝风衣") -> dict[str, str]:
         "current_state": "轻微疲惫",
         "emotion": "警觉",
         "temporary_changes": "衣角被雨水打湿",
-        "visual_anchors": "左眉尾小痣和琥珀色眼睛",
         "negative_constraints": "不要改变眼睛颜色",
     }
 
@@ -189,7 +188,6 @@ def test_script_visual_settings_create_and_reuse_visual_bible_drafts() -> None:
     assert json.loads(outfit.accessories_json) == ["银色怀表"]
     assert json.loads(outfit.colors_json) == ["深蓝、银灰"]
     assert json.loads(scene_version.landmarks_json) == [
-        "中央圆钟与三号站牌",
         "潮湿站台、旧木长椅和锈蚀站牌",
     ]
     assert json.loads(scene_version.lighting_state_json) == {
@@ -281,7 +279,6 @@ def test_continue_backfill_preserves_manual_bindings_and_skips_unmapped_characte
         name="路人",
         section_role="背景人物",
         current_clothing="灰色外套",
-        visual_anchors="模糊背影",
     )
     session.add_all([mapped_character, unmapped_character])
     session.commit()

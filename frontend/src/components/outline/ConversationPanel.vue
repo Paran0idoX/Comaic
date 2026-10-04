@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import InfoTip from '@/components/workspace/InfoTip.vue'
 import { Promotion } from '@element-plus/icons-vue'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
@@ -95,7 +96,7 @@ watch(messageScrollKey, () => {
 })
 
 onMounted(() => {
-  panelHeight.value = clampHeight(window.innerHeight - 170)
+  panelHeight.value = clampHeight(window.innerHeight - 272)
   void scrollToBottom()
 })
 
@@ -113,15 +114,10 @@ onBeforeUnmount(() => {
   >
     <header class="conversation-panel__header">
       <div>
-        <h3>{{ t('outline.conversation.title') }}</h3>
-        <p>{{ t('outline.conversation.description') }}</p>
+        <div class="title-with-info"><h3>{{ t('outline.conversation.title') }}</h3><InfoTip :content="t('outline.conversation.description')" :label="t('outline.conversation.title')" /></div>
       </div>
-      <el-tag type="info" effect="plain" aria-live="polite">
-        {{
-          loading
-            ? t('outline.conversation.loadingSession')
-            : threadId || t('outline.conversation.noThread')
-        }}
+      <el-tag v-if="loading" type="info" effect="plain" aria-live="polite">
+        {{ t('outline.conversation.loadingSession') }}
       </el-tag>
     </header>
 
@@ -162,9 +158,8 @@ onBeforeUnmount(() => {
         @keydown.enter.exact.prevent="sendMessage"
       />
       <div class="conversation-panel__composer-actions">
-        <el-text type="info">
-          {{ streaming ? t('outline.conversation.streamingHint') : t('outline.conversation.readyHint') }}
-        </el-text>
+        <el-text v-if="streaming" type="info" role="status">{{ t('outline.conversation.streamingHint') }}</el-text>
+        <InfoTip v-else :content="t('outline.conversation.readyHint')" :label="t('outline.conversation.send')" />
         <el-button
           class="ai-gradient-button"
           type="primary"

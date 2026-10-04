@@ -1,3 +1,5 @@
+from copy import deepcopy
+
 import pytest
 
 from backend.models.enums import GenerationMode, ImagePromptType
@@ -17,7 +19,6 @@ def _snapshot() -> dict:
                 "name": "Alice",
                 "identity": {
                     "appearance": "young mechanic with amber eyes",
-                    "visual_anchors": "small scar under left eyebrow",
                     "negative_constraints": "never change eye color",
                 },
                 "hairstyle": "short black bob",
@@ -40,7 +41,6 @@ def _snapshot() -> dict:
             "name": "Old workshop",
             "visual_version_id": 4,
             "environment_details": "dense shelves and a rusted generator",
-            "visual_anchors": "arched window on the east wall",
             "lighting": "warm desk lamp",
             "weather": "rain",
             "assets": [
@@ -48,6 +48,23 @@ def _snapshot() -> dict:
             ],
         },
     }
+
+
+@pytest.mark.parametrize("prompt_type", list(ImagePromptType))
+def test_retired_visual_anchors_do_not_affect_new_specs(prompt_type) -> None:
+    """旧快照中的退役字段不得改变新规格或任何一种 Prompt。"""
+    snapshot = _snapshot()
+    legacy = deepcopy(snapshot)
+    legacy["characters"][0]["visual_anchors"] = "obsolete character marker"
+    legacy["characters"][0]["identity"]["visual_anchors"] = "obsolete identity marker"
+    legacy["scene"]["visual_anchors"] = "obsolete scene marker"
+    compiler = compiler_for_prompt_type(prompt_type)
+    kwargs = dict(shot_plan=_shot_plan(), style_profile=None, negative_prompts={},
+                  generation_mode=GenerationMode.FINAL, source_hash="retired-field")
+    expected = compiler.compile(snapshot=snapshot, **kwargs)
+    actual = compiler.compile(snapshot=legacy, **kwargs)
+    assert actual == expected
+    assert legacy["scene"]["visual_anchors"] == "obsolete scene marker"
 
 
 def _shot_plan() -> dict:
@@ -206,8 +223,6 @@ def test_render_text_false_masks_literal_copy_and_enforces_single_frame() -> Non
 
 def test_render_prompt_mentions_accessory_once_and_uses_only_garment_components() -> None:
     snapshot = _snapshot()
-    snapshot["characters"][0]["identity"]["visual_anchors"] += "; red tool belt"
-    snapshot["characters"][0]["visual_anchors"] = "red tool belt"
     snapshot["characters"][0]["outfit"].update(
         {
             "description": "navy repair coat, red tool belt",
@@ -228,11 +243,15 @@ def test_render_prompt_mentions_accessory_once_and_uses_only_garment_components(
     assert "never add a second copy" in compiled.negative_prompt
 
 
-def test_back_facing_shot_suppresses_face_description_and_duplicate_view() -> None:
+@pytest.mark.parametrize("prompt_type", list(ImagePromptType))
+@pytest.mark.parametrize("explicit_view", [False, True])
+def test_back_facing_shot_suppresses_face_description_and_duplicate_view(prompt_type, explicit_view) -> None:
     shot_plan = _shot_plan()
-    shot_plan["subjects"][0]["orientation"] = "back toward the camera"
-    shot_plan["subjects"][0]["pose"] = "rear view, leaning forward"
-    compiled = NaturalLanguageImageSpecCompiler().compile(
+    shot_plan["subjects"][0]["orientation"] = "" if explicit_view else "back toward the camera"
+    shot_plan["subjects"][0]["pose"] = "leaning forward" if explicit_view else "rear view, leaning forward"
+    if explicit_view:
+        shot_plan["subjects"][0]["reference_view"] = "back"
+    compiled = compiler_for_prompt_type(prompt_type).compile(
         snapshot=_snapshot(),
         shot_plan={**shot_plan, "render_text": False},
         style_profile=_style(),
@@ -242,8 +261,11 @@ def test_back_facing_shot_suppresses_face_description_and_duplicate_view() -> No
     )
 
     assert "young mechanic with amber eyes" not in compiled.positive_prompt
-    assert "shown strictly from behind" in compiled.positive_prompt
-    assert "exactly 1 visible person" in compiled.positive_prompt
+    if prompt_type != ImagePromptType.TAG:
+        assert "shown strictly from behind" in compiled.positive_prompt
+        assert "exactly 1 visible person" in compiled.positive_prompt
+    if prompt_type != ImagePromptType.NATURAL_LANGUAGE:
+        assert "rear view, face out of frame" in compiled.positive_prompt
 
 
 def test_accessory_is_named_once_when_shot_references_same_object_repeatedly() -> None:
@@ -270,6 +292,50 @@ def test_accessory_is_named_once_when_shot_references_same_object_repeatedly() -
     assert "chest resting position is completely empty" in compiled.positive_prompt
     assert "hanging on the chest" not in compiled.positive_prompt
     assert "pocket watch" in compiled.spec["shot_plan"]["subjects"][0]["action"]
+
+
+@pytest.mark.parametrize("prompt_type", list(ImagePromptType))
+@pytest.mark.parametrize("description,action,pose", [
+    ("邮包（投递用），内装小盒", "从斜挎邮包中取出小盒托在掌中", "双手托举半开小盒，指尖轻触盒沿"),
+    ("round glasses", "adjusts the glasses while holding a compass", "opens the compass box"),
+    ("one silver pocket watch", "holds the pocket watch", "opens the pocket watch with one hand"),
+    ("one silver pocket watch (hanging on the chest from a neck chain)",
+     "the pocket watch hangs on the chest while she opens a compass box", "holds the compass box below the pocket watch"),
+    ("一枚颈链上的银色怀表", "怀表挂在胸前，双手打开罗盘盒", "托着罗盘盒，目光落向怀表"),
+])
+def test_accessory_rewrite_never_invents_chain_or_moves_an_unhandled_object(prompt_type, description, action, pose):
+    snapshot, shot = _snapshot(), _shot_plan()
+    snapshot["characters"][0]["accessories"]["description"] = description
+    shot["subjects"][0].update(action=action, pose=pose)
+    compiled = compiler_for_prompt_type(prompt_type).compile(
+        snapshot=snapshot, shot_plan=shot, style_profile=None, negative_prompts={},
+        generation_mode=GenerationMode.FINAL, source_hash="preserve-unhandled-accessory",
+    )
+    assert action in compiled.positive_prompt
+    assert pose in compiled.positive_prompt
+    assert "still-attached chain" not in compiled.positive_prompt
+    assert "chest resting position is completely empty" not in compiled.positive_prompt
+    assert "same attached accessory" not in compiled.positive_prompt
+    assert "同一件已连接配饰" not in compiled.positive_prompt
+    if "watch" not in description and "怀表" not in description:
+        assert "chain" not in compiled.positive_prompt
+        assert "pocket watch" not in compiled.negative_prompt
+
+
+@pytest.mark.parametrize("prompt_type", list(ImagePromptType))
+def test_handled_chained_watch_does_not_rewrite_other_accessories(prompt_type):
+    snapshot, shot = _snapshot(), _shot_plan()
+    snapshot["characters"][0]["accessories"]["description"] = "邮包；银色怀表（悬挂在胸前的颈链上）"
+    shot["subjects"][0].update(action="从邮包旁托起怀表", pose="一只手打开怀表")
+    compiled = compiler_for_prompt_type(prompt_type).compile(
+        snapshot=snapshot, shot_plan=shot, style_profile=None, negative_prompts={},
+        generation_mode=GenerationMode.FINAL, source_hash="one-chained-accessory",
+    )
+    assert "从邮包旁托起同一件已连接配饰" in compiled.positive_prompt
+    assert "still-attached chain" in compiled.positive_prompt
+    assert "chest resting position is completely empty" in compiled.positive_prompt
+    assert "邮包" in compiled.positive_prompt
+    assert "邮包" in compiled.spec["subjects"][0]["accessories"]["description"]
 
 
 def test_final_needs_only_page_references_and_does_not_require_outfit_or_style() -> None:
@@ -318,3 +384,142 @@ def test_multiple_people_do_not_implicitly_require_regional_condition() -> None:
     shot_plan["subjects"].append({**shot_plan["subjects"][0], "character_key": "bob"})
     compiled = TagImageSpecCompiler().compile(snapshot=snapshot, shot_plan=shot_plan, style_profile=None, negative_prompts={}, generation_mode=GenerationMode.FINAL, source_hash="two-people")
     assert "regional_condition" not in compiled.required_capabilities
+
+
+def _scene_projection_inputs():
+    """混合固定环境与可移动目录物，验证实际 Prompt 而非只检查选图列表。"""
+
+    snapshot, shot = _snapshot(), _shot_plan()
+    snapshot["prop_catalog"] = [{
+        "key": "violet_beacon", "name": "Violet beacon", "description": "a glass violet beacon",
+        "assets": [{"id": 21, "role": "prop_reference", "storage_kind": "local_file"}],
+    }]
+    scene = snapshot["scene"]
+    for key in ("name", "display_name", "environment_details", "reference_description", "lighting", "weather", "time"):
+        scene[key] = "Room with a visible violet beacon beside an arched window and an oak table"
+    scene.update(
+        landmarks=["violet beacon", "arched window"],
+        color_palette=["violet beacon glow"],
+        spatial_relations={"violet_beacon": "on oak table"},
+        object_states={"violet_beacon": "on display"},
+        light_states={"lighting": "warm light illuminates the violet beacon"},
+    )
+    shot["subjects"][0].update(action="passes a sealed opaque case", pose="both hands support the shut lid", visible_prop_keys=[])
+    shot["scene"].update(
+        framing_notes="The arched window is on the east stone wall; an oak table fills the foreground. Warm amber lamplight falls from the left; rain is visible outside. A plain paintbrush lies beside the sealed opaque case; its contents remain concealed.",
+        background_visible=True, visible_prop_keys=[],
+    )
+    return snapshot, shot
+
+
+@pytest.mark.parametrize("prompt_type", list(ImagePromptType))
+def test_current_scene_projection_blocks_static_prop_leaks_but_keeps_environment(prompt_type):
+    snapshot, shot = _scene_projection_inputs()
+    original = deepcopy(snapshot)
+    compiled = compiler_for_prompt_type(prompt_type).compile(
+        snapshot=snapshot, shot_plan=shot, style_profile=None, negative_prompts={},
+        generation_mode=GenerationMode.FINAL, source_hash="scene-projection",
+    )
+    assert "violet beacon" not in compiled.positive_prompt.lower()
+    for retained in ("arched window", "east stone wall", "oak table", "Warm amber lamplight", "rain", "paintbrush", "sealed opaque case"):
+        assert retained in compiled.positive_prompt
+    assert snapshot == original
+    assert compiled.spec["scene"]["name"] == original["scene"]["name"]
+    assert compiled.spec["scene"]["light_states"] == original["scene"]["light_states"]
+    assert compiled.spec["scene"]["props"] == []
+    assert all(item["owner"]["category"] != "prop" for item in compiled.spec["reference_plan"]["items"])
+
+
+@pytest.mark.parametrize("prompt_type", list(ImagePromptType))
+def test_current_scene_projection_renders_visible_catalog_and_ordinary_props(prompt_type):
+    snapshot, shot = _scene_projection_inputs()
+    shot["scene"].update(
+        visible_prop_keys=["violet_beacon"],
+        framing_notes="The arched window and oak table remain under warm amber light. A violet beacon and an ordinary paintbrush rest on the table.",
+    )
+    compiled = compiler_for_prompt_type(prompt_type).compile(
+        snapshot=snapshot, shot_plan=shot, style_profile=None, negative_prompts={},
+        generation_mode=GenerationMode.FINAL, source_hash="visible-projection",
+    )
+    assert "a glass violet beacon" in compiled.positive_prompt
+    assert "ordinary paintbrush" in compiled.positive_prompt
+    assert "warm amber light" in compiled.positive_prompt
+    assert [prop["prop_key"] for prop in compiled.spec["scene"]["props"]] == ["violet_beacon"]
+    assert [item["asset_id"] for item in compiled.spec["reference_plan"]["items"] if item["owner"]["category"] == "prop"] == [21]
+
+
+@pytest.mark.parametrize("prompt_type", list(ImagePromptType))
+def test_hidden_background_does_not_leak_static_lighting_or_scene_objects(prompt_type):
+    snapshot, shot = _scene_projection_inputs()
+    shot["scene"].update(background_visible=False, framing_notes="Face fills the frame under soft sidelight")
+    compiled = compiler_for_prompt_type(prompt_type).compile(
+        snapshot=snapshot, shot_plan=shot, style_profile=None, negative_prompts={},
+        generation_mode=GenerationMode.FINAL, source_hash="background-hidden",
+    )
+    assert "violet beacon" not in compiled.positive_prompt.lower()
+    assert "arched window" not in compiled.positive_prompt
+    assert "soft sidelight" in compiled.positive_prompt
+
+
+def test_scene_projection_preserves_shared_forms_and_legacy_compatibility():
+    snapshot, shot = _scene_projection_inputs()
+    kwargs = dict(snapshot=snapshot, shot_plan=shot, style_profile=None, negative_prompts={}, generation_mode=GenerationMode.FINAL, source_hash="shared-projection")
+    tag, natural, hybrid = [compiler_for_prompt_type(kind).compile(**kwargs) for kind in (ImagePromptType.TAG, ImagePromptType.NATURAL_LANGUAGE, ImagePromptType.HYBRID)]
+    assert hybrid.positive_prompt == natural.positive_prompt + "\n" + tag.positive_prompt
+    assert tag.spec["scene"] == natural.spec["scene"] == hybrid.spec["scene"]
+    assert tag.spec["reference_plan"] == natural.spec["reference_plan"] == hybrid.spec["reference_plan"]
+    legacy = _shot_plan()  # 历史结构没有显式 visible_prop_keys，维持原有环境渲染。
+    compiled = NaturalLanguageImageSpecCompiler().compile(**{**kwargs, "shot_plan": legacy})
+    assert "violet beacon" in compiled.positive_prompt.lower()
+
+
+def test_current_scene_projection_rejects_empty_environment_without_static_fallback():
+    snapshot, shot = _scene_projection_inputs()
+    shot["scene"]["framing_notes"] = " "
+    with pytest.raises(ValueError, match="nonempty framing_notes"):
+        NaturalLanguageImageSpecCompiler().compile(
+            snapshot=snapshot, shot_plan=shot, style_profile=None, negative_prompts={},
+            generation_mode=GenerationMode.FINAL, source_hash="empty-projection",
+        )
+
+
+@pytest.mark.parametrize("prompt_type", list(ImagePromptType))
+def test_page_local_states_reach_each_prompt_without_changing_stable_descriptions(prompt_type):
+    """同一基准可逐页独立编译；人物、衣物与门窗状态不会污染基准或下一页。"""
+    snapshot, first_shot = _snapshot(), _shot_plan()
+    # 分段剧情可能在以后才发生，不应被直接拼进本页 Prompt。
+    snapshot["characters"][0]["section_context"] = {
+        "current_state": "FUTURE_INJURY",
+        "temporary_changes": "FUTURE_TORN_SLEEVE",
+    }
+    original = deepcopy(snapshot)
+    first_shot["subjects"][0].update(
+        visible_state="rain-soaked coat, rolled sleeves and a fresh scratch on the wrist",
+        visible_prop_keys=[],
+    )
+    first_shot["scene"].update(
+        visible_prop_keys=[],
+        framing_notes="Workshop with dense shelves under warm lamplight; the wooden door is open",
+    )
+    second_shot = deepcopy(first_shot)
+    second_shot["subjects"][0]["visible_state"] = ""
+    second_shot["scene"]["framing_notes"] = "Workshop with dense shelves under warm lamplight; the wooden door is closed"
+    compiler = compiler_for_prompt_type(prompt_type)
+    kwargs = dict(snapshot=snapshot, style_profile=None, negative_prompts={}, generation_mode=GenerationMode.FINAL)
+    first = compiler.compile(**kwargs, shot_plan=first_shot, source_hash="page-one")
+    second = compiler.compile(**kwargs, shot_plan=second_shot, source_hash="page-two")
+
+    for compiled in (first, second):
+        assert "young mechanic with amber eyes" in compiled.positive_prompt
+        assert "short black bob" in compiled.positive_prompt
+        assert "navy repair coat with brass buttons" in compiled.positive_prompt
+        assert "FUTURE_INJURY" not in compiled.positive_prompt
+        assert "FUTURE_TORN_SLEEVE" not in compiled.positive_prompt
+        assert compiled.spec["subjects"][0]["identity"]["appearance"] == original["characters"][0]["identity"]["appearance"]
+    for component in ("tag_text", "natural_language_text"):
+        assert "rain-soaked coat" in first.spec["prompt"][component]
+        assert "fresh scratch on the wrist" in first.spec["prompt"][component]
+        assert "the wooden door is open" in first.spec["prompt"][component]
+        assert "rain-soaked coat" not in second.spec["prompt"][component]
+        assert "the wooden door is closed" in second.spec["prompt"][component]
+    assert snapshot == original

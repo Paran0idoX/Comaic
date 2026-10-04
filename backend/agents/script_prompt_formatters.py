@@ -12,13 +12,20 @@ def format_section(section: dict[str, Any] | None) -> str:
     page_end = _text(section.get("page_end"), "未知")
     title = _text(section.get("title"))
     description = _text(section.get("description"))
-    return "\n".join(
-        [
-            f"第 {section_no} 段，页码范围：第 {page_start}-{page_end} 页。",
-            f"分段标题：{title}",
-            f"分段内容：{description}",
-        ]
-    )
+    lines = [
+        f"第 {section_no} 段，页码范围：第 {page_start}-{page_end} 页。",
+        f"分段标题：{title}",
+        f"分段剧情功能与节奏参考：{description}",
+    ]
+    page_plan = section.get("page_plan") or []
+    if page_plan:
+        lines.append("逐页场景与核心剧情落点：")
+        lines.extend(
+            f"- 第 {_text(item.get('page_no'))} 页，场景 key：{_text(item.get('scene_key'))}；"
+            f"核心剧情：{_text(item.get('beat'))}"
+            for item in page_plan
+        )
+    return "\n".join(lines)
 
 
 def format_scenes(scenes: list[dict[str, Any]] | None) -> str:
@@ -89,12 +96,11 @@ def _format_scene(scene: dict[str, Any]) -> str:
             f"- 场景 key：{scene_key}",
             f"  场景名称：{_text(scene.get('name'))}",
             f"  地点类型：{_text(scene.get('location_type'))}",
-            f"  时间与光线：{_text(scene.get('time_of_day'))}；{_text(scene.get('lighting'))}",
-            f"  天气或空气状态：{_text(scene.get('weather'))}",
+            *([f"  历史场景时间与光线：{_text(scene.get('time_of_day'))}；{_text(scene.get('lighting'))}",
+                f"  历史场景天气：{_text(scene.get('weather'))}"] if scene.get("scene_definition_version", 1) < 2 else []),
             f"  稳定环境细节：{_text(scene.get('environment_details'))}",
             f"  主色调：{_text(scene.get('color_palette'))}",
-            f"  跨页视觉锚点：{_text(scene.get('visual_anchors'))}",
-            f"  场景禁止项：{_text(scene.get('negative_constraints'))}",
+            f"  {'固定地点定义约束（按共同业务语义限定作用范围）' if scene.get('scene_definition_version', 1) >= 2 else '历史场景禁止项'}：{_text(scene.get('negative_constraints'))}",
         ]
     )
 
@@ -112,7 +118,6 @@ def _format_section_character(character: dict[str, Any]) -> str:
         f"  当前身体状态：{_text(character.get('current_state'))}",
         f"  当前情绪：{_text(character.get('emotion'))}",
         f"  临时变化：{_text(character.get('temporary_changes'), '无')}",
-        f"  分段视觉锚点：{_text(character.get('visual_anchors'))}",
         f"  分段禁止项：{_text(character.get('negative_constraints'))}",
     ]
     if isinstance(outline_character, dict):
@@ -130,7 +135,6 @@ def _format_outline_character(character: dict[str, Any]) -> str:
             f"  身份/叙事角色：{_text(character.get('role'))}",
             f"  背景设定：{_text(character.get('background'))}",
             f"  固定样貌：{_text(character.get('appearance'))}",
-            f"  固定视觉锚点：{_text(character.get('visual_anchors'))}",
             f"  禁止改写项：{_text(character.get('negative_constraints'))}",
             f"  默认发型：{_text(character.get('default_hairstyle'))}",
             f"  默认服装：{_text(character.get('default_clothing'))}",
@@ -183,6 +187,7 @@ def _format_page(page: dict[str, Any]) -> str:
         f"  人物：{_text(page.get('characters'))}",
         f"  服装：{_text(page.get('clothing'))}",
         f"  场景：{_text(page.get('scene'))}",
+        f"  本页环境条件：{page.get('scene_conditions') or {}}",
         f"  构图：{_text(page.get('composition'))}",
         f"  人物动作：{_text(page.get('character_action'))}",
         f"  对话/旁白：{_text(page.get('dialogue'), '无')}",

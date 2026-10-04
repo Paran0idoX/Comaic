@@ -6,7 +6,6 @@ from sqlalchemy.orm import Session, selectinload
 from backend.models.comic import (
     ComicPage,
     ContinuityCompilation,
-    ContinuityEvent,
     ImagePromptPreset,
     ImageSpec,
     ImageSpecCompilation,
@@ -25,10 +24,6 @@ from backend.models.comic import (
 from backend.models.enums import (
     ApprovalStatus,
     CompilationStatus,
-    ContinuityEventSource,
-    ContinuityEventTiming,
-    ContinuityEventType,
-    ContinuityTargetType,
     GenerationMode,
     ImagePromptPresetKind,
     ImagePromptType,
@@ -269,25 +264,10 @@ class ImageSpecRepository:
         self,
         *,
         compilation: ContinuityCompilation,
-        events: list[dict[str, Any]],
         snapshots: list[dict[str, Any]],
     ) -> ContinuityCompilation:
-        page_id_by_no = {int(item["page_no"]): int(item["page_id"]) for item in snapshots}
-        for event in events:
-            page_no = int(event["page_no"])
-            self.session.add(
-                ContinuityEvent(
-                    compilation_id=compilation.id,
-                    page_id=page_id_by_no[page_no],
-                    sequence_no=int(event["sequence_no"]),
-                    event_type=ContinuityEventType(event["event_type"]),
-                    target_type=ContinuityTargetType(event["target_type"]),
-                    target_key=str(event["target_key"]),
-                    timing=ContinuityEventTiming(event.get("timing", "after_page")),
-                    payload_json=event["payload_json"],
-                    source=ContinuityEventSource(event.get("source", "llm")),
-                )
-            )
+        """历史编译表继续承载只读页输入；新流程不再写入连续性事件。"""
+
         for snapshot in snapshots:
             self.session.add(
                 VisualStateSnapshot(
@@ -480,16 +460,17 @@ class ImageSpecRepository:
         self,
         *,
         page_id: int,
-        snapshot_id: int,
+        snapshot_hash: str,
     ) -> list[PageShotPlan]:
-        """返回当前页面快照的历史计划，Service 再按 Prompt/模型 hash 判定复用。"""
+        """跨编译批次按本页输入内容复用，保留计划最初的不可变快照归属。"""
 
         return list(
             self.session.scalars(
                 select(PageShotPlan)
+                .join(VisualStateSnapshot, PageShotPlan.snapshot_id == VisualStateSnapshot.id)
                 .where(
                     PageShotPlan.page_id == page_id,
-                    PageShotPlan.snapshot_id == snapshot_id,
+                    VisualStateSnapshot.state_hash == snapshot_hash,
                 )
                 .order_by(PageShotPlan.id.desc())
             )

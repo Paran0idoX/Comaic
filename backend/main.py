@@ -29,6 +29,7 @@ from backend.services.consistency_evaluation_runtime import (
     consistency_evaluation_runtime,
 )
 from backend.services.character_reference_runtime import character_reference_runtime
+from backend.services.reference_prompt_runtime import reference_prompt_runtime
 
 
 logging.basicConfig(
@@ -51,6 +52,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        reference_prompt_runtime.stop()
         character_reference_runtime.stop()
         consistency_evaluation_runtime.stop()
         task_runtime.stop()

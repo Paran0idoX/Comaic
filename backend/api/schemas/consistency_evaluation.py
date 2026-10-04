@@ -76,7 +76,10 @@ class ConsistencyTaskListResponse(BaseModel):
 
 
 class ConsistencyGateResponse(BaseModel):
+    """历史接口兼容：passed 仅代表逐页人工选图完成，不要求评测。"""
+
     passed: bool
+    evaluation_required: bool = False
     script_task_id: int
     batch_task_id: int | None
     evaluation_task_id: int | None

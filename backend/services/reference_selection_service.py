@@ -14,7 +14,6 @@ from backend.models.enums import (
 
 IDENTITY_ROLES = {
     VisualAssetRole.IDENTITY_FACE.value,
-    VisualAssetRole.IDENTITY_HALF_BODY.value,
     VisualAssetRole.IDENTITY_FULL_BODY.value,
     VisualAssetRole.IDENTITY_SIDE.value,
     VisualAssetRole.IDENTITY_BACK.value,
@@ -25,18 +24,17 @@ OUTFIT_ROLES = {
     VisualAssetRole.OUTFIT_DETAIL.value,
 }
 ROLE_FALLBACKS = {
-    VisualAssetRole.IDENTITY_FACE.value: [VisualAssetRole.IDENTITY_FACE.value, VisualAssetRole.IDENTITY_HALF_BODY.value, VisualAssetRole.IDENTITY_FULL_BODY.value],
-    VisualAssetRole.IDENTITY_HALF_BODY.value: [VisualAssetRole.IDENTITY_HALF_BODY.value, VisualAssetRole.IDENTITY_FULL_BODY.value, VisualAssetRole.IDENTITY_FACE.value],
-    VisualAssetRole.IDENTITY_FULL_BODY.value: [VisualAssetRole.IDENTITY_FULL_BODY.value, VisualAssetRole.IDENTITY_HALF_BODY.value, VisualAssetRole.IDENTITY_FACE.value],
-    VisualAssetRole.IDENTITY_SIDE.value: [VisualAssetRole.IDENTITY_SIDE.value, VisualAssetRole.IDENTITY_FULL_BODY.value, VisualAssetRole.IDENTITY_HALF_BODY.value, VisualAssetRole.IDENTITY_FACE.value],
-    VisualAssetRole.IDENTITY_BACK.value: [VisualAssetRole.IDENTITY_BACK.value, VisualAssetRole.IDENTITY_FULL_BODY.value, VisualAssetRole.IDENTITY_HALF_BODY.value, VisualAssetRole.IDENTITY_SIDE.value, VisualAssetRole.IDENTITY_FACE.value],
+    VisualAssetRole.IDENTITY_FACE.value: [VisualAssetRole.IDENTITY_FACE.value, VisualAssetRole.IDENTITY_FULL_BODY.value],
+    VisualAssetRole.IDENTITY_FULL_BODY.value: [VisualAssetRole.IDENTITY_FULL_BODY.value, VisualAssetRole.IDENTITY_FACE.value],
+    VisualAssetRole.IDENTITY_SIDE.value: [VisualAssetRole.IDENTITY_SIDE.value, VisualAssetRole.IDENTITY_FULL_BODY.value, VisualAssetRole.IDENTITY_FACE.value],
+    VisualAssetRole.IDENTITY_BACK.value: [VisualAssetRole.IDENTITY_BACK.value, VisualAssetRole.IDENTITY_FULL_BODY.value, VisualAssetRole.IDENTITY_SIDE.value, VisualAssetRole.IDENTITY_FACE.value],
 }
 
 
 class ReferenceSelectionService:
     """确定性挑选本页相关原图，并冻结可被 Provider 直接消费的顺序和说明。"""
 
-    VERSION = "2"
+    VERSION = "3"
 
     @staticmethod
     def normalize_view(subject: dict[str, Any]) -> SubjectReferenceView:
@@ -90,7 +88,8 @@ class ReferenceSelectionService:
             framing = cls.normalize_framing(subject, shot_plan.get("camera") or {})
             framing_role = {
                 SubjectReferenceFraming.FACE: VisualAssetRole.IDENTITY_FACE.value,
-                SubjectReferenceFraming.HALF_BODY: VisualAssetRole.IDENTITY_HALF_BODY.value,
+                # 半身仍是合法漫画镜头范围，参考身份与造型改用全身图。
+                SubjectReferenceFraming.HALF_BODY: VisualAssetRole.IDENTITY_FULL_BODY.value,
                 SubjectReferenceFraming.FULL_BODY: VisualAssetRole.IDENTITY_FULL_BODY.value,
                 SubjectReferenceFraming.UNKNOWN: VisualAssetRole.IDENTITY_FULL_BODY.value,
             }[framing]

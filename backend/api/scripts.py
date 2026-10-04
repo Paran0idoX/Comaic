@@ -25,8 +25,9 @@ from backend.api.schemas.script import (
 from backend.models.comic import ComicPage, ScriptCharacter, ScriptGenerationTask, ScriptScene, ScriptSection
 from backend.models.database import SessionLocal
 from backend.models.enums import ScriptGenerationMode, ScriptGenerationTaskStatus
+from backend.models.scene_conditions import page_binding_payload
 from backend.repositories.comic_repository import ComicRepository
-from backend.i18n.errors import http_exception, sse_error_payload
+from backend.i18n.errors import AppError, http_exception, sse_error_payload
 from backend.i18n.locale import request_locale
 from backend.services.script_service import ScriptService
 
@@ -61,6 +62,7 @@ def task_to_response(task: ScriptGenerationTask) -> ScriptTaskResponse:
         status=task.status.value,
         mode=task.mode.value,
         total_pages=task.total_pages,
+        scene_definition_version=task.scene_definition_version,
         target_page_no=task.target_page_no,
         user_requirement=task.user_requirement,
         section_plan=task.section_plan,
@@ -80,6 +82,7 @@ def page_to_response(page: ComicPage) -> ScriptPageResponse:
         section_no=page.section.section_no if page.section is not None else None,
         task_id=page.section.task_id if page.section is not None else None,
         scene_id=page.scene_id,
+        **page_binding_payload(page),
         scene_key=page.script_scene.scene_key if page.script_scene is not None else None,
         character_keys=[
             character.character_key
@@ -107,6 +110,7 @@ def scene_to_response(scene: ScriptScene) -> ScriptSceneResponse:
     return ScriptSceneResponse(
         id=scene.id,
         task_id=scene.task_id,
+        scene_definition_version=scene.task.scene_definition_version,
         scene_key=scene.scene_key,
         name=scene.name,
         location_type=scene.location_type,
@@ -115,7 +119,6 @@ def scene_to_response(scene: ScriptScene) -> ScriptSceneResponse:
         weather=scene.weather,
         environment_details=scene.environment_details,
         color_palette=scene.color_palette,
-        visual_anchors=scene.visual_anchors,
         negative_constraints=scene.negative_constraints,
         selected_visual_version_id=scene.selected_visual_version_id,
         reference_subject_id=scene.reference_subject_id,
@@ -145,7 +148,6 @@ def character_to_response(character: ScriptCharacter) -> ScriptCharacterResponse
         current_state=character.current_state,
         emotion=character.emotion,
         temporary_changes=character.temporary_changes,
-        visual_anchors=character.visual_anchors,
         negative_constraints=character.negative_constraints,
         outline_character=(
             {
@@ -154,7 +156,6 @@ def character_to_response(character: ScriptCharacter) -> ScriptCharacterResponse
                 "role": outline_character.role,
                 "background": outline_character.background,
                 "appearance": outline_character.appearance,
-                "visual_anchors": outline_character.visual_anchors,
                 "negative_constraints": outline_character.negative_constraints,
                 "default_hairstyle": outline_character.default_hairstyle,
                 "default_clothing": outline_character.default_clothing,
@@ -483,8 +484,9 @@ def create_page_script(
                 composition=request.composition,
                 character_action=request.character_action,
                 dialogue=request.dialogue,
+                **request.model_dump(exclude_unset=True, include={"scene_id", "character_ids", "scene_conditions"}),
             )
-        except ValueError as exc:
+        except (ValueError, AppError) as exc:
             raise http_exception(exc, request_locale(http_request)) from exc
         return page_to_response(page)
 
@@ -512,8 +514,9 @@ def update_page_script(
                 composition=request.composition,
                 character_action=request.character_action,
                 dialogue=request.dialogue,
+                **request.model_dump(exclude_unset=True, include={"scene_id", "character_ids", "scene_conditions"}),
             )
-        except ValueError as exc:
+        except (ValueError, AppError) as exc:
             raise http_exception(exc, request_locale(http_request)) from exc
         return page_to_response(page)
 

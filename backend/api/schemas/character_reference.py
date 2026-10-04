@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from pydantic import BaseModel, Field, model_validator
+from backend.models.reference_visual import ReferenceProfileRef, ReferenceProfileResponse
 
 from backend.models.enums import (
     ApprovalStatus,
@@ -19,7 +20,6 @@ from backend.models.enums import (
 
 REFERENCE_ROLE_VALUES = {
     VisualAssetRole.IDENTITY_FACE.value,
-    VisualAssetRole.IDENTITY_HALF_BODY.value,
     VisualAssetRole.IDENTITY_FULL_BODY.value,
 }
 
@@ -44,9 +44,11 @@ class CharacterReferenceCharacterListResponse(BaseModel):
 class CharacterReferencePromptPreviewRequest(BaseModel):
     tool_preset_id: int = Field(gt=0)
     style_profile_id: int | None = Field(default=None, gt=0)
+    refresh_visual_profiles: bool = False
 
 
 class CharacterReferencePromptPreviewResponse(BaseModel):
+    visual_profiles: list[ReferenceProfileResponse] = Field(default_factory=list)
     character_id: int
     tool_preset_id: int
     style_profile_id: int | None
@@ -55,13 +57,14 @@ class CharacterReferencePromptPreviewResponse(BaseModel):
 
 
 class CreateCharacterReferenceTaskRequest(CharacterReferencePromptPreviewRequest):
+    visual_profile_refs: list[ReferenceProfileRef] | None = None
     candidate_count: int = Field(default=2, ge=1, le=4)
     prompts: dict[str, CharacterReferencePromptPair]
 
     @model_validator(mode="after")
     def validate_roles(self):
         if set(self.prompts) != REFERENCE_ROLE_VALUES:
-            raise ValueError("All three character reference prompt roles are required.")
+            raise ValueError("Face and full-body character reference prompts are required.")
         return self
 
 
@@ -73,6 +76,7 @@ class CharacterReferenceImageResponse(BaseModel):
     width: int | None
     height: int | None
     promoted_asset_id: int | None
+    promoted_asset_status: ApprovalStatus | None = None
 
 
 class CharacterReferenceRunResponse(BaseModel):
@@ -107,6 +111,7 @@ class CharacterReferenceCandidateSetResponse(BaseModel):
 
 
 class CharacterReferenceTaskResponse(BaseModel):
+    visual_profiles: list[ReferenceProfileResponse] = Field(default_factory=list)
     id: int
     project_id: int
     outline_character_id: int | None

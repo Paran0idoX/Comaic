@@ -340,6 +340,8 @@ class ViStoryBenchProcessRunner:
         manifest: dict[str, Any],
         work_dir: Path,
     ) -> dict[str, Any]:
+        # worker 会切换到仓库目录导入代码；先固定调用方的产物目录，避免读错相对路径。
+        work_dir = work_dir.resolve()
         work_dir.mkdir(parents=True, exist_ok=True)
         manifest_path = work_dir / "manifest.json"
         result_path = work_dir / "result.json"

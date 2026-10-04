@@ -58,6 +58,17 @@ class RunningTaskRegistry:
             self._tasks.add(RunningTaskRef(task_type=task_type, task_id=task_id))
         logger.info("Registered running task type=%s id=%s", task_type.value, task_id)
 
+    def try_register(self, task_type: RuntimeTaskType, task_id: int) -> bool:
+        """原子领取尚未执行的任务，避免同批次的两个 generator 同时运行。"""
+
+        ref = RunningTaskRef(task_type=task_type, task_id=task_id)
+        with self._lock:
+            if ref in self._tasks:
+                return False
+            self._tasks.add(ref)
+        logger.info("Claimed running task type=%s id=%s", task_type.value, task_id)
+        return True
+
     def unregister(self, task_type: RuntimeTaskType, task_id: int) -> None:
         """任务结束、暂停、失败或 generator 退出时注销。"""
 

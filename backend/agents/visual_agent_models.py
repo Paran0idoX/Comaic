@@ -1,120 +1,9 @@
-from typing import Any
-
 from pydantic import BaseModel, Field, model_validator
 
 from backend.models.enums import (
-    ContinuityEventTiming,
-    ContinuityEventType,
-    ContinuityTargetType,
     SubjectReferenceFraming,
     SubjectReferenceView,
 )
-
-
-CHARACTER_EVENT_TYPES = {
-    ContinuityEventType.SET_HAIRSTYLE,
-    ContinuityEventType.SET_OUTFIT,
-    ContinuityEventType.SET_ACCESSORY,
-    ContinuityEventType.SET_GARMENT_STATE,
-    ContinuityEventType.SET_CLOTHING_CONDITION,
-    ContinuityEventType.SET_CHARACTER_CONDITION,
-    ContinuityEventType.PICK_UP_PROP,
-    ContinuityEventType.DROP_PROP,
-    ContinuityEventType.TRANSFER_PROP,
-}
-SCENE_EVENT_TYPES = {
-    ContinuityEventType.SET_LIGHT_STATE,
-    ContinuityEventType.SET_DOOR_STATE,
-    ContinuityEventType.SET_OBJECT_STATE,
-    ContinuityEventType.BREAK_OBJECT,
-    ContinuityEventType.SET_WEATHER,
-    ContinuityEventType.ADVANCE_TIME,
-}
-FORBIDDEN_EVENT_PAYLOAD_KEYS = {
-    "identity",
-    "appearance",
-    "fixed_appearance",
-    "eye_color",
-    "height",
-    "body_type",
-    "scar_position",
-    "visual_anchors",
-    "character_visual_anchors",
-    "character_negative_constraints",
-    "assets",
-}
-
-
-class ContinuityEventItem(BaseModel):
-    """LLM 提取的单个受控连续性事件。"""
-
-    page_no: int = Field(gt=0)
-    sequence_no: int = Field(gt=0)
-    event_type: ContinuityEventType
-    target_type: ContinuityTargetType
-    target_key: str
-    timing: ContinuityEventTiming = ContinuityEventTiming.AFTER_PAGE
-    payload: dict[str, Any] = Field(default_factory=dict)
-
-    @model_validator(mode="after")
-    def validate_event_contract(self):
-        """在结构化重试阶段拦截目标类型和关键 payload 缺失。"""
-
-        if self.event_type in CHARACTER_EVENT_TYPES:
-            expected_target = ContinuityTargetType.CHARACTER
-        elif self.event_type in SCENE_EVENT_TYPES:
-            expected_target = ContinuityTargetType.SCENE
-        else:  # pragma: no cover - 枚举新增后必须显式归类
-            raise ValueError(f"unsupported continuity event type: {self.event_type.value}")
-        if self.target_type != expected_target:
-            raise ValueError(
-                f"{self.event_type.value} requires target_type={expected_target.value}"
-            )
-        forbidden = FORBIDDEN_EVENT_PAYLOAD_KEYS & set(self.payload)
-        if forbidden:
-            raise ValueError(
-                f"continuity event cannot modify protected fields: {sorted(forbidden)}"
-            )
-
-        def present(key: str) -> bool:
-            value = self.payload.get(key)
-            return value is not None and (not isinstance(value, str) or bool(value.strip()))
-
-        required_keys = {
-            ContinuityEventType.SET_HAIRSTYLE: ("value",),
-            ContinuityEventType.SET_GARMENT_STATE: ("garment_key", "value"),
-            ContinuityEventType.SET_CLOTHING_CONDITION: ("condition_key",),
-            ContinuityEventType.SET_CHARACTER_CONDITION: ("condition_key", "value"),
-            ContinuityEventType.PICK_UP_PROP: ("prop_key",),
-            ContinuityEventType.DROP_PROP: ("prop_key",),
-            ContinuityEventType.TRANSFER_PROP: ("prop_key", "to_character_key"),
-            ContinuityEventType.SET_LIGHT_STATE: ("value",),
-            ContinuityEventType.SET_DOOR_STATE: ("door_key", "value"),
-            ContinuityEventType.SET_OBJECT_STATE: ("object_key", "value"),
-            ContinuityEventType.BREAK_OBJECT: ("object_key",),
-            ContinuityEventType.SET_WEATHER: ("value",),
-            ContinuityEventType.ADVANCE_TIME: ("value",),
-        }
-        missing = [key for key in required_keys.get(self.event_type, ()) if not present(key)]
-        if missing:
-            raise ValueError(
-                f"{self.event_type.value} payload is missing: {', '.join(missing)}"
-            )
-        if self.event_type == ContinuityEventType.SET_OUTFIT and not any(
-            present(key) for key in ("outfit_variant_id", "outfit_key", "description")
-        ):
-            raise ValueError("set_outfit requires an outfit id, key, or description")
-        if self.event_type == ContinuityEventType.SET_ACCESSORY:
-            missing = [key for key in ("accessory_key", "value") if not present(key)]
-            if missing:
-                raise ValueError(
-                    "set_accessory requires a stable accessory_key and value"
-                )
-        return self
-
-
-class ContinuityEventResponse(BaseModel):
-    events: list[ContinuityEventItem] = Field(default_factory=list)
 
 
 class NormalizedBox(BaseModel):
@@ -144,26 +33,47 @@ class CameraPlan(BaseModel):
 
 class SubjectShotPlan(BaseModel):
     character_key: str
-    action: str
-    pose: str
-    expression: str
-    gaze: str = ""
+    action: str = Field(description="本页选定瞬间正在发生的可见动作，可有动势；不能串联先后动作或动作前后的状态。")
+    pose: str = Field(description="与 action 同一瞬间的身体姿态、接触点和持物关系。")
+    expression: str = Field(description="与 action 同一瞬间的表情，不描述先后变化。")
+    visible_state: str = Field(
+        default="",
+        description="仅此页脚本明确、在当前镜头可见的人物或衣物临时状态，如湿污、破损、受伤或卷袖；不复述固定外貌和基础造型，不从前页推演。没有变化时为空。",
+    )
+    gaze: str = Field(default="", description="选定瞬间的视线方向或目标，不描述视线转移过程。")
     orientation: str = ""
     region: NormalizedBox
     depth_order: int = Field(ge=0)
     control_requirements: list[str] = Field(default_factory=list)
     reference_view: SubjectReferenceView = SubjectReferenceView.UNKNOWN
     reference_framing: SubjectReferenceFraming = SubjectReferenceFraming.UNKNOWN
-    visible_prop_keys: list[str] = Field(default_factory=list)
+    visible_prop_keys: list[str] = Field(
+        default_factory=list,
+        description="该人物处实际可见且属于输入 prop_catalog 的物品 key；每个 key 在全部 subject/scene 中最多出现一次。目录外物品只用 action/pose 描述。",
+    )
 
 
 class SceneShotPlan(BaseModel):
-    framing_notes: str
+    framing_notes: str = Field(
+        description="本页当前瞬间完整的可见环境描述：固定场景提供空间布局、地标与材质，本页 scene_conditions 提供时段、天气、光照与氛围，脚本提供普通剧情物的当前位置与容器遮挡；不列出隐藏目录物，不照搬参考图的环境条件。这是最终 Prompt 的场景描述来源。",
+    )
     focal_point: str
     negative_space: str = ""
     control_requirements: list[str] = Field(default_factory=list)
-    visible_prop_keys: list[str] = Field(default_factory=list)
+    visible_prop_keys: list[str] = Field(
+        default_factory=list,
+        description="场景中实际可见且属于输入 prop_catalog 的物品 key；每个 key 在全部 subject/scene 中最多出现一次。目录外物品只用 framing_notes 描述。",
+    )
     background_visible: bool = True
+
+
+class PromptLanguageResponse(BaseModel):
+    """一次转换四个组件，三种 Prompt 共用同一译文。"""
+
+    tag_text: str = Field(min_length=1)
+    natural_language_text: str = Field(min_length=1)
+    negative_tag_text: str = Field(min_length=1)
+    negative_natural_language_text: str = Field(min_length=1)
 
 
 class ShotPlanResponse(BaseModel):

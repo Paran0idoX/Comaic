@@ -6,7 +6,9 @@
   --panel-shadow: 0 18px 48px rgba(22, 47, 111, 0.12);
   --text-strong: #101828;
   --text-regular: #475467;
-  --text-soft: #7a8aa0;
+  --text-soft: #637086;
+  --text-secondary: var(--text-regular);
+  --text-main: var(--text-strong);
   --brand: #176dff;
   --brand-cyan: #10b5f4;
   --brand-violet: #8b1cff;
@@ -160,10 +162,30 @@ a {
 }
 
 .el-dialog {
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100dvh - 48px);
+  margin-top: 24px !important;
+  margin-bottom: 24px;
   border: 1px solid var(--panel-border);
   border-radius: 8px;
   box-shadow: 0 24px 72px rgba(22, 47, 111, 0.2);
 }
+
+/* 长表单只滚动内容，标题和操作始终留在视口内。 */
+.el-dialog__header, .el-dialog__footer { flex-shrink: 0; }
+.el-dialog__body { min-height: 0; overflow-y: auto; overflow-wrap: anywhere; }
+.el-dialog__footer, .el-drawer__footer { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
+.el-dialog__footer .el-button + .el-button, .el-drawer__footer .el-button + .el-button { margin-left: 0; }
+.el-dialog__title { overflow-wrap: anywhere; }
+.el-drawer__body { min-width: 0; overflow-wrap: anywhere; }
+.el-form-item__content { min-width: 0; }
+.el-pagination { max-width: 100%; flex-wrap: wrap; gap: 8px 0; }
+.info-tip-popper { max-width: min(360px, calc(100vw - 32px)); line-height: 1.6; overflow-wrap: anywhere; }
+.title-with-info { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; min-width: 0; }
+.title-with-info > h2, .title-with-info > h3 { margin: 0; font-size: 18px; line-height: 1.4; }
+.field-with-info { display: inline-flex; align-items: center; gap: 4px; }
+.workspace-toolbar .el-button + .el-button { margin-left: 0; }
 
 .workspace-tabs {
   min-width: 0;
@@ -208,14 +230,12 @@ a {
     flex-direction: column;
   }
 
-  .workspace-tabs > .el-tabs__header {
-    top: 0;
-  }
 }
 
 @media (max-width: 640px) {
   .el-dialog {
     width: calc(100vw - 20px) !important;
+    max-height: calc(100dvh - 20px) !important;
     margin: 10px auto !important;
   }
 }

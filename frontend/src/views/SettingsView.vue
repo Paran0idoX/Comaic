@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import InfoTip from '@/components/workspace/InfoTip.vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Connection,
@@ -12,6 +13,7 @@ import {
   Star,
 } from '@element-plus/icons-vue'
 import { useI18n } from 'vue-i18n'
+import { useRoute } from 'vue-router'
 
 import { apiErrorMessage } from '@/api/errors'
 import {
@@ -35,8 +37,11 @@ import {
   type LLMProviderOption,
 } from '@/api/settings'
 import { formatLocalDateTime } from '@/utils/datetime'
+import ImageToolManager from '@/components/settings/ImageToolManager.vue'
+import SystemPromptManager from '@/components/settings/SystemPromptManager.vue'
 
 const { locale, t } = useI18n()
+const route = useRoute()
 
 const loading = ref(false)
 const saving = ref(false)
@@ -53,7 +58,13 @@ const selectedConfigId = ref<number | null>(null)
 const isCreating = ref(false)
 const modelDraft = ref('')
 const providerManuallySelected = ref(false)
-const activeSettingsTab = ref<'general' | 'api'>('general')
+const activeSettingsTab = ref<'general' | 'api' | 'image-tools' | 'prompts'>(
+  ['general', 'api', 'image-tools', 'prompts'].includes(String(route.query.tab))
+    ? String(route.query.tab) as 'general' | 'api' | 'image-tools' | 'prompts' : 'general',
+)
+watch(() => route.query.tab, (tab) => {
+  if (tab === 'general' || tab === 'api' || tab === 'image-tools' || tab === 'prompts') activeSettingsTab.value = tab
+})
 const consistencyAdvancedSections = ref<string[]>([])
 const appSettings = reactive({
   script_section_max_concurrency: 3,
@@ -383,8 +394,15 @@ const formatDate = (value: string | undefined) => {
   return value ? formatLocalDateTime(value, locale.value) : '-'
 }
 
+watch(activeSettingsTab, (tab) => {
+  if (tab === 'general' && consistencyRuntime.value === null && !loadingConsistencySettings.value) {
+    void loadConsistencySettings()
+  }
+})
+
 onMounted(() => {
-  void Promise.all([loadConfigs(), loadConsistencySettings()])
+  void loadConfigs()
+  if (activeSettingsTab.value === 'general') void loadConsistencySettings()
 })
 </script>
 
@@ -408,33 +426,45 @@ onMounted(() => {
         >
           {{ t('settings.tabs.api') }}
         </button>
+        <button
+          type="button"
+          class="settings-nav__item"
+          :class="{ 'settings-nav__item--active': activeSettingsTab === 'image-tools' }"
+          @click="activeSettingsTab = 'image-tools'"
+        >
+          {{ t('settings.tabs.imageTools') }}
+        </button>
+        <button type="button" class="settings-nav__item"
+          :class="{ 'settings-nav__item--active': activeSettingsTab === 'prompts' }"
+          @click="activeSettingsTab = 'prompts'">{{ t('systemPrompts.title') }}</button>
       </aside>
 
       <div class="settings-content">
+        <SystemPromptManager v-if="activeSettingsTab === 'prompts'" />
+        <ImageToolManager v-if="activeSettingsTab === 'image-tools'" />
         <template v-if="activeSettingsTab === 'general'">
         <section class="panel settings-card">
           <header class="panel-header">
             <div>
-              <h2>{{ t('settings.generation.title') }}</h2>
-              <p>{{ t('settings.generation.description') }}</p>
+              <div class="title-with-info"><h2>{{ t('settings.generation.title') }}</h2><InfoTip :content="t('settings.generation.description')" :label="t('settings.generation.title')" /></div>
             </div>
           </header>
           <div class="settings-form settings-form--compact">
             <el-form label-position="top" class="settings-form-grid">
               <el-form-item :label="t('settings.generation.scriptSectionMaxConcurrency')">
+                <template #label><span class="field-with-info">{{ t('settings.generation.scriptSectionMaxConcurrency') }}<InfoTip :content="t('settings.generation.scriptSectionMaxConcurrencyHint')" :label="t('settings.generation.scriptSectionMaxConcurrency')" /></span></template>
                 <el-input-number
                   v-model="appSettings.script_section_max_concurrency"
                   :min="1"
                   :max="20"
                   :aria-label="t('settings.generation.scriptSectionMaxConcurrency')"
                 />
-                <p class="form-hint">{{ t('settings.generation.scriptSectionMaxConcurrencyHint') }}</p>
               </el-form-item>
             </el-form>
           </div>
           <footer class="settings-footer">
-            <span class="updated-at">{{ t('settings.generation.appliesToNewTasks') }}</span>
             <div class="settings-actions">
+              <InfoTip :content="t('settings.generation.appliesToNewTasks')" :label="t('settings.actions.saveGeneration')" />
               <el-button
                 type="primary"
                 :icon="Select"
@@ -450,8 +480,7 @@ onMounted(() => {
         <section v-loading="loadingConsistencySettings" class="panel settings-card">
           <header class="panel-header">
             <div>
-              <h2>{{ t('settings.consistency.title') }}</h2>
-              <p>{{ t('settings.consistency.description') }}</p>
+              <div class="title-with-info"><h2>{{ t('settings.consistency.title') }}</h2><InfoTip :content="t('settings.consistency.description')" :label="t('settings.consistency.title')" /></div>
             </div>
             <el-tag
               :type="consistencyRuntime?.ready ? 'success' : 'danger'"
@@ -465,20 +494,14 @@ onMounted(() => {
             </el-tag>
           </header>
           <div class="settings-form consistency-settings-form">
-            <el-alert
-              type="info"
-              :closable="false"
-              :title="t('settings.consistency.gateSummary')"
-              :description="t('settings.consistency.thresholdHint')"
-              show-icon
-            />
+
 
             <el-collapse v-model="consistencyAdvancedSections" class="settings-advanced-collapse">
               <el-collapse-item name="thresholds">
                 <template #title>
                   <div class="collapse-title">
                     <strong>{{ t('settings.consistency.thresholdSection') }}</strong>
-                    <span>{{ t('settings.consistency.thresholdSectionHint') }}</span>
+                    <InfoTip :content="t('settings.consistency.thresholdHint')" :label="t('settings.consistency.thresholdSection')" />
                   </div>
                 </template>
                 <div class="advanced-section-body">
@@ -562,7 +585,7 @@ onMounted(() => {
                 <template #title>
                   <div class="collapse-title">
                     <strong>{{ t('settings.consistency.runtimeSection') }}</strong>
-                    <span>{{ t('settings.consistency.runtimeSectionHint') }}</span>
+                    <InfoTip :content="t('settings.consistency.runtimeSectionHint')" :label="t('settings.consistency.runtimeSection')" />
                   </div>
                 </template>
                 <div class="advanced-section-body">
@@ -609,8 +632,8 @@ onMounted(() => {
             </el-collapse>
           </div>
           <footer class="settings-footer">
-            <span class="updated-at">{{ t('settings.consistency.snapshotHint') }}</span>
             <div class="settings-actions">
+              <InfoTip :content="t('settings.consistency.snapshotHint')" :label="t('settings.actions.saveConsistency')" />
               <el-button
                 type="primary"
                 :icon="Select"
@@ -624,7 +647,7 @@ onMounted(() => {
         </section>
         </template>
 
-        <template v-else>
+        <template v-else-if="activeSettingsTab === 'api'">
           <div class="page-header">
             <div class="page-actions">
               <el-button :icon="Plus" @click="createNewConfig">
@@ -632,12 +655,11 @@ onMounted(() => {
               </el-button>
             </div>
           </div>
-          <div class="settings-layout">
-            <section class="panel config-list">
+          <div class="settings-layout" :class="{ 'settings-layout--single': configs.length === 0 }">
+            <section v-if="configs.length" class="panel config-list">
               <header class="panel-header">
                 <div>
-                  <h2>{{ t('settings.llm.configs') }}</h2>
-                  <p>{{ t('settings.llm.configsDescription') }}</p>
+                  <div class="title-with-info"><h2>{{ t('settings.llm.configs') }}</h2><InfoTip :content="t('settings.llm.configsDescription')" :label="t('settings.llm.configs')" /></div>
                 </div>
               </header>
               <div class="config-items">
@@ -675,9 +697,9 @@ onMounted(() => {
 
             <section class="panel settings-card">
               <header class="panel-header">
-                <div>
+                <div class="title-with-info">
                   <h2>{{ isCreating ? t('settings.llm.createTitle') : t('settings.llm.editTitle') }}</h2>
-                  <p>{{ t('settings.llm.description') }}</p>
+                  <InfoTip :content="t('settings.llm.description')" :label="t('settings.tabs.api')" />
                 </div>
                 <el-tag
                   v-if="!isCreating && selectedConfig"
@@ -714,14 +736,15 @@ onMounted(() => {
                   v-if="selectedProviderRequiresBaseUrl"
                   :label="t('settings.llm.baseUrl')"
                 >
+                <template #label><span class="field-with-info">{{ t('settings.llm.baseUrl') }}<InfoTip :content="t('settings.llm.baseUrlRequiredHint')" :label="t('settings.llm.baseUrl')" /></span></template>
                   <el-input
                     v-model="form.base_url"
                     :aria-label="t('settings.llm.baseUrl')"
                     placeholder="https://api.openai.com/v1"
                   />
-                  <p class="form-hint">{{ t('settings.llm.baseUrlRequiredHint') }}</p>
-                </el-form-item>
+                  </el-form-item>
                 <el-form-item :label="t('settings.llm.apiKey')">
+                <template #label><span class="field-with-info">{{ t('settings.llm.apiKey') }}<InfoTip :content="t('settings.llm.apiKeyVisibleHint')" :label="t('settings.llm.apiKey')" /></span></template>
                   <el-input
                     v-model="form.api_key"
                     type="password"
@@ -730,8 +753,7 @@ onMounted(() => {
                     :placeholder="t('settings.llm.newKeyPlaceholder')"
                     :aria-label="t('settings.llm.apiKey')"
                   />
-                  <p class="form-hint">{{ t('settings.llm.apiKeyVisibleHint') }}</p>
-                </el-form-item>
+                  </el-form-item>
                 <el-form-item>
                   <el-checkbox v-model="form.clear_api_key">
                     {{ t('settings.llm.clearKey') }}
@@ -833,6 +855,7 @@ onMounted(() => {
 }
 
 .settings-content {
+  container-type: inline-size;
   display: grid;
   gap: 18px;
   min-width: 0;
@@ -857,7 +880,8 @@ onMounted(() => {
   cursor: pointer;
 }
 
-.settings-nav__item:hover {
+/* 浅色 hover 只用于未选中项，避免覆盖选中项的渐变背景与白色文字。 */
+.settings-nav__item:not(.settings-nav__item--active):hover {
   color: var(--text-main);
   background: #eff6ff;
 }
@@ -919,6 +943,22 @@ onMounted(() => {
   gap: 18px;
   align-items: start;
 }
+.settings-layout--single { grid-template-columns: minmax(0, 1fr); }
+
+/* 设置面板宽度受侧栏影响，按可用空间切换列数。 */
+@container (max-width: 900px) {
+  .settings-content .settings-layout { grid-template-columns: minmax(0, 1fr); }
+  .settings-content .consistency-threshold-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@container (max-width: 580px) {
+  .settings-content .consistency-threshold-grid { grid-template-columns: minmax(0, 1fr); }
+}
+.settings-form-grid { max-width: 100%; grid-template-columns: minmax(0, 360px); }
+.panel-header { flex-wrap: wrap; }
+.panel-header h2 { font-size: 18px; line-height: 1.4; }
+.config-item { min-width: 0; overflow-wrap: anywhere; }
+.settings-actions { flex-wrap: wrap; }
+.settings-actions .el-button + .el-button { margin-left: 0; }
 
 .panel-header h2,
 .panel-header p,
@@ -975,7 +1015,7 @@ onMounted(() => {
 
 .settings-form-grid {
   display: grid;
-  grid-template-columns: minmax(260px, 360px);
+  grid-template-columns: minmax(0, 360px);
 }
 
 .consistency-settings-form {
@@ -1063,6 +1103,10 @@ onMounted(() => {
 .settings-footer {
   align-items: center;
   padding: 0 24px 24px;
+}
+
+.settings-footer > .settings-actions {
+  margin-left: auto;
 }
 
 @media (max-width: 1080px) {

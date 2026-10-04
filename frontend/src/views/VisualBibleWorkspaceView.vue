@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import InfoTip from '@/components/workspace/InfoTip.vue'
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
@@ -55,6 +56,8 @@ import {
   registerVisualAsset,
   selectSceneVisualVersion,
   setConfigurationStatus,
+  getConfigurationUsage,
+  deleteConfigurationDraft,
   setVisualAssetStatus,
   updateOutlineCharacterVisualType,
   uploadVisualAsset,
@@ -107,7 +110,8 @@ const activeBibleTab = ref<'assignments' | 'references' | 'library' | 'assets'>(
 )
 const activeAssignmentTab = ref<'characters' | 'scenes'>('characters')
 const activeLibraryTab = ref<'outfits' | 'scenes' | 'styles'>('outfits')
-const libraryStatusFilter = ref<'draft' | 'approved' | 'all'>('draft')
+const libraryStatusFilter = ref<'draft' | 'approved' | 'archived' | 'all'>('draft')
+const removingConfiguration = ref<string | null>(null)
 const assetStatusFilter = ref<'draft' | 'approved' | 'all'>('all')
 const expandedReferenceCharacter = ref<number | null>(null)
 const activeReferenceRole = ref<CharacterReferenceRole>('identity_face')
@@ -136,6 +140,16 @@ const detailsDialog = ref(false)
 const detailKind = ref<SettingKind>('outfit')
 const detailVersion = ref<SettingVersion | null>(null)
 const bindingCharacterId = ref<number | null>(null)
+const bindingSceneId = ref<number | null>(null)
+type SettingEditTarget = { id: number; taskId: number; previousVersionId: number | null; label: string }
+const outfitEditTarget = ref<SettingEditTarget | null>(null)
+const sceneEditTarget = ref<SettingEditTarget | null>(null)
+const canApplyOutfit = computed(() => outfitEditTarget.value !== null &&
+  selectedProjectId.value === outfitEditorProjectId.value && selectedTaskId.value === outfitEditTarget.value.taskId &&
+  characters.value.some(item => item.id === outfitEditTarget.value?.id && item.outline_character_id === outfitForm.outline_character_id))
+const canApplyScene = computed(() => sceneEditTarget.value !== null &&
+  selectedProjectId.value === sceneEditorProjectId.value && selectedTaskId.value === sceneEditTarget.value.taskId &&
+  sceneForm.script_scene_id === sceneEditTarget.value.id && scenes.value.some(item => item.id === sceneEditTarget.value?.id))
 let projectLoadSequence = 0
 let taskLoadSequence = 0
 let referenceLoadSequence = 0
@@ -144,14 +158,12 @@ const referenceTaskScriptContexts = new Map<number, number | null>()
 
 const referenceRoles: CharacterReferenceRole[] = [
   'identity_face',
-  'identity_half_body',
   'identity_full_body',
 ]
 const referenceStreamStops = new Map<number, () => void>()
 
 const emptyReferencePrompts = () => ({
   identity_face: { positive: '', negative: '' },
-  identity_half_body: { positive: '', negative: '' },
   identity_full_body: { positive: '', negative: '' },
 })
 
@@ -166,7 +178,6 @@ const referenceForm = reactive({
 const assetRolesByEntity: Record<VisualEntityType, VisualAssetRole[]> = {
   character: [
     'identity_face',
-    'identity_half_body',
     'identity_full_body',
     'pose',
     'depth',
@@ -216,6 +227,8 @@ const sceneForm = reactive({
   color_palette: '[]',
 })
 const copiedScene = ref<SceneVisualVersion | null>(null)
+const fixedSceneEditor = computed(() => (scenes.value.find(scene => scene.id === sceneForm.script_scene_id)?.scene_definition_version ??
+  copiedScene.value?.scene_definition_version ?? 1) >= 2)
 const copiedStyle = ref<StyleProfile | null>(null)
 const assetForm = reactive({
   mode: 'upload' as 'upload' | 'locator',
@@ -324,7 +337,7 @@ const selectedReferenceTool = computed(() =>
 const approvedReferenceCharacterCount = computed(
   () =>
     outlineCharacterOptions.value.filter((character) =>
-      assets.value.some(asset => asset.entity_type === 'character' && asset.entity_id === character.id && asset.status === 'approved' && asset.role.startsWith('identity_')),
+      assets.value.some(asset => asset.entity_type === 'character' && asset.entity_id === character.id && asset.status === 'approved' && asset.role !== 'identity_half_body' && asset.role.startsWith('identity_')),
     ).length,
 )
 const unresolvedOutfitCount = computed(
@@ -346,11 +359,11 @@ const unresolvedSceneCount = computed(
 const draftOutfits = computed(() => outfits.value.filter((item) => item.status === 'draft'))
 const draftScenes = computed(() => sceneVersions.value.filter((item) => item.status === 'draft'))
 const draftStyles = computed(() => styles.value.filter((item) => item.status === 'draft'))
-const editableAssets = computed(() => assets.value.filter(asset => ['character', 'scene', 'prop'].includes(asset.entity_type) && asset.status !== 'archived'))
+const editableAssets = computed(() => assets.value.filter(asset => ['character', 'scene', 'prop'].includes(asset.entity_type) && asset.role !== 'identity_half_body' && asset.status !== 'archived'))
 const draftAssetCount = computed(() => editableAssets.value.filter((item) => item.status === 'draft').length)
 const filterByLibraryStatus = <T extends { status: string }>(items: T[]) =>
   libraryStatusFilter.value === 'all'
-    ? items
+    ? items.filter((item) => item.status !== 'archived')
     : items.filter((item) => item.status === libraryStatusFilter.value)
 const filteredOutfits = computed(() => filterByLibraryStatus(outfits.value))
 const filteredSceneVersions = computed(() => filterByLibraryStatus(sceneVersions.value))
@@ -482,10 +495,11 @@ const openAssetUploader = (character?: { id: number }, role: CharacterReferenceR
   assetDialog.value = true
 }
 
-const openSettingDetails = (kind: SettingKind, value: SettingVersion, characterId?: number) => {
+const openSettingDetails = (kind: SettingKind, value: SettingVersion, targetId?: number) => {
   detailKind.value = kind
   detailVersion.value = copyData(value)
-  bindingCharacterId.value = characterId ?? null
+  bindingCharacterId.value = kind === 'outfit' ? targetId ?? null : null
+  bindingSceneId.value = kind === 'scene' ? targetId ?? null : null
   detailsDialog.value = true
 }
 const bindingCharacterOptions = computed(() => {
@@ -512,11 +526,18 @@ const useSettingVersion = async () => {
   }
 }
 
-const openOutfitEditor = (item?: OutfitVariant) => {
+const openOutfitEditor = (item?: OutfitVariant, characterId?: number | null) => {
   copiedOutfit.value = item ? copyData(item) : null
   outfitEditorProjectId.value = item?.project_id ?? selectedProjectId.value
+  // 只继承用户点开的分段角色，不按同名或相同大纲角色猜测应用范围。
+  const character = characters.value.find(entry => entry.id === characterId &&
+    (!item || entry.outline_character_id === item.outline_character_id))
+  outfitEditTarget.value = character && selectedTaskId.value !== null ? {
+    id: character.id, taskId: selectedTaskId.value, previousVersionId: character.outfit_variant_id,
+    label: `${character.name} · ${t('scripts.sections.sectionNo', { sectionNo: character.section_no ?? '?' })}`,
+  } : null
   Object.assign(outfitForm, {
-    outline_character_id: item?.outline_character_id ?? null,
+    outline_character_id: item?.outline_character_id ?? character?.outline_character_id ?? null,
     key: item?.key ?? `manual_${crypto.randomUUID()}`, name: item?.name ?? '',
     garments: arrayText(item?.garment_components ?? []), colors: arrayText(item?.colors ?? []),
     materials: arrayText(item?.materials ?? []), accessories: arrayText(item?.accessories ?? []),
@@ -539,11 +560,15 @@ const openStyleEditor = (item?: StyleProfile) => {
   })
   styleDialog.value = true
 }
-const openSceneEditor = (item?: SceneVisualVersion) => {
+const openSceneEditor = (item?: SceneVisualVersion, sceneId?: number | null) => {
   copiedScene.value = item ? copyData(item) : null
   sceneEditorProjectId.value = item?.project_id ?? selectedProjectId.value
+  const scene = scenes.value.find(entry => entry.id === sceneId && (!item || entry.id === item.script_scene_id))
+  sceneEditTarget.value = scene && selectedTaskId.value !== null ? {
+    id: scene.id, taskId: selectedTaskId.value, previousVersionId: scene.selected_visual_version_id, label: scene.name,
+  } : null
   Object.assign(sceneForm, {
-    script_scene_id: item?.script_scene_id ?? null, landmarks: arrayText(item?.landmarks ?? []),
+    script_scene_id: item?.script_scene_id ?? scene?.id ?? null, landmarks: arrayText(item?.landmarks ?? []),
     spatial_relations: JSON.stringify(item?.spatial_relations ?? {}, null, 2),
     object_states: JSON.stringify(item?.object_states ?? {}, null, 2),
     lighting_state: JSON.stringify(item?.lighting_state ?? {}, null, 2),
@@ -554,8 +579,8 @@ const openSceneEditor = (item?: SceneVisualVersion) => {
 }
 const copySettingVersion = () => {
   if (!detailVersion.value) return
-  if (detailKind.value === 'outfit') openOutfitEditor(detailVersion.value as OutfitVariant)
-  else if (detailKind.value === 'scene') openSceneEditor(detailVersion.value as SceneVisualVersion)
+  if (detailKind.value === 'outfit') openOutfitEditor(detailVersion.value as OutfitVariant, bindingCharacterId.value)
+  else if (detailKind.value === 'scene') openSceneEditor(detailVersion.value as SceneVisualVersion, bindingSceneId.value)
   else openStyleEditor(detailVersion.value as StyleProfile)
   detailsDialog.value = false
 }
@@ -760,9 +785,11 @@ const loadTaskVisuals = async () => {
   }
 }
 
-const saveOutfit = async () => {
+const saveOutfit = async (apply = false) => {
   const projectId = outfitEditorProjectId.value
   if (projectId === null || outfitForm.outline_character_id === null || savingConfiguration.value !== null) return
+  if (apply && !canApplyOutfit.value) return
+  const target = apply ? outfitEditTarget.value : null
   savingConfiguration.value = 'outfit'
   try {
     const created = await createOutfit(projectId, {
@@ -777,16 +804,21 @@ const saveOutfit = async () => {
       accessories: editedArray(outfitForm.accessories, copiedOutfit.value?.accessories),
       trigger_tokens: parseArray(outfitForm.trigger_tokens),
       negative_constraints: outfitForm.negative_constraints,
+      ...(target ? { apply_to: { script_character_id: target.id, script_task_id: target.taskId, expected_outfit_variant_id: target.previousVersionId } } : {}),
     })
     outfitDialog.value = false
     if (projectId === selectedProjectId.value) {
       await loadProjectData()
-      activeBibleTab.value = 'library'
-      activeLibraryTab.value = 'outfits'
-      libraryStatusFilter.value = 'draft'
-      openSettingDetails('outfit', created)
+      if (target) {
+        if (selectedTaskId.value === target.taskId) activeBibleTab.value = 'assignments'
+      } else {
+        activeBibleTab.value = 'library'
+        activeLibraryTab.value = 'outfits'
+        libraryStatusFilter.value = 'draft'
+        openSettingDetails('outfit', created)
+      }
     }
-    ElMessage.success(t('visualBible.messages.saved'))
+    ElMessage.success(t(target ? 'visualBible.details.applied' : 'visualBible.messages.saved'))
   } catch (error) {
     ElMessage.error(apiErrorMessage(error, t, t('visualBible.errors.save')))
   } finally {
@@ -825,9 +857,11 @@ const saveStyle = async () => {
   }
 }
 
-const saveScene = async () => {
+const saveScene = async (apply = false) => {
   const projectId = sceneEditorProjectId.value
   if (projectId === null || sceneForm.script_scene_id === null || savingConfiguration.value !== null) return
+  if (apply && !canApplyScene.value) return
+  const target = apply ? sceneEditTarget.value : null
   savingConfiguration.value = 'scene'
   try {
     const created = await createSceneVersion(projectId, {
@@ -835,19 +869,24 @@ const saveScene = async () => {
       landmarks: editedArray(sceneForm.landmarks, copiedScene.value?.landmarks),
       spatial_relations: parseObject(sceneForm.spatial_relations, 'spatial_relations'),
       camera_presets: parseArray(sceneForm.camera_presets),
-      object_states: parseObject(sceneForm.object_states, 'object_states'),
+      object_states: fixedSceneEditor.value ? {} : parseObject(sceneForm.object_states, 'object_states'),
       color_palette: parseArray(sceneForm.color_palette),
-      lighting_state: parseObject(sceneForm.lighting_state, 'lighting_state'),
+      lighting_state: fixedSceneEditor.value ? {} : parseObject(sceneForm.lighting_state, 'lighting_state'),
+      ...(target ? { apply_to: { script_task_id: target.taskId, expected_visual_version_id: target.previousVersionId } } : {}),
     })
     sceneDialog.value = false
     if (projectId === selectedProjectId.value) {
       await loadProjectData()
-      activeBibleTab.value = 'library'
-      activeLibraryTab.value = 'scenes'
-      libraryStatusFilter.value = 'draft'
-      openSettingDetails('scene', created)
+      if (target) {
+        if (selectedTaskId.value === target.taskId) activeBibleTab.value = 'assignments'
+      } else {
+        activeBibleTab.value = 'library'
+        activeLibraryTab.value = 'scenes'
+        libraryStatusFilter.value = 'draft'
+        openSettingDetails('scene', created)
+      }
     }
-    ElMessage.success(t('visualBible.messages.saved'))
+    ElMessage.success(t(target ? 'visualBible.details.applied' : 'visualBible.messages.saved'))
   } catch (error) {
     ElMessage.error(apiErrorMessage(error, t, t('visualBible.errors.save')))
   } finally {
@@ -905,6 +944,40 @@ const approveConfig = async (kind: 'outfit' | 'style' | 'scene', id: number) => 
     ElMessage.success(t('visualBible.messages.saved'))
   } catch (error) {
     ElMessage.error(apiErrorMessage(error, t, t('visualBible.errors.save')))
+  }
+}
+
+const removeConfiguration = async (kind: 'outfit' | 'scene', item: OutfitVariant | SceneVisualVersion) => {
+  if (removingConfiguration.value || item.status === 'archived') return
+  const projectId = selectedProjectId.value
+  const action = item.status === 'draft' ? 'delete' : 'archive'
+  removingConfiguration.value = `${kind}-${item.id}`
+  try {
+    const usage = await getConfigurationUsage(kind, item.id)
+    if (projectId !== selectedProjectId.value) return
+    const name = kind === 'outfit' ? (item as OutfitVariant).name : sceneVersionLabel(item as SceneVisualVersion)
+    const impact = usage.binding_count
+      ? t(`visualBible.review.${action}Bindings`, { count: usage.binding_count, names: usage.bindings.map(binding => `${binding.name} (#${binding.id})`).join('、') })
+      : t('visualBible.review.noBindings')
+    await ElMessageBox.confirm(
+      t(`visualBible.review.${action}Confirm`, { name, impact }),
+      t(`visualBible.review.${action}`),
+      { type: 'warning', confirmButtonText: t(`visualBible.review.${action}`), cancelButtonText: t('projects.cancel') },
+    )
+    if (projectId !== selectedProjectId.value) return
+    if (action === 'delete') await deleteConfigurationDraft(kind, item.id)
+    else await setConfigurationStatus(kind, item.id, 'archived')
+    if (projectId === selectedProjectId.value) {
+      if (detailKind.value === kind && detailVersion.value?.id === item.id) detailsDialog.value = false
+      await loadProjectData()
+      ElMessage.success(t(`visualBible.review.${action}Success`))
+    }
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close' && projectId === selectedProjectId.value) {
+      ElMessage.error(apiErrorMessage(error, t, t('visualBible.errors.save')))
+    }
+  } finally {
+    removingConfiguration.value = null
   }
 }
 
@@ -1077,7 +1150,6 @@ const submitReferenceTask = async () => {
       candidate_count: referenceForm.candidate_count,
       prompts: {
         identity_face: { ...referenceForm.prompts.identity_face },
-        identity_half_body: { ...referenceForm.prompts.identity_half_body },
         identity_full_body: { ...referenceForm.prompts.identity_full_body },
       },
     })
@@ -1282,19 +1354,14 @@ onBeforeUnmount(() => {
             :value="task.id"
           />
         </el-select>
-        <el-button :disabled="selectedTaskId === null" type="primary" plain @click="router.push({ path: '/image-specs', query: { project_id: selectedProjectId ?? undefined, script_task_id: selectedTaskId ?? undefined, tab: 'compile' } })">
-          {{ t('visualBible.next.openSpecs') }}
-        </el-button>
       </div>
     </div>
 
-    <el-collapse class="readiness-summary"><el-collapse-item :title="t('referenceLibrary.readinessSummary', { count: editableAssets.filter(asset => asset.status === 'approved').length, pending: draftOutfits.length + draftScenes.length })" name="readiness">
     <WorkflowReadiness
       :title="t('visualBible.readiness.title')"
       :description="t('visualBible.readiness.description')"
       :items="readinessItems"
     />
-    </el-collapse-item></el-collapse>
 
     <el-tabs v-model="activeBibleTab" class="workspace-tabs visual-bible-tabs">
       <el-tab-pane name="assignments">
@@ -1302,8 +1369,7 @@ onBeforeUnmount(() => {
         <section class="panel">
           <header class="panel__heading">
             <div>
-              <h2>{{ t('visualBible.assignments.title') }}</h2>
-              <p>{{ t('visualBible.assignments.hint') }}</p>
+              <div class="title-with-info"><h2>{{ t('visualBible.assignments.title') }}</h2><InfoTip :content="t('visualBible.assignments.hint')" :label="t('visualBible.assignments.title')" /></div>
             </div>
           </header>
           <div class="panel__body">
@@ -1316,7 +1382,7 @@ onBeforeUnmount(() => {
                     class="character-type-card"
                   >
                     <div>
-                       <strong>{{ character.label }}</strong>
+                       <strong>{{ character.label }}</strong><InfoTip :content="t('visualBible.assignments.characterTypesHint')" :label="`${character.label} ${t('visualBible.assignments.characterTypes')}`" />
                     </div>
                     <el-select
                       :model-value="character.visual_type"
@@ -1333,13 +1399,8 @@ onBeforeUnmount(() => {
                     </el-select>
                   </article>
                 </div>
-                <el-alert
-                  :title="t('visualBible.assignments.characterTypesHint')"
-                  type="info"
-                  :closable="false"
-                  show-icon
-                />
-                <el-table :data="characters" height="480" class="assignment-table">
+
+                <el-table :data="characters" max-height="480" class="assignment-table">
                   <el-table-column :label="t('visualBible.character')" min-width="210">
                     <template #default="{ row }">
                        <strong>{{ row.name }}</strong>
@@ -1361,7 +1422,7 @@ onBeforeUnmount(() => {
                           v-for="outfit in outfits.filter(
                             (item) =>
                               item.outline_character_id === row.outline_character_id &&
-                              (item.status === 'approved' || item.id === row.outfit_variant_id),
+                              (item.status === 'approved' || (item.status === 'draft' && item.id === row.outfit_variant_id)),
                           )"
                           :key="outfit.id"
                           :label="`${outfit.name} · v${outfit.version} · ${t(`visualBible.status.${outfit.status}`)}`"
@@ -1370,15 +1431,16 @@ onBeforeUnmount(() => {
                       </el-select>
                     </template>
                   </el-table-column>
-                  <el-table-column :label="t('ux.details')" width="105">
+                  <el-table-column :label="t('ux.details')" min-width="180">
                     <template #default="{ row }">
                       <el-button v-if="outfits.find((item) => item.id === row.outfit_variant_id)" link type="primary" @click="openSettingDetails('outfit', outfits.find((item) => item.id === row.outfit_variant_id)!, row.id)">{{ t('ux.details') }}</el-button>
+                      <el-button v-if="row.outline_character_id" link type="primary" @click="openOutfitEditor(outfits.find((item) => item.id === row.outfit_variant_id), row.id)">{{ t('ux.copyAndEdit') }}</el-button>
                     </template>
                   </el-table-column>
                 </el-table>
               </el-tab-pane>
               <el-tab-pane :label="t('visualBible.assignments.scenes')" name="scenes">
-                <el-table :data="scenes" height="560" class="assignment-table">
+                <el-table :data="scenes" max-height="560" class="assignment-table">
                   <el-table-column :label="t('visualBible.scenes.scene')" min-width="260">
                     <template #default="{ row }">
                        <strong>{{ row.name }}</strong>
@@ -1397,7 +1459,7 @@ onBeforeUnmount(() => {
                           v-for="version in sceneVersions.filter(
                             (item) =>
                               item.script_scene_id === row.id &&
-                              (item.status === 'approved' || item.id === row.selected_visual_version_id),
+                              (item.status === 'approved' || (item.status === 'draft' && item.id === row.selected_visual_version_id)),
                           )"
                           :key="version.id"
                           :label="`v${version.version} · ${t(`visualBible.status.${version.status}`)}`"
@@ -1406,9 +1468,10 @@ onBeforeUnmount(() => {
                       </el-select>
                     </template>
                   </el-table-column>
-                  <el-table-column :label="t('ux.details')" width="105">
+                  <el-table-column :label="t('ux.details')" min-width="180">
                     <template #default="{ row }">
-                      <el-button v-if="sceneVersions.find((item) => item.id === row.selected_visual_version_id)" link type="primary" @click="openSettingDetails('scene', sceneVersions.find((item) => item.id === row.selected_visual_version_id)!)">{{ t('ux.details') }}</el-button>
+                      <el-button v-if="sceneVersions.find((item) => item.id === row.selected_visual_version_id)" link type="primary" @click="openSettingDetails('scene', sceneVersions.find((item) => item.id === row.selected_visual_version_id)!, row.id)">{{ t('ux.details') }}</el-button>
+                      <el-button link type="primary" @click="openSceneEditor(sceneVersions.find((item) => item.id === row.selected_visual_version_id), row.id)">{{ t('ux.copyAndEdit') }}</el-button>
                     </template>
                   </el-table-column>
                 </el-table>
@@ -1439,14 +1502,14 @@ onBeforeUnmount(() => {
         <section class="panel review-inbox">
           <header class="panel__heading">
             <div>
-              <h2>{{ t('visualBible.review.title') }}</h2>
-              <p>{{ t('visualBible.review.description') }}</p>
+              <div class="title-with-info"><h2>{{ t('visualBible.review.title') }}</h2><InfoTip :content="t('visualBible.review.description')" :label="t('visualBible.review.title')" /></div>
             </div>
             <el-segmented
               v-model="libraryStatusFilter"
               :options="[
                 { label: t('visualBible.review.draft'), value: 'draft' },
                 { label: t('visualBible.review.approved'), value: 'approved' },
+                { label: t('visualBible.status.archived'), value: 'archived' },
                 { label: t('visualBible.review.all'), value: 'all' },
               ]"
             />
@@ -1466,7 +1529,7 @@ onBeforeUnmount(() => {
                 </div>
                 <div class="review-list">
                   <el-empty v-if="filteredOutfits.length === 0" :description="t('visualBible.empty')" />
-                  <div v-for="item in filteredOutfits" :key="item.id" class="row">
+                  <div v-for="item in filteredOutfits" :key="item.id" class="row review-row">
                     <div>
                       <strong>{{ item.name }} · v{{ item.version }}</strong>
                       <p>{{ arrayText(item.garment_components) }}</p>
@@ -1479,10 +1542,13 @@ onBeforeUnmount(() => {
                         <span class="technical-detail">{{ item.key }}</span>
                       </el-popover>
                     </div>
-                    <el-button v-if="item.status === 'draft'" type="success" plain :icon="Check" @click="approveConfig('outfit', item.id)">
+                    <div class="review-row-actions">
+                    <el-button v-if="item.status === 'draft'" type="success" plain :icon="Check" :disabled="removingConfiguration !== null" @click="approveConfig('outfit', item.id)">
                       {{ t('visualBible.approve') }}
                     </el-button>
-                    <el-tag v-else type="success">{{ t(`visualBible.status.${item.status}`) }}</el-tag>
+                    <el-tag v-else :type="item.status === 'archived' ? 'info' : 'success'">{{ t(`visualBible.status.${item.status}`) }}</el-tag>
+                    <el-button v-if="item.status !== 'archived'" type="danger" plain :disabled="removingConfiguration !== null || batchApprovingKind !== null" @click="removeConfiguration('outfit', item)">{{ t(`visualBible.review.${item.status === 'draft' ? 'delete' : 'archive'}`) }}</el-button>
+                    </div>
                   </div>
                 </div>
               </el-tab-pane>
@@ -1499,7 +1565,7 @@ onBeforeUnmount(() => {
                 </div>
                 <div class="review-list">
                   <el-empty v-if="filteredSceneVersions.length === 0" :description="t('visualBible.empty')" />
-                  <div v-for="item in filteredSceneVersions" :key="item.id" class="row">
+                  <div v-for="item in filteredSceneVersions" :key="item.id" class="row review-row">
                     <div>
                       <strong>{{ sceneVersionLabel(item) }}</strong>
                       <p>{{ arrayText(item.landmarks) }}</p>
@@ -1510,10 +1576,13 @@ onBeforeUnmount(() => {
                         <span class="technical-detail">scene #{{ item.script_scene_id }}</span>
                       </el-popover>
                     </div>
-                    <el-button v-if="item.status === 'draft'" type="success" plain :icon="Check" @click="approveConfig('scene', item.id)">
+                    <div class="review-row-actions">
+                    <el-button v-if="item.status === 'draft'" type="success" plain :icon="Check" :disabled="removingConfiguration !== null" @click="approveConfig('scene', item.id)">
                       {{ t('visualBible.approve') }}
                     </el-button>
-                    <el-tag v-else type="success">{{ t(`visualBible.status.${item.status}`) }}</el-tag>
+                    <el-tag v-else :type="item.status === 'archived' ? 'info' : 'success'">{{ t(`visualBible.status.${item.status}`) }}</el-tag>
+                    <el-button v-if="item.status !== 'archived'" type="danger" plain :disabled="removingConfiguration !== null || batchApprovingKind !== null" @click="removeConfiguration('scene', item)">{{ t(`visualBible.review.${item.status === 'draft' ? 'delete' : 'archive'}`) }}</el-button>
+                    </div>
                   </div>
                 </div>
               </el-tab-pane>
@@ -1559,15 +1628,17 @@ onBeforeUnmount(() => {
           <el-button v-if="detailKind !== 'style'" @click="copySettingVersion">{{ t('ux.copyAndEdit') }}</el-button>
           <el-button v-if="detailKind !== 'style' && detailVersion.status === 'draft'" type="success" @click="approveConfig(detailKind, detailVersion.id)">{{ t('visualBible.approve') }}</el-button>
           <el-button v-if="detailKind !== 'style' && detailVersion.status === 'approved'" type="primary" :disabled="!canUseVersion" @click="useSettingVersion">{{ t('ux.useVersion') }}</el-button>
+          <el-button v-if="detailKind !== 'style' && detailVersion.status !== 'archived'" type="danger" :disabled="removingConfiguration !== null" @click="removeConfiguration(detailKind, detailVersion as OutfitVariant | SceneVisualVersion)">{{ t(`visualBible.review.${detailVersion.status === 'draft' ? 'delete' : 'archive'}`) }}</el-button>
         </div>
       </template>
     </el-drawer>
 
     <el-dialog v-model="outfitDialog" :title="copiedOutfit ? t('ux.copyAndEdit') : t('visualBible.outfits.add')" width="min(620px, 96vw)">
-      <el-alert v-if="copiedOutfit" :title="t('visualBible.details.copyHint')" type="info" :closable="false" />
+      <template #header><div class="title-with-info"><span>{{ copiedOutfit ? t('ux.copyAndEdit') : t('visualBible.outfits.add') }}</span><InfoTip v-if="copiedOutfit" :content="t('visualBible.details.copyHint')" :label="t('visualBible.outfits.add')" /></div></template>
+      <el-alert v-if="outfitEditTarget" :title="canApplyOutfit ? t('visualBible.details.applyTarget', { target: outfitEditTarget.label }) : t('visualBible.details.applyContextChanged')" :type="canApplyOutfit ? 'info' : 'warning'" :closable="false" />
       <el-form label-position="top">
         <el-form-item :label="t('visualBible.character')"
-          ><el-select v-model="outfitForm.outline_character_id" :disabled="copiedOutfit !== null"
+          ><el-select v-model="outfitForm.outline_character_id" :disabled="copiedOutfit !== null || outfitEditTarget !== null"
             ><el-option
               v-for="option in outlineCharacterOptions"
               :key="option.id"
@@ -1604,17 +1675,17 @@ onBeforeUnmount(() => {
         </el-form
       ><template #footer
         ><el-button @click="outfitDialog = false">{{ t('projects.cancel') }}</el-button
-        ><el-button type="primary" :loading="savingConfiguration === 'outfit'" @click="saveOutfit">{{
-          t('projects.save')
-        }}</el-button></template
+        ><el-button :type="outfitEditTarget ? 'default' : 'primary'" :loading="savingConfiguration === 'outfit'" @click="saveOutfit(false)">{{ t('visualBible.details.saveDraft') }}</el-button>
+        <el-button v-if="outfitEditTarget" type="primary" :disabled="!canApplyOutfit" :loading="savingConfiguration === 'outfit'" @click="saveOutfit(true)">{{ t('visualBible.details.saveAndApply') }}</el-button></template
       >
     </el-dialog>
 
     <el-dialog v-model="sceneDialog" :title="copiedScene ? t('ux.copyAndEdit') : t('visualBible.scenes.add')" width="min(680px, 96vw)">
-      <el-alert v-if="copiedScene" :title="t('visualBible.details.copyHint')" type="info" :closable="false" />
+      <template #header><div class="title-with-info"><span>{{ copiedScene ? t('ux.copyAndEdit') : t('visualBible.scenes.add') }}</span><InfoTip v-if="copiedScene" :content="t('visualBible.details.copyHint')" :label="t('visualBible.scenes.add')" /></div></template>
+      <el-alert v-if="sceneEditTarget" :title="canApplyScene ? t('visualBible.details.applyTarget', { target: sceneEditTarget.label }) : t('visualBible.details.applyContextChanged')" :type="canApplyScene ? 'info' : 'warning'" :closable="false" />
       <el-form label-position="top"
         ><el-form-item :label="t('visualBible.scenes.scene')"
-          ><el-select v-model="sceneForm.script_scene_id" :disabled="copiedScene !== null"
+          ><el-select v-model="sceneForm.script_scene_id" :disabled="copiedScene !== null || sceneEditTarget !== null"
             ><el-option
               v-for="scene in scenes"
               :key="scene.id"
@@ -1622,11 +1693,11 @@ onBeforeUnmount(() => {
               :value="scene.id" /></el-select></el-form-item
         ><el-form-item :label="t('visualBible.scenes.landmarks')"
           ><el-input v-model="sceneForm.landmarks" /></el-form-item
-        ><el-form-item :label="t('visualBible.objectStates')"
+        ><el-form-item v-if="!fixedSceneEditor" :label="t('visualBible.objectStates')"
           ><el-input v-model="sceneForm.object_states" type="textarea" /></el-form-item
         ><el-form-item :label="t('visualBible.spatialRelations')"
           ><el-input v-model="sceneForm.spatial_relations" type="textarea" /></el-form-item
-        ><el-form-item :label="t('visualBible.details.lightingState')"><el-input v-model="sceneForm.lighting_state" type="textarea" /></el-form-item>
+        ><el-form-item v-if="!fixedSceneEditor" :label="t('visualBible.details.lightingState')"><el-input v-model="sceneForm.lighting_state" type="textarea" /></el-form-item>
         <el-collapse><el-collapse-item :title="t('ux.advancedSettings')" name="advanced">
           <el-form-item :label="t('visualBible.details.cameraPresets')"><el-input v-model="sceneForm.camera_presets" type="textarea" /></el-form-item>
           <el-form-item :label="t('visualBible.details.colorPalette')"><el-input v-model="sceneForm.color_palette" type="textarea" /></el-form-item>
@@ -1634,7 +1705,8 @@ onBeforeUnmount(() => {
       </el-form>
       <template #footer
         ><el-button @click="sceneDialog = false">{{ t('projects.cancel') }}</el-button
-        ><el-button type="primary" :loading="savingConfiguration === 'scene'" @click="saveScene">{{ t('projects.save') }}</el-button></template
+        ><el-button :type="sceneEditTarget ? 'default' : 'primary'" :loading="savingConfiguration === 'scene'" @click="saveScene(false)">{{ t('visualBible.details.saveDraft') }}</el-button>
+        <el-button v-if="sceneEditTarget" type="primary" :disabled="!canApplyScene" :loading="savingConfiguration === 'scene'" @click="saveScene(true)">{{ t('visualBible.details.saveAndApply') }}</el-button></template
       >
     </el-dialog>
 
@@ -1648,6 +1720,9 @@ onBeforeUnmount(() => {
   min-width: 0;
   gap: 18px;
 }
+.page-header { margin-bottom: 0; }
+.panel__heading { flex-wrap: wrap; }
+.character-type-card > div { display: flex; align-items: center; gap: 4px; }
 
 .reference-upload-drafts h4 { margin: 12px 0; font-size: 14px; }
 .reference-upload-draft { display: grid; gap: 8px; border: 1px solid var(--panel-border); border-radius: 8px; padding: 12px; }
@@ -1872,7 +1947,6 @@ onBeforeUnmount(() => {
   background: #f8fbff;
 }
 
-.character-type-card > div,
 .assignment-table strong,
 .assignment-table small,
 .reference-collapse-title > div {
@@ -2172,6 +2246,25 @@ onBeforeUnmount(() => {
   padding: 14px 4px;
 }
 
+/* 固定操作区宽度，避免确认按钮随设定文案长短移动。 */
+.review-list .review-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.review-row-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: center;
+  gap: 12px;
+  width: 290px;
+  max-width: 100%;
+}
+
+.review-row-actions .el-button + .el-button {
+  margin-left: 0;
+}
+
 .review-list .el-button.is-link {
   margin-top: 4px;
   padding: 0;
@@ -2219,6 +2312,13 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 640px) {
+  .review-list .review-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .review-row-actions {
+    justify-self: end;
+  }
   .selectors {
     width: 100%;
     max-width: 100%;

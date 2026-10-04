@@ -37,11 +37,13 @@ def _submission() -> RendererSubmission:
 
 
 @pytest.mark.asyncio
-async def test_comfy_wait_raises_immediately_for_execution_error() -> None:
+@pytest.mark.parametrize("partial_output", [False, True])
+async def test_comfy_wait_raises_immediately_for_execution_error(partial_output) -> None:
     client = FakeComfyClient(
         {
             "prompt-1": {
-                "outputs": {},
+                "outputs": ({"preview": {"images": [{"filename": "reference-preview.png", "type": "temp"}]}}
+                            if partial_output else {}),
                 "status": {
                     "status_str": "error",
                     "messages": [

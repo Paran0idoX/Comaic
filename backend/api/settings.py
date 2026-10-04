@@ -10,7 +10,11 @@ from backend.api.schemas.settings import (
     TestLLMConfigResponse,
     UpdateAppSettingsRequest,
     UpdateLLMConfigRequest,
+    SystemPromptResponse,
+    UpdateSystemPromptRequest,
+    UpdateModelSystemPromptRequest,
 )
+from backend.models.enums import SystemPromptKey
 from backend.api.schemas.consistency_evaluation import (
     ConsistencySettingsResponse,
     UpdateConsistencyThresholdsRequest,
@@ -29,6 +33,54 @@ from backend.services.settings_service import SettingsService
 
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
+
+
+@router.get("/system-prompts", response_model=list[SystemPromptResponse])
+def list_system_prompts(http_request: Request):
+    """读取可维护的任务提示词白名单。"""
+    db_session, service = create_service()
+    try:
+        return service.list_system_prompts()
+    except Exception as exc:
+        raise http_exception(exc, request_locale(http_request)) from exc
+    finally:
+        db_session.close()
+
+
+@router.put("/system-prompts/{key}", response_model=SystemPromptResponse)
+def update_system_prompt(key: SystemPromptKey, request: UpdateSystemPromptRequest, http_request: Request):
+    """更新一个任务节点或删除其覆盖。"""
+    db_session, service = create_service()
+    try:
+        return service.update_system_prompt(key=key, content=request.content)
+    except Exception as exc:
+        raise http_exception(exc, request_locale(http_request)) from exc
+    finally:
+        db_session.close()
+
+
+@router.get("/llm/configs/{config_id}/system-prompts", response_model=list[SystemPromptResponse])
+def list_model_system_prompts(config_id: int, http_request: Request):
+    """不返回 Key 等 API 敏感配置，仅返回每个模型的提示词。"""
+    db_session, service = create_service()
+    try:
+        return service.list_model_system_prompts(config_id=config_id)
+    except Exception as exc:
+        raise http_exception(exc, request_locale(http_request)) from exc
+    finally:
+        db_session.close()
+
+
+@router.put("/llm/configs/{config_id}/system-prompts", response_model=SystemPromptResponse)
+def update_model_system_prompt(config_id: int, request: UpdateModelSystemPromptRequest, http_request: Request):
+    """模型名通过请求体传递，兼容名称包含斜线的 Provider。"""
+    db_session, service = create_service()
+    try:
+        return service.update_model_system_prompt(config_id=config_id, **request.model_dump())
+    except Exception as exc:
+        raise http_exception(exc, request_locale(http_request)) from exc
+    finally:
+        db_session.close()
 
 
 def consistency_settings_response(

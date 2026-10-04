@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import InfoTip from '@/components/workspace/InfoTip.vue'
 import { Delete, EditPen, MagicStick, MoreFilled, Plus, Refresh, Search, Setting, View } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { storeToRefs } from 'pinia'
@@ -10,15 +11,11 @@ import { apiErrorMessage } from '@/api/errors'
 import {
   createImageSpecPreset,
   deleteImageSpecPreset,
-  listContinuityCompilations,
   listImageSpecCompilations,
   listImageSpecPresets,
   listImageSpecs,
-  replaceContinuityEvents,
   streamCompileImageSpecs,
   updateImageSpecPreset,
-  type ContinuityCompilation,
-  type ContinuityEvent,
   type ImagePromptType,
   type ImageSpec,
   type ImageSpecCompilation,
@@ -28,6 +25,7 @@ import {
 import { listProjectScriptTasks, type ScriptTask } from '@/api/scripts'
 import ReferenceImagePlan from '@/components/workspace/ReferenceImagePlan.vue'
 import { useProjectContextStore } from '@/stores/projectContext'
+import { usePromptLanguage } from '@/composables/usePromptLanguage'
 import { useActivityCenterStore, type ActivityStatus } from '@/stores/activityCenter'
 import WorkflowReadiness, {
   type ReadinessItem,
@@ -43,14 +41,12 @@ const { selectedProjectId, projects } = storeToRefs(projectContext)
 const tasks = ref<ScriptTask[]>([])
 const presets = ref<ImageSpecPreset[]>([])
 const specs = ref<ImageSpec[]>([])
-const compilations = ref<ContinuityCompilation[]>([])
 const specCompilations = ref<ImageSpecCompilation[]>([])
 const selectedTaskId = ref<number | null>(null)
 const shotPresetId = ref<number | null>(null)
 const negativePresetId = ref<number | null>(null)
-const generationMode = ref<'preview' | 'final'>('preview')
+const promptLanguage = usePromptLanguage(selectedTaskId)
 const concurrency = ref(8)
-const regenerateContinuity = ref(false)
 const compiling = ref(false)
 const selectedCompilationId = ref<number | null>(null)
 const configurationOpen = ref(true)
@@ -60,12 +56,52 @@ const targetUnavailable = computed(() => taskLocationUnavailable.value || compil
 let projectLoadToken = 0
 let taskLoadToken = 0
 let viewMounted = true
-const runningCompilation = ref<{ projectId: number; scriptTaskId: number; compilationId: number | null } | null>(null)
+type CompilationRuntime = {
+  projectId: number
+  scriptTaskId: number
+  compilationId: number | null
+  phase: 'specs'
+  startedAt: number
+  reportedElapsedSeconds: number
+  totalPages: number
+  completedSpecs: number
+  totalSpecs: number
+}
+const runningCompilation = ref<CompilationRuntime | null>(null)
+type CompilationFailure = { code: string | null; message: string; completedSpecs: number; failedPages: number[] }
+const sortedFailedPageNumbers = (items: ReadonlyArray<{ page_no: unknown }>) =>
+  items.map(item => Number(item.page_no)).filter(page => Number.isInteger(page) && page > 0).sort((left, right) => left - right)
+// 准备失败可能尚未创建编译记录；保留本次请求错误，不能只依赖结果面板或短暂 toast。
+const compileFailure = ref<CompilationFailure | null>(null)
+const compileFailureMessage = computed(() => {
+  const failure = compileFailure.value
+  if (failure === null) return ''
+  if (failure.code) {
+    const key = `backendErrors.${failure.code}`
+    const translated = t(key)
+    if (translated !== key) return translated
+  }
+  return failure.message || t('imageSpecs.errors.compile')
+})
+const compileClock = ref(Date.now())
+let compileClockTimer: ReturnType<typeof setInterval> | null = null
+const stopCompileClock = () => {
+  if (compileClockTimer !== null) clearInterval(compileClockTimer)
+  compileClockTimer = null
+}
+const visibleCompilation = computed(() => {
+  const context = runningCompilation.value
+  return context?.projectId === selectedProjectId.value && context.scriptTaskId === selectedTaskId.value ? context : null
+})
+const compilationElapsedSeconds = computed(() => {
+  const context = visibleCompilation.value
+  return context === null ? 0 : Math.max(context.reportedElapsedSeconds, Math.floor((compileClock.value - context.startedAt) / 1000), 0)
+})
+const compilationElapsedTime = computed(() => `${Math.floor(compilationElapsedSeconds.value / 60)}:${String(compilationElapsedSeconds.value % 60).padStart(2, '0')}`)
 const queryId = (value: unknown) => {
   const id = Number(value)
   return Number.isInteger(id) && id > 0 ? id : null
 }
-const progressEvents = ref<Array<{ event: string; payload: Record<string, unknown> }>>([])
 const legacyActivityLocation = computed(() => route.query.activity_legacy === '1')
 const activeSpecTab = ref<'compile' | 'presets' | 'results'>(
   (['compile', 'presets', 'results'].includes(String(route.query.tab)) ? String(route.query.tab) as 'compile' | 'presets' | 'results' : null) ||
@@ -78,8 +114,6 @@ const specListPageSize = ref(10)
 
 const detailSpec = ref<ImageSpec | null>(null)
 const detailVisible = ref(false)
-const eventEditorVisible = ref(false)
-const eventEditorText = ref('[]')
 const presetDialogVisible = ref(false)
 const presetSaving = ref(false)
 const editingPresetId = ref<number | null>(null)
@@ -94,7 +128,6 @@ const presetForm = reactive({
 })
 
 const promptTypeOrder: ImagePromptType[] = ['tag', 'natural_language', 'hybrid']
-const latestCompilation = computed(() => compilations.value[0] ?? null)
 const latestSpecCompilation = computed(() =>
   compilationLocationUnavailable.value ? null : specCompilations.value.find((item) => item.id === selectedCompilationId.value) ?? specCompilations.value[0] ?? null,
 )
@@ -137,6 +170,17 @@ const specsByPage = computed(() => {
       ),
     ] as const)
 })
+// 一页三种格式都有效才计入准备完成，过期结果仍保留供用户查看。
+const pageSpecsReady = (values: ImageSpec[]) => promptTypeOrder.every(type =>
+  values.some(spec => spec.prompt_type === type && spec.spec_stale === false))
+const validSpecPageCount = computed(() => specsByPage.value.filter(([, values]) => pageSpecsReady(values)).length)
+const staleSpecPageCount = computed(() => specsByPage.value.filter(([, values]) => values.some(spec => spec.spec_stale)).length)
+const staleReasonsForPage = (values: ImageSpec[]) => [...new Set(values.flatMap(spec => spec.stale_reasons ?? []))]
+const staleReasonText = (reason: string) => {
+  const key = `imageSpecs.freshness.reasons.${reason}`
+  const translated = t(key)
+  return translated === key ? t('imageSpecs.freshness.reasons.inputs_changed') : translated
+}
 const filteredSpecsByPage = computed(() => {
   const query = specPageSearch.value.trim().toLowerCase()
   if (!query) return specsByPage.value
@@ -185,14 +229,11 @@ const imageSpecReadinessItems = computed<ReadinessItem[]>(() => [
     key: 'result',
     label: t('imageSpecs.readiness.result'),
     detail: t('imageSpecs.readiness.resultDetail', {
-      pages: latestSpecCompilation.value?.completed_pages ?? specsByPage.value.length,
+      pages: validSpecPageCount.value,
+      total: selectedTask.value?.total_pages ?? 0,
     }),
-    status:
-      latestSpecCompilation.value?.status === 'succeeded'
-        ? 'ready'
-        : latestSpecCompilation.value?.status === 'failed'
-          ? 'blocked'
-          : 'pending',
+    status: selectedTask.value && validSpecPageCount.value === selectedTask.value.total_pages
+      ? 'ready' : staleSpecPageCount.value > 0 ? 'blocked' : 'pending',
   },
 ])
 
@@ -219,7 +260,6 @@ const loadProject = async () => {
   ++taskLoadToken
   tasks.value = []
   specs.value = []
-  compilations.value = []
   specCompilations.value = []
   if (projectId === null) {
     selectedTaskId.value = null
@@ -251,19 +291,16 @@ const loadTask = async () => {
   const token = ++taskLoadToken
   if (taskId === null) {
     specs.value = []
-    compilations.value = []
     specCompilations.value = []
     return
   }
   try {
-    const [specItems, continuityItems, compilationItems] = await Promise.all([
+    const [specItems, compilationItems] = await Promise.all([
       listImageSpecs(taskId),
-      listContinuityCompilations(taskId),
       listImageSpecCompilations(taskId),
     ])
     if (token !== taskLoadToken || taskId !== selectedTaskId.value || projectId !== selectedProjectId.value) return
     specs.value = specItems
-    compilations.value = continuityItems
     specCompilations.value = compilationItems
     const requested = queryId(route.query.compilation_id)
     compilationLocationUnavailable.value = requested !== null && !compilationItems.some((item) => item.id === requested)
@@ -280,12 +317,35 @@ const loadTask = async () => {
 const compile = async () => {
   if (!canCompile.value || selectedTaskId.value === null || selectedProjectId.value === null) return
   // 流式回调始终属于提交时的项目和脚本，浏览器切换项目不会改变任务归属。
-  const context = { projectId: selectedProjectId.value, scriptTaskId: selectedTaskId.value, compilationId: null as number | null }
+  const context = reactive<CompilationRuntime>({
+    projectId: selectedProjectId.value, scriptTaskId: selectedTaskId.value, compilationId: null,
+    phase: 'specs', startedAt: Date.now(), reportedElapsedSeconds: 0,
+    totalPages: selectedTask.value?.total_pages ?? 0, completedSpecs: 0, totalSpecs: 0,
+  })
   runningCompilation.value = context
   const visible = () => viewMounted && selectedProjectId.value === context.projectId && selectedTaskId.value === context.scriptTaskId
+  compileFailure.value = null
+  const retainFailure = (error?: unknown, payload: Record<string, unknown> = {}) => {
+    if (!visible()) return
+    const errorCode = error !== null && typeof error === 'object' && 'code' in error ? error.code : null
+    const code = errorCode ?? payload.error_code ?? payload.code
+    const previous = compileFailure.value
+    compileFailure.value = {
+      code: typeof code === 'string' ? code : previous?.code ?? null,
+      message: error ? apiErrorMessage(error, t, t('imageSpecs.errors.compile')) : previous?.message ?? t('imageSpecs.errors.compile'),
+      completedSpecs: Math.max(context.completedSpecs, Number(payload.completed_specs) || 0, previous?.completedSpecs ?? 0),
+      failedPages: Array.isArray(payload.failed_pages)
+        ? sortedFailedPageNumbers(payload.failed_pages)
+        : previous?.failedPages ?? [],
+    }
+  }
   compiling.value = true
-  progressEvents.value = []
+  compileClock.value = context.startedAt
+  stopCompileClock()
+  compileClockTimer = setInterval(() => { compileClock.value = Date.now() }, 1000)
   let failed = false
+  let errorShown = false
+  let receivedDone = false
   try {
     await streamCompileImageSpecs(
       context.scriptTaskId,
@@ -293,25 +353,43 @@ const compile = async () => {
         style_profile_id: null,
         shot_planner_preset_id: shotPresetId.value,
         negative_prompt_preset_id: negativePresetId.value,
-        generation_mode: generationMode.value,
+        prompt_language: promptLanguage.value,
         concurrency: concurrency.value,
-        regenerate_continuity: regenerateContinuity.value,
         resume_existing: true,
       },
       {
         onEvent: (event, payload) => {
-          const id = queryId(payload.image_spec_compilation_id ?? (event === 'compilation' ? payload.id : payload.compilation_id))
+          // 连续性编译和 ImageSpec 编译使用不同的表，不能复用前者的 compilation_id。
+          const id = queryId(payload.image_spec_compilation_id ?? (
+            event === 'compilation' || event === 'failed' ? payload.id
+              : event === 'progress' || event === 'resume' ? payload.compilation_id : null
+          ))
           if (id !== null) context.compilationId = id
+          if (event === 'start' || event === 'continuity_progress') {
+            context.totalPages = Number(payload.total_pages) || context.totalPages
+            context.reportedElapsedSeconds = Math.max(context.reportedElapsedSeconds, Math.floor(Number(payload.elapsed_seconds) || 0))
+          }
+          if (event === 'compilation' || event === 'resume') {
+            context.completedSpecs = Number(payload.completed_specs) || 0
+            context.totalSpecs = Number(payload.total_specs) || context.totalPages * promptTypeOrder.length
+          }
+          if (event === 'progress') {
+            context.completedSpecs = Number(payload.completed) || 0
+            context.totalSpecs = Number(payload.total) || context.totalSpecs
+          }
+          if (event === 'failed' || event === 'page_error' || payload.status === 'failed' || (Array.isArray(payload.failed_pages) && payload.failed_pages.length > 0)) failed = true
+          if (event === 'done') receivedDone = true
+          if (event === 'failed' || (event === 'done' && failed)) retainFailure(undefined, payload)
           if (event === 'compilation' && visible() && id !== null) {
             compilationLocationUnavailable.value = false
             selectedCompilationId.value = id
             syncContextQuery()
           }
-          if (visible()) progressEvents.value.unshift({ event, payload })
           if (context.compilationId !== null) {
             activityCenter.upsertActivity({
               id: `image-spec-${context.compilationId}`, kind: 'imageSpec', label: `#${context.compilationId}`,
-              status: event === 'done' ? 'succeeded' : event === 'error' || event === 'failed' ? 'failed' : 'running', progress: event === 'done' ? 100 : null,
+              status: event === 'done' ? (failed ? 'failed' : 'succeeded') : event === 'error' || event === 'failed' ? 'failed' : 'running',
+              progress: event === 'done' && !failed ? 100 : context.totalSpecs > 0 ? Math.min(100, context.completedSpecs / context.totalSpecs * 100) : null,
               route: `/image-specs?project_id=${context.projectId}&script_task_id=${context.scriptTaskId}&compilation_id=${context.compilationId}&tab=results`,
               projectId: context.projectId, scriptTaskId: context.scriptTaskId, compilationId: context.compilationId, updatedAt: new Date().toISOString(),
             })
@@ -319,23 +397,40 @@ const compile = async () => {
         },
         onError: (error) => {
           failed = true
-          if (visible()) ElMessage.error(apiErrorMessage(error, t, t('imageSpecs.errors.compile')))
+          retainFailure(error)
+          if (context.compilationId !== null) {
+            activityCenter.upsertActivity({
+              id: `image-spec-${context.compilationId}`, kind: 'imageSpec', label: `#${context.compilationId}`,
+              status: 'failed', progress: null,
+              route: `/image-specs?project_id=${context.projectId}&script_task_id=${context.scriptTaskId}&compilation_id=${context.compilationId}&tab=results`,
+              projectId: context.projectId, scriptTaskId: context.scriptTaskId, compilationId: context.compilationId, updatedAt: new Date().toISOString(),
+            })
+          }
+          if (visible()) {
+            errorShown = true
+            ElMessage.error(apiErrorMessage(error, t, t('imageSpecs.errors.compile')))
+          }
         },
       },
     )
     const completed = await listImageSpecCompilations(context.scriptTaskId)
     for (const item of completed) syncCompilationActivity(item, context.projectId)
+    const finalCompilation = completed.find(item => item.id === context.compilationId)
+    if (finalCompilation?.status === 'failed' || (finalCompilation?.failed_pages.length ?? 0) > 0) failed = true
     if (visible()) {
       await loadTask()
-      if (!failed) {
+      if (failed) retainFailure(undefined, finalCompilation as unknown as Record<string, unknown> | undefined)
+      if (!failed && (receivedDone || finalCompilation?.status === 'succeeded')) {
         activeSpecTab.value = 'results'
         configurationOpen.value = false
         ElMessage.success(t('imageSpecs.messages.compiled'))
-      }
+      } else if (failed && !errorShown) ElMessage.warning(t('imageSpecs.messages.compiledWithFailures'))
     }
   } catch (error) {
+    retainFailure(error)
     if (visible()) ElMessage.error(apiErrorMessage(error, t, t('imageSpecs.errors.compile')))
   } finally {
+    stopCompileClock()
     compiling.value = false
     runningCompilation.value = null
   }
@@ -416,43 +511,6 @@ const removePreset = async (preset: ImageSpecPreset) => {
   }
 }
 
-const openEventEditor = () => {
-  if (latestCompilation.value === null) return
-  eventEditorText.value = JSON.stringify(
-    latestCompilation.value.events
-      .filter((item) => item.source !== 'system')
-      .map(({ page_no, sequence_no, event_type, target_type, target_key, timing, payload }) => ({
-        page_no,
-        sequence_no,
-        event_type,
-        target_type,
-        target_key,
-        timing,
-        payload,
-      })),
-    null,
-    2,
-  )
-  eventEditorVisible.value = true
-}
-
-const saveEvents = async () => {
-  if (latestCompilation.value === null) return
-  try {
-    const parsed = JSON.parse(eventEditorText.value) as unknown
-    if (!Array.isArray(parsed)) throw new Error('events must be an array')
-    await replaceContinuityEvents(
-      latestCompilation.value.id,
-      parsed as Array<Omit<ContinuityEvent, 'id' | 'page_id' | 'source'>>,
-    )
-    eventEditorVisible.value = false
-    await loadTask()
-    ElMessage.success(t('imageSpecs.messages.eventsSaved'))
-  } catch (error) {
-    ElMessage.error(apiErrorMessage(error, t, t('imageSpecs.errors.events')))
-  }
-}
-
 const normalizeCompilationStatus = (status: string): ActivityStatus => {
   if (status === 'succeeded') return 'succeeded'
   if (status === 'failed') return 'failed'
@@ -468,7 +526,7 @@ const syncCompilationActivity = (compilation: ImageSpecCompilation, projectId: n
     id: `image-spec-${compilation.id}`,
     kind: 'imageSpec',
     label: `#${compilation.id} · ${compilation.completed_specs}/${compilation.total_specs}`,
-    status: normalizeCompilationStatus(compilation.status),
+    status: compilation.status === 'succeeded' && compilation.failed_pages.length > 0 ? 'failed' : normalizeCompilationStatus(compilation.status),
     progress: (compilation.completed_specs / total) * 100,
     route: `/image-specs?project_id=${projectId}&script_task_id=${compilation.task_id}&compilation_id=${compilation.id}&tab=results`,
     projectId,
@@ -498,7 +556,6 @@ const applyRouteContext = async () => {
     selectedTaskId.value = null
     selectedCompilationId.value = null
     specs.value = []
-    compilations.value = []
     specCompilations.value = []
     if (['compile', 'presets', 'results'].includes(String(route.query.tab))) activeSpecTab.value = String(route.query.tab) as typeof activeSpecTab.value
     return
@@ -530,21 +587,21 @@ const applyRouteContext = async () => {
 }
 
 watch(selectedProjectId, () => {
+  compileFailure.value = null
   taskLocationUnavailable.value = false
   compilationLocationUnavailable.value = false
   selectedCompilationId.value = null
-  progressEvents.value = []
   if (queryId(route.query.project_id) !== selectedProjectId.value) {
     void router.replace({ query: { ...route.query, project_id: selectedProjectId.value?.toString(), script_task_id: undefined, compilation_id: undefined, style_profile_id: undefined } })
   }
   void loadProject()
 })
 watch(selectedTaskId, () => {
+  compileFailure.value = null
   if (selectedTaskId.value !== null && queryId(route.query.script_task_id) !== selectedTaskId.value) taskLocationUnavailable.value = false
   compilationLocationUnavailable.value = false
   selectedCompilationId.value = queryId(route.query.script_task_id) === selectedTaskId.value ? queryId(route.query.compilation_id) : null
   specs.value = []
-  compilations.value = []
   specCompilations.value = []
   syncContextQuery()
   void loadTask()
@@ -573,6 +630,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   viewMounted = false
+  stopCompileClock()
   ++projectLoadToken
   ++taskLoadToken
 })
@@ -583,22 +641,15 @@ onBeforeUnmount(() => {
     <el-alert v-if="legacyActivityLocation" type="info" :closable="false" :title="t('activityCenter.legacyLocation')" />
     <el-alert v-if="targetUnavailable" type="warning" :closable="false" :title="t('activityCenter.targetUnavailable')" />
     <div class="page-header">
-      <div class="workspace-context">
-        <strong>{{ t('ux.currentProject') }} · {{ projects.find((item) => item.id === selectedProjectId)?.title || '—' }}</strong>
-        <span>{{ t('ux.currentBatch') }} · {{ selectedTask ? `#${selectedTask.id} · ${selectedTask.total_pages}p` : t('ux.notStarted') }}</span>
-      </div>
       <el-select v-model="selectedTaskId" class="context-task-select" :placeholder="t('imageSpecs.task')" :aria-label="t('imageSpecs.task')" filterable>
         <el-option v-for="item in tasks" :key="item.id" :label="`#${item.id} · ${item.total_pages}p`" :value="item.id" />
       </el-select>
       <el-button :icon="Refresh" @click="loadTask">{{ t('imageSpecs.refresh') }}</el-button>
-      <el-button :icon="Setting" @click="openCreatePreset()">
+      <el-button :icon="Setting" @click="activeSpecTab = 'presets'">
         {{ t('imageSpecs.presets.manage') }}
       </el-button>
       <el-button v-if="activeSpecTab === 'compile'" class="ai-gradient-button" type="primary" :icon="MagicStick" :loading="compiling" :disabled="!canCompile" @click="compile">
         {{ t('imageSpecs.compileAllTypes') }}
-      </el-button>
-      <el-button v-if="specs.length" type="primary" @click="router.push({ path: '/image-generation', query: { project_id: selectedProjectId ?? undefined, script_task_id: selectedTaskId ?? undefined } })">
-        {{ t('ux.nextStep') }} · {{ t('nav.imageGeneration') }}
       </el-button>
     </div>
 
@@ -607,6 +658,11 @@ onBeforeUnmount(() => {
       :description="t('imageSpecs.readiness.description')"
       :items="imageSpecReadinessItems"
     />
+
+    <el-alert v-if="staleSpecPageCount > 0" type="warning" :closable="false" show-icon
+      :title="t('imageSpecs.freshness.staleSummary', { count: staleSpecPageCount })">
+      <el-button link type="primary" @click="activeSpecTab = 'compile'">{{ t('imageSpecs.compileAllTypes') }}</el-button>
+    </el-alert>
 
     <el-tabs v-model="activeSpecTab" class="workspace-tabs image-spec-tabs">
       <el-tab-pane :label="t('imageSpecs.tabs.compile')" name="compile" />
@@ -618,28 +674,44 @@ onBeforeUnmount(() => {
       </el-tab-pane>
     </el-tabs>
 
+    <el-alert
+      v-if="compileFailure"
+      :type="compileFailure.completedSpecs > 0 ? 'warning' : 'error'"
+      :title="compileFailure.completedSpecs > 0 ? t('imageSpecs.compilationStatus.statuses.failed') : t('imageSpecs.errors.compile')"
+      :closable="false"
+      show-icon
+    >
+      <p>{{ compileFailureMessage }}</p>
+      <p v-if="compileFailure.failedPages.length">{{ t('imageSpecs.compilationStatus.failedPages', { pages: compileFailure.failedPages.join(', ') }) }}</p>
+      <p>{{ compileFailure.completedSpecs > 0 ? t('imageSpecs.messages.compiledWithFailures') : t('imageSpecs.runtime.retryAfterFix') }}</p>
+    </el-alert>
+
+    <section v-if="visibleCompilation && activeSpecTab === 'compile'" class="panel compile-runtime" aria-live="polite">
+      <div class="compile-runtime__heading">
+        <strong>{{ t('imageSpecs.runtime.specs') }}</strong>
+        <span>{{ t('imageSpecs.runtime.elapsed', { time: compilationElapsedTime }) }}</span>
+      </div>
+      <p>{{ t('imageSpecs.runtime.specProgress', { completed: visibleCompilation.completedSpecs, total: visibleCompilation.totalSpecs || visibleCompilation.totalPages * promptTypeOrder.length }) }}</p>
+      <el-progress v-if="visibleCompilation.totalSpecs > 0" :percentage="Math.min(100, Math.round(visibleCompilation.completedSpecs * 100 / visibleCompilation.totalSpecs))" />
+    </section>
+
     <section v-show="activeSpecTab === 'compile'" class="panel controls">
       <header class="panel-heading">
         <div>
-          <h2>{{ t('imageSpecs.configTitle') }}</h2>
-          <p>{{ t('imageSpecs.promptTypeHint') }}</p>
+          <div class="title-with-info"><h2>{{ t('imageSpecs.configTitle') }}</h2><InfoTip :content="t('imageSpecs.promptTypeHint')" :label="t('imageSpecs.configTitle')" /></div>
         </div>
-        <el-button link type="primary" @click="configurationOpen = !configurationOpen">{{ t('ux.showConfiguration') }}</el-button>
+        <el-button link type="primary" @click="configurationOpen = !configurationOpen">{{ t(configurationOpen ? 'ux.hideConfiguration' : 'ux.showConfiguration') }}</el-button>
       </header>
       <div v-show="configurationOpen" class="panel-body controls-body">
         <el-form label-position="top">
           <div class="control-grid">
-            <el-form-item :label="t('ux.referenceCheck')">
-              <el-segmented
-                v-model="generationMode"
-                :options="[
-                  { label: t('ux.relaxed'), value: 'preview' },
-                  { label: t('ux.strict'), value: 'final' },
-                ]"
-              />
+            <el-form-item :label="t('ux.promptLanguage')">
+              <template #label><span class="field-with-info">{{ t('ux.promptLanguage') }}<InfoTip :content="t('ux.promptLanguageHelp')" :label="t('ux.promptLanguage')" /></span></template>
+              <el-select v-model="promptLanguage" :disabled="compiling" :aria-label="t('ux.promptLanguage')">
+                <el-option v-for="value in ['original', 'zh', 'en']" :key="value" :label="t(`ux.promptLanguages.${value}`)" :value="value" />
+              </el-select>
             </el-form-item>
           </div>
-          <p class="reference-help">{{ t('ux.referenceCheckHelp') }}</p>
           <el-collapse class="advanced-settings">
             <el-collapse-item :title="t('ux.advancedSettings')" name="advanced">
           <div class="control-grid secondary">
@@ -656,9 +728,6 @@ onBeforeUnmount(() => {
             <el-form-item :label="t('imageSpecs.concurrency')">
               <el-input-number v-model="concurrency" :min="1" :max="20" />
             </el-form-item>
-            <el-form-item label=" ">
-              <el-checkbox v-model="regenerateContinuity">{{ t('imageSpecs.regenerate') }}</el-checkbox>
-            </el-form-item>
           </div>
           <div class="prompt-type-strip">
             <div v-for="type in promptTypeOrder" :key="type" class="prompt-type-card">
@@ -669,43 +738,16 @@ onBeforeUnmount(() => {
             </el-collapse-item>
           </el-collapse>
         </el-form>
-        <el-alert
-          v-if="generationMode === 'final'"
-          type="warning"
-          :closable="false"
-          :title="t('imageSpecs.finalHint')"
-        />
-        <div class="controls-actions">
-          <span class="compile-scope">
-            {{
-              t('imageSpecs.readiness.scopeDetail', {
-                pages: selectedTask?.total_pages ?? 0,
-                specs: expectedSpecCount,
-              })
-            }}
-          </span>
-          <el-button
-            class="ai-gradient-button"
-            type="primary"
-            :icon="MagicStick"
-            :loading="compiling"
-            :disabled="!canCompile"
-            @click="compile"
-          >
-            {{ t('imageSpecs.compileAllTypes') }}
-          </el-button>
-        </div>
       </div>
     </section>
 
-    <section v-show="activeSpecTab === 'compile'" v-if="latestSpecCompilation" class="panel compilation-status">
+    <section v-show="activeSpecTab === 'compile'" v-if="latestSpecCompilation && latestSpecCompilation.status !== 'succeeded' && !visibleCompilation && !compileFailure" class="panel compilation-status">
       <header class="panel-heading">
         <div>
-          <h2>{{ t('imageSpecs.compilationStatus.title') }}</h2>
-          <p>#{{ latestSpecCompilation.id }} · {{ latestSpecCompilation.source_hash.slice(0, 12) }}</p>
+          <h2>{{ t(`imageSpecs.compilationStatus.statuses.${latestSpecCompilation.status}`) }}</h2>
         </div>
         <el-tag
-          :type="latestSpecCompilation.status === 'succeeded' ? 'success' : latestSpecCompilation.status === 'failed' ? 'danger' : 'warning'"
+          :type="latestSpecCompilation.status === 'failed' ? 'danger' : 'warning'"
         >
           {{ t(`imageSpecs.compilationStatus.statuses.${latestSpecCompilation.status}`) }}
         </el-tag>
@@ -729,7 +771,7 @@ onBeforeUnmount(() => {
           type="error"
           :closable="false"
           :title="t('imageSpecs.compilationStatus.failedPages', {
-            pages: latestSpecCompilation.failed_pages.map((item) => item.page_no).join(', '),
+            pages: sortedFailedPageNumbers(latestSpecCompilation.failed_pages).join(', '),
           })"
         />
       </div>
@@ -738,8 +780,7 @@ onBeforeUnmount(() => {
     <section v-show="activeSpecTab === 'presets'" class="panel preset-panel">
       <header class="panel-heading">
         <div>
-          <h2>{{ t('imageSpecs.presets.title') }}</h2>
-          <p>{{ t('imageSpecs.presets.hint') }}</p>
+          <div class="title-with-info"><h2>{{ t('imageSpecs.presets.title') }}</h2><InfoTip :content="t('imageSpecs.presets.hint')" :label="t('imageSpecs.presets.title')" /></div>
         </div>
         <el-button :icon="Plus" @click="openCreatePreset()">{{ t('imageSpecs.presets.create') }}</el-button>
       </header>
@@ -750,7 +791,7 @@ onBeforeUnmount(() => {
             <el-tag v-if="preset.is_default" size="small" type="success">{{ t('imageSpecs.presets.default') }}</el-tag>
           </div>
           <strong>{{ preset.name }}</strong>
-          <p>{{ preset.description || t('imageSpecs.presets.noDescription') }}</p>
+          <p v-if="preset.description">{{ preset.description }}</p>
           <div class="preset-actions">
             <el-button link type="primary" :icon="EditPen" @click="openEditPreset(preset)">
               {{ t('projects.edit') }}
@@ -770,30 +811,6 @@ onBeforeUnmount(() => {
       </div>
     </section>
 
-    <section v-show="activeSpecTab === 'results'" v-if="latestCompilation" class="panel continuity">
-      <el-collapse>
-        <el-collapse-item :title="`${t('ux.advancedSettings')} · ${t('imageSpecs.continuity.title')}`" name="continuity">
-      <header class="panel-heading">
-        <div>
-          <h2>{{ t('imageSpecs.continuity.title') }}</h2>
-          <p>#{{ latestCompilation.id }} · {{ latestCompilation.source_hash.slice(0, 12) }}</p>
-        </div>
-        <el-button :icon="EditPen" @click="openEventEditor">{{ t('imageSpecs.continuity.edit') }}</el-button>
-      </header>
-      <el-table :data="latestCompilation.events" max-height="280">
-        <el-table-column prop="page_no" :label="t('imageSpecs.table.page')" width="80" />
-        <el-table-column prop="timing" :label="t('imageSpecs.table.timing')" width="120" />
-        <el-table-column prop="event_type" :label="t('imageSpecs.table.event')" width="190" />
-        <el-table-column prop="target_key" :label="t('imageSpecs.table.target')" width="150" />
-        <el-table-column prop="source" :label="t('imageSpecs.table.source')" width="90" />
-        <el-table-column :label="t('imageSpecs.table.payload')">
-          <template #default="scope"><code class="payload-code">{{ JSON.stringify(scope.row.payload) }}</code></template>
-        </el-table-column>
-      </el-table>
-        </el-collapse-item>
-      </el-collapse>
-    </section>
-
     <div v-show="activeSpecTab === 'results'" class="spec-result-toolbar panel workspace-toolbar">
       <el-input
         v-model="specPageSearch"
@@ -810,8 +827,14 @@ onBeforeUnmount(() => {
       <article v-for="[pageNo, pageSpecs] in paginatedSpecsByPage" :key="pageNo" class="panel spec-card">
         <header class="panel-heading">
           <h2>{{ t('imageSpecs.page', { page: pageNo }) }}</h2>
-          <span>{{ t('imageSpecs.threeTypesReady') }}</span>
+          <el-tag :type="pageSpecsReady(pageSpecs) ? 'success' : 'warning'">
+            {{ t(pageSpecs.some(spec => spec.spec_stale) ? 'imageSpecs.freshness.stale' : pageSpecsReady(pageSpecs) ? 'imageSpecs.freshness.ready' : 'imageSpecs.freshness.incomplete') }}
+          </el-tag>
         </header>
+        <el-alert v-if="pageSpecs.some(spec => spec.spec_stale)" type="warning" :closable="false"
+          :title="t('imageSpecs.freshness.staleHelp')">
+          <p v-for="reason in staleReasonsForPage(pageSpecs)" :key="reason">{{ staleReasonText(reason) }}</p>
+        </el-alert>
         <ReferenceImagePlan :plan="pageSpecs[0]?.spec.reference_plan" />
         <el-tabs class="spec-tabs">
           <el-tab-pane
@@ -822,7 +845,8 @@ onBeforeUnmount(() => {
             <div class="spec-content">
               <div class="tags">
                 <el-tag>{{ t(`imageSpecs.promptTypes.${spec.prompt_type}`) }}</el-tag>
-                <el-tag :type="spec.generation_mode === 'final' ? 'success' : 'info'">{{ t(spec.generation_mode === 'final' ? 'ux.strict' : 'ux.relaxed') }}</el-tag>
+                <el-tag v-if="spec.spec_stale" type="warning">{{ t('imageSpecs.freshness.stale') }}</el-tag>
+                <el-tag>{{ t(`ux.promptLanguages.${spec.spec.prompt_language || 'original'}`) }}</el-tag>
                 <el-tag v-if="spec.warnings.length" type="warning">
                   {{ t('imageSpecs.warningCount', { count: spec.warnings.length }) }}
                 </el-tag>
@@ -853,18 +877,11 @@ onBeforeUnmount(() => {
       />
     </div>
 
-    <section v-show="activeSpecTab === 'compile'" v-if="progressEvents.length" class="panel">
-      <el-collapse><el-collapse-item :title="`${t('ux.advancedSettings')} · ${t('imageSpecs.progress')}`" name="events">
-      <div class="event-log">
-        <div v-for="(item, index) in progressEvents.slice(0, 30)" :key="index">
-          <el-tag size="small">{{ item.event }}</el-tag><code>{{ JSON.stringify(item.payload) }}</code>
-        </div>
-      </div>
-      </el-collapse-item></el-collapse>
-    </section>
-
     <el-drawer v-model="detailVisible" size="min(860px, 94vw)" :title="t('imageSpecs.detail')">
       <template v-if="detailSpec">
+        <el-alert v-if="detailSpec.spec_stale" type="warning" :closable="false" :title="t('imageSpecs.freshness.staleHelp')">
+          <p v-for="reason in detailSpec.stale_reasons" :key="reason">{{ staleReasonText(reason) }}</p>
+        </el-alert>
         <ReferenceImagePlan :plan="detailSpec.spec.reference_plan" />
         <el-alert
           v-for="warning in detailSpec.warnings"
@@ -910,20 +927,12 @@ onBeforeUnmount(() => {
       </template>
     </el-dialog>
 
-    <el-dialog v-model="eventEditorVisible" :title="t('imageSpecs.continuity.edit')" width="min(820px, 94vw)">
-      <el-alert type="info" :closable="false" :title="t('imageSpecs.continuity.editHint')" />
-      <el-input v-model="eventEditorText" type="textarea" :rows="22" class="json-editor" />
-      <template #footer>
-        <el-button @click="eventEditorVisible = false">{{ t('projects.cancel') }}</el-button>
-        <el-button type="primary" @click="saveEvents">{{ t('projects.save') }}</el-button>
-      </template>
-    </el-dialog>
   </div>
 </template>
 
 <style scoped>
 .image-spec-page { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; gap: 18px; }
-.page-header { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.page-header { display: flex; align-items: center; flex-direction: row; flex-wrap: wrap; gap: 10px; margin-bottom: 0; }
 .workspace-context { display: grid; gap: 5px; margin-right: auto; min-width: 0; }
 .workspace-context span, .reference-help { color: var(--text-secondary); font-size: 13px; }
 .context-task-select { width: min(230px, 100%); }
@@ -932,10 +941,17 @@ onBeforeUnmount(() => {
 .panel { min-width: 0; overflow: hidden; border: 1px solid var(--panel-border); border-radius: 8px; background: #fff; box-shadow: var(--panel-shadow); }
 .panel-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; padding: 20px 22px 16px; border-bottom: 1px solid var(--panel-border); }
 .panel-heading h2, .panel-heading p { margin: 0; }
+.panel-heading { flex-wrap: wrap; }
+.panel-heading h2 { font-size: 18px; line-height: 1.4; }
+.spec-card > .panel-heading > span { color: var(--text-soft); font-size: 13px; }
 .panel-heading p { margin-top: 6px; color: var(--text-secondary); }
 .panel-body { padding: 20px 22px; }
 .compilation-status__body { display: grid; gap: 12px; padding: 18px 22px 22px; }
 .compilation-status__body p { margin: 0; color: var(--text-secondary); }
+.compile-runtime { display: grid; gap: 12px; padding: 18px 22px; border-color: var(--el-color-primary-light-7); background: var(--el-color-primary-light-9); }
+.compile-runtime__heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+.compile-runtime__heading span { color: var(--text-soft); font-variant-numeric: tabular-nums; }
+.compile-runtime p { margin: 0; font-size: 13px; color: var(--text-soft); line-height: 1.6; }
 .control-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
 .secondary { margin-top: 2px; }
 .controls-actions { display: flex; align-items: center; justify-content: flex-end; gap: 16px; margin-top: 18px; }
@@ -957,18 +973,14 @@ onBeforeUnmount(() => {
 .spec-content p { max-height: 110px; overflow: auto; margin: 0; color: var(--text-secondary); white-space: pre-wrap; }
 .spec-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .tags { display: flex; flex-wrap: wrap; gap: 8px; }
-.payload-code { white-space: normal; overflow-wrap: anywhere; }
-.event-log { display: grid; gap: 8px; max-height: 300px; overflow: auto; padding: 18px 22px; }
-.event-log div { display: flex; align-items: flex-start; gap: 8px; }
-.event-log code { overflow-wrap: anywhere; }
 pre { overflow: auto; padding: 14px; border-radius: 8px; background: #071426; color: #d8e7ff; white-space: pre-wrap; }
-.json-editor { margin-top: 14px; }
 .dialog-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 @media (max-width: 1100px) { .control-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 720px) {
   .control-grid, .prompt-type-strip, .dialog-grid { grid-template-columns: 1fr; }
   .page-header { align-items: stretch; }
-  .page-header :deep(.el-button) { width: 100%; margin-left: 0; }
+  .page-header :deep(.el-button) { margin-left: 0; }
+  .context-task-select { flex: 1 1 100%; width: 100%; }
   .controls-actions, .spec-result-toolbar { align-items: stretch; flex-direction: column; }
   .spec-result-toolbar :deep(.el-input) { width: 100%; }
   .spec-pagination { overflow-x: auto; justify-content: flex-start; }

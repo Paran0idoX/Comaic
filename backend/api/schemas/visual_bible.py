@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -43,6 +43,18 @@ class OutfitVariantResponse(OutfitVariantRequest):
     updated_at: datetime
 
 
+class OutfitApplicationTarget(BaseModel):
+    """显式保留编辑入口和原绑定，避免编辑期间覆盖另一分段或新选择。"""
+
+    script_character_id: int = Field(gt=0)
+    script_task_id: int = Field(gt=0)
+    expected_outfit_variant_id: int | None = Field(gt=0)
+
+
+class OutfitVariantCreateRequest(OutfitVariantRequest):
+    apply_to: OutfitApplicationTarget | None = None
+
+
 class StyleProfileRequest(BaseModel):
     key: str
     name: str
@@ -78,14 +90,24 @@ class SceneVisualVersionResponse(SceneVisualVersionRequest):
     id: int
     project_id: int
     version: int
+    scene_definition_version: int = 1
     status: ApprovalStatus
     approved_at: datetime | None
     created_at: datetime
     updated_at: datetime
 
 
+class SceneApplicationTarget(BaseModel):
+    script_task_id: int = Field(gt=0)
+    expected_visual_version_id: int | None = Field(gt=0)
+
+
+class SceneVisualVersionCreateRequest(SceneVisualVersionRequest):
+    apply_to: SceneApplicationTarget | None = None
+
+
 class ApprovalRequest(BaseModel):
-    status: ApprovalStatus
+    status: Literal[ApprovalStatus.DRAFT, ApprovalStatus.APPROVED, ApprovalStatus.ARCHIVED]
 
 
 class VisualAssetLocatorRequest(BaseModel):

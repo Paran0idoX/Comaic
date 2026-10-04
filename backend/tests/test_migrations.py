@@ -3,9 +3,68 @@ from pathlib import Path
 import sqlite3
 import subprocess
 import sys
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_scene_conditions_migration_preserves_legacy_places_and_frozen_inputs(tmp_path):
+    """升级只增加页面条件与标记，不合并旧日夜地点，也不改写冻结输入。"""
+    database = tmp_path / "scene-conditions.sqlite3"
+    _run_python("""
+from backend.models.database import init_db, SessionLocal
+from backend.models.comic import ComicProject, ScriptGenerationTask, ScriptSection, ScriptScene, ReferenceSubject, ComicPage, ComicImage, SceneVisualVersion, GenerationTask
+from backend.models.enums import ScriptGenerationMode, ScriptGenerationTaskStatus, VisualEntityType
+init_db()
+with SessionLocal() as session:
+    project = ComicProject(title='old places')
+    session.add(project); session.flush()
+    task = ScriptGenerationTask(project_id=project.id, mode=ScriptGenerationMode.BATCH, total_pages=2, status=ScriptGenerationTaskStatus.SUSPENDED)
+    section = ScriptSection(task=task, section_no=1, page_start=1, page_end=2, title='old', description='old')
+    for page_no, moment in enumerate(('day', 'night'), 1):
+        subject = ReferenceSubject(project_id=project.id, entity_type=VisualEntityType.SCENE, key='room_'+moment, name='Room '+moment, description=moment)
+        scene = ScriptScene(task=task, reference_subject=subject, scene_key='room_'+moment, name='Room '+moment, time_of_day=moment, weather='rain', lighting='lamp')
+        page = ComicPage(project_id=project.id, section=section, script_scene=scene, page_no=page_no, summary=moment)
+        image = ComicImage(page=page, local_path=moment+'.png')
+        version = SceneVisualVersion(project_id=project.id, script_scene=scene, version=1, lighting_state_json='{"lamp":"warm"}')
+        session.add_all([subject, scene, page, image, version])
+    session.add(task); session.flush()
+    session.add(GenerationTask(project_id=project.id, script_task_id=task.id, input_snapshot_json='{"frozen_prompt":"night rain lamp","seed":17}'))
+    session.commit()
+""", database)
+    _run_python("from alembic import command; from alembic.config import Config; command.downgrade(Config('alembic.ini'), '0009_reference_visual_profiles')", database)
+    _run_python("from backend.models.database import init_db; init_db(); init_db()", database)
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT scene_definition_version, status FROM script_generation_task").fetchall() == [(1, "suspended")]
+        assert connection.execute("SELECT scene_definition_version FROM reference_subject ORDER BY id").fetchall() == [(1,), (1,)]
+        assert connection.execute("SELECT time_of_day, weather, lighting FROM script_scene ORDER BY id").fetchall() == [("day", "rain", "lamp"), ("night", "rain", "lamp")]
+        assert connection.execute("SELECT scene_conditions_json FROM comic_page").fetchall() == [(None,), (None,)]
+        assert connection.execute("SELECT count(*) FROM comic_image").fetchone()[0] == 2
+        assert connection.execute("SELECT lighting_state_json FROM scene_visual_version").fetchall() == [('{"lamp":"warm"}',)] * 2
+        assert connection.execute("SELECT input_snapshot_json FROM generation_task").fetchone()[0] == '{"frozen_prompt":"night rain lamp","seed":17}'
+
+
+def test_visual_profile_migration_preserves_sources_and_has_scoped_unique_key(tmp_path):
+    database = tmp_path / "visual-profiles.sqlite3"
+    _run_python("from backend.models.database import init_db; init_db()", database)
+    _run_python("from alembic import command; from alembic.config import Config; command.downgrade(Config('alembic.ini'), '0008_remove_visual_anchors')", database)
+    with sqlite3.connect(database) as connection:
+        connection.execute("INSERT INTO comic_project (id,title,created_at,updated_at) VALUES (1,'preserved','2026-10-03T00:00:00+00:00','2026-10-03T00:00:00+00:00')")
+        connection.commit()
+    _run_python("from backend.models.database import init_db; init_db()", database)
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT title FROM comic_project WHERE id=1").fetchone()[0] == "preserved"
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(reference_visual_profile)")}
+        assert {"project_id", "kind", "owner_id", "source_hash", "format_version", "revision", "data_json"} <= columns
+        statement = "INSERT INTO reference_visual_profile (project_id,kind,owner_id,source_hash,format_version,revision,data_json,created_at,updated_at) VALUES (?,'character',11,?,1,1,'{}',?,?)"
+        values = (1, "a"*64, "2026-10-03T00:00:00+00:00", "2026-10-03T00:00:00+00:00")
+        connection.execute(statement, values)
+        import pytest
+        with pytest.raises(sqlite3.IntegrityError): connection.execute(statement, values)
+        connection.execute("INSERT INTO comic_project (id,title,created_at,updated_at) VALUES (2,'other','2026-10-03T00:00:00+00:00','2026-10-03T00:00:00+00:00')")
+        connection.execute(statement, (2, *values[1:]))
+        assert connection.execute("SELECT count(*) FROM reference_visual_profile").fetchone()[0] == 2
 
 
 def _environment(database: Path) -> dict[str, str]:
@@ -76,7 +135,12 @@ def test_empty_database_upgrades_to_model_independent_head(tmp_path: Path) -> No
                 "WHERE type='table' AND name LIKE 'character_reference_%'"
             ).fetchall()
         }
-    assert revision == "0007_reference_image_catalog"
+    assert revision == "0012_repair_prompt_defaults"
+    with sqlite3.connect(database) as connection:
+        for table in ("outline_character", "script_character", "script_scene"):
+            assert "visual_anchors" not in {
+                row[1] for row in connection.execute(f"PRAGMA table_info({table})")
+            }
     assert model_table == 0
     with sqlite3.connect(database) as connection:
         assert (
@@ -119,6 +183,121 @@ def test_empty_database_upgrades_to_model_independent_head(tmp_path: Path) -> No
         "command.check(Config('alembic.ini'))",
         database,
     )
+
+
+def test_application_database_init_preserves_existing_logging(tmp_path: Path) -> None:
+    """应用启动迁移不能关闭 FastAPI/Uvicorn 已经安装的日志和错误输出。"""
+    _run_python(
+        """
+import io
+import logging
+from backend.models.database import init_db
+
+stream = io.StringIO()
+handler = logging.StreamHandler(stream)
+root = logging.getLogger()
+root.handlers = [handler]
+root.setLevel(logging.WARNING)
+names = ('backend.main', 'backend.i18n.errors', 'uvicorn', 'uvicorn.error')
+loggers = [logging.getLogger(name) for name in names]
+for logger in loggers:
+    logger.handlers = [handler]
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    logger.disabled = False
+init_db()
+init_db()
+assert root.handlers == [handler]
+assert root.level == logging.WARNING
+assert not handler._closed
+for logger in loggers:
+    assert not logger.disabled, logger.name
+    assert logger.handlers == [handler], logger.name
+    assert logger.level == logging.INFO, logger.name
+    assert logger.propagate is False, logger.name
+    logger.error('still-active:' + logger.name)
+for name in names:
+    assert 'still-active:' + name in stream.getvalue(), name
+""",
+        tmp_path / "application-logging.sqlite3",
+    )
+
+
+def test_system_prompt_migration_preserves_configs_and_records_default_files(tmp_path: Path) -> None:
+    """历史配置只新增默认文件关联，不修改 API 凭据、活动模型和 Markdown。"""
+    import json
+    database = tmp_path / "prompt-settings-upgrade.sqlite3"
+    _run_python("from alembic import command; from alembic.config import Config; "
+                "command.upgrade(Config('alembic.ini'), '0010_page_scene_conditions')", database)
+    with sqlite3.connect(database) as connection:
+        connection.execute("INSERT INTO llm_config "
+            "(id,name,provider,base_url,model_names,default_model,api_key,is_active,created_at,updated_at) "
+            "VALUES(1,'Kept','deepseek','',?, 'same/model',NULL,1,'2026-10-04','2026-10-04')",
+            (json.dumps(["same/model", "other-model"]),))
+    _run_python("from backend.models.database import init_db; init_db()", database)
+    with sqlite3.connect(database) as connection:
+        name, model, key, active, defaults, overrides = connection.execute(
+            "SELECT name,default_model,api_key,is_active,model_system_prompt_defaults_json,model_system_prompts_json FROM llm_config WHERE id=1"
+        ).fetchone()
+        assert (name, model, key, active, overrides) == ("Kept", "same/model", None, 1, None)
+        assert json.loads(defaults) == {model: ["deepseek_infinite_gen_4_1_flash.md", "deepseek_creative_system_prompt.md"]
+                                      for model in ["same/model", "other-model"]}
+
+
+@pytest.mark.parametrize("missing_column", [True, False])
+def test_prompt_default_repair_handles_early_and_complete_0011(tmp_path: Path, missing_column: bool) -> None:
+    """重现已标记 0011 但缺列的数据库，并确保完整升级库的自定义配置不被覆盖。"""
+    import json
+    database = tmp_path / f"repair-prompt-defaults-{missing_column}.sqlite3"
+    _run_python("from alembic import command; from alembic.config import Config; "
+                "command.upgrade(Config('alembic.ini'), '0011_system_prompt_settings')", database)
+    overrides = json.dumps({"same/model": "CUSTOM GLOBAL"})
+    preserved_defaults = json.dumps({"same/model": ["deepseek_creative_system_prompt.md"]})
+    with sqlite3.connect(database) as connection:
+        connection.execute("INSERT INTO llm_config "
+            "(id,name,provider,base_url,model_names,default_model,api_key,is_active,"
+            "model_system_prompts_json,model_system_prompt_defaults_json,created_at,updated_at) "
+            "VALUES(1,'Kept','deepseek','',?, 'same/model','test-only',1,?,?,'2026-10-04T00:00:00+00:00','2026-10-04T00:00:00+00:00')",
+            (json.dumps(["same/model", "other-model"]), overrides, preserved_defaults))
+        connection.execute("INSERT INTO llm_config "
+            "(id,name,provider,base_url,model_names,default_model,api_key,is_active,created_at,updated_at) "
+            "VALUES(2,'Compatible','openai_compatible','http://localhost','[\"model\"]','model',NULL,0,'2026-10-04T00:00:00+00:00','2026-10-04T00:00:00+00:00')")
+        connection.execute("INSERT INTO app_settings "
+            "(id,script_section_max_concurrency,system_prompts_json,created_at,updated_at) "
+            "VALUES(1,5,'{\"script_writer\":\"CUSTOM TASK\"}','2026-10-04T00:00:00+00:00','2026-10-04T00:00:00+00:00')")
+        connection.execute("INSERT INTO comic_project (id,title,created_at,updated_at) "
+                           "VALUES(1,'Preserved project','2026-10-04T00:00:00+00:00','2026-10-04T00:00:00+00:00')")
+        if missing_column:
+            connection.execute("ALTER TABLE llm_config DROP COLUMN model_system_prompt_defaults_json")
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0011_system_prompt_settings"
+    _run_python("from backend.models.database import init_db; init_db(); init_db()", database)
+    with sqlite3.connect(database) as connection:
+        name, model, api_key, active, actual_overrides, defaults = connection.execute(
+            "SELECT name,default_model,api_key,is_active,model_system_prompts_json,model_system_prompt_defaults_json "
+            "FROM llm_config WHERE id=1"
+        ).fetchone()
+        assert (name, model, api_key, active, actual_overrides) == ("Kept", "same/model", "test-only", 1, overrides)
+        if missing_column:
+            assert json.loads(defaults) == {model: ["deepseek_infinite_gen_4_1_flash.md", "deepseek_creative_system_prompt.md"]
+                                          for model in ["same/model", "other-model"]}
+        else:
+            assert defaults == preserved_defaults
+        assert connection.execute("SELECT model_system_prompt_defaults_json FROM llm_config WHERE id=2").fetchone()[0] is None
+        assert connection.execute("SELECT script_section_max_concurrency,system_prompts_json FROM app_settings").fetchone() == (5, '{"script_writer":"CUSTOM TASK"}')
+        assert connection.execute("SELECT title FROM comic_project").fetchone()[0] == "Preserved project"
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0012_repair_prompt_defaults"
+    _run_python("from backend.api.settings import list_llm_configs; from starlette.requests import Request; "
+                "response=list_llm_configs(Request({'type':'http','headers':[]})); "
+                "assert len(response.items)==2; assert response.active_config_id==1", database)
+
+
+def test_direct_alembic_invocation_still_configures_logging(tmp_path: Path) -> None:
+    result = _run_python(
+        "from alembic import command; from alembic.config import Config; "
+        "command.upgrade(Config('alembic.ini'), 'head')",
+        tmp_path / "cli-logging.sqlite3",
+    )
+    assert "Running upgrade" in result.stderr
 
 
 def test_unversioned_baseline_is_backed_up_and_preserves_data(tmp_path: Path) -> None:
@@ -255,7 +434,7 @@ def test_character_reference_migration_downgrades_and_upgrades(tmp_path: Path) -
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone()[
             0
-        ] == ("0007_reference_image_catalog")
+        ] == ("0012_repair_prompt_defaults")
         assert (
             connection.execute(
                 "SELECT count(1) FROM sqlite_master "

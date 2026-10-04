@@ -1,10 +1,13 @@
 from dataclasses import dataclass
+from copy import deepcopy
+import json
 import re
 from typing import Any
 
 from backend.models.enums import (
     GenerationMode,
     ImagePromptType,
+    PromptLanguage,
     ReferencePurpose,
     SubjectReferenceView,
     VisualAssetRole,
@@ -12,6 +15,7 @@ from backend.models.enums import (
     WorkflowCapability,
 )
 from backend.utils.json_utils import canonical_hash
+from backend.utils.prompt_loader import PromptLoader
 from backend.services.reference_selection_service import IDENTITY_ROLES, ReferenceSelectionService
 
 
@@ -86,8 +90,7 @@ FINAL_NO_TEXT_INSTRUCTION = (
     "are visible, with no readable or pseudo-readable marks anywhere"
 )
 UNIQUE_OBJECT_TAGS = (
-    "(duplicate accessory:1.7), (second pocket watch:1.7), "
-    "(multiple pocket watches:1.7), duplicate jewelry, duplicate prop"
+    "(duplicate accessory:1.7), duplicate jewelry, duplicate prop"
 )
 UNIQUE_OBJECT_INSTRUCTION = (
     "Show exactly one physical instance of every named accessory and prop; never add a "
@@ -133,7 +136,7 @@ class BaseImageSpecCompiler:
     """模型无关 ImageSpec 编译器；差异只来自 Prompt 表达类型。"""
 
     compiler_key = "base"
-    compiler_version = "11"
+    compiler_version = "17"
     prompt_type = ImagePromptType.NATURAL_LANGUAGE
 
     def compile(
@@ -146,6 +149,8 @@ class BaseImageSpecCompiler:
         generation_mode: GenerationMode,
         source_hash: str,
         reference_plan: dict[str, Any] | None = None,
+        prompt_language: PromptLanguage = PromptLanguage.ORIGINAL,
+        prompt_components: dict[str, str] | None = None,
     ) -> CompiledImageSpec:
         reference_plan = reference_plan or ReferenceSelectionService.select(
             snapshot=snapshot, shot_plan=shot_plan,
@@ -168,10 +173,10 @@ class BaseImageSpecCompiler:
         style: dict[str, Any] = {}
         render_text = bool(shot_plan.get("render_text", False))
         prompt_subjects = subjects
-        prompt_scene = scene
+        prompt_scene = self._scene_prompt_projection(scene)
         if not render_text:
             prompt_subjects = self._sanitize_prompt_value(subjects, mask_numbers=False)
-            prompt_scene = self._sanitize_prompt_value(scene, mask_numbers=True)
+            prompt_scene = self._sanitize_prompt_value(prompt_scene, mask_numbers=True)
         prompt_subjects, prompt_scene = self._deduplicate_accessory_mentions(
             subjects=prompt_subjects,
             scene=prompt_scene,
@@ -182,34 +187,9 @@ class BaseImageSpecCompiler:
             style=style,
             shot_plan=shot_plan,
         )
-        tag_text = self._join_tags(
-            [
-                SINGLE_FRAME_TAGS,
-                NO_TEXT_TAGS if not render_text else "",
-                self._tag_positive(
-                    subjects=prompt_subjects,
-                    scene=prompt_scene,
-                    style=style,
-                ),
-            ]
-        ).strip()
-        natural_text = self._join_sentences(
-            [
-                SINGLE_FRAME_INSTRUCTION,
-                NO_TEXT_INSTRUCTION if not render_text else "",
-                self._composition_instruction(
-                    subjects=prompt_subjects,
-                    scene=prompt_scene,
-                ),
-                self._natural_language_positive(
-                    subjects=prompt_subjects,
-                    scene=prompt_scene,
-                    style=style,
-                ),
-                FINAL_SINGLE_FRAME_INSTRUCTION,
-                FINAL_NO_TEXT_INSTRUCTION if not render_text else "",
-            ]
-        ).strip()
+        tag_text, natural_text = self._positive_components(
+            subjects=prompt_subjects, scene=prompt_scene, style=style, render_text=render_text,
+        )
         negative_constraints = self._negative_constraints(snapshot)
         negative_constraints.extend(prop.get("negative_constraints", "") for prop in scene.get("props", []) if prop.get("negative_constraints"))
         tag_negative = self._join_tags(
@@ -217,6 +197,9 @@ class BaseImageSpecCompiler:
                 LAYOUT_NEGATIVE_TAGS,
                 TEXT_NEGATIVE_TAGS if not render_text else "",
                 UNIQUE_OBJECT_TAGS,
+                self._accessory_prompt_templates()["pocket_watch_negative_tags"]
+                if any(re.search(r"\bpocket watch\b|怀表", str((subject.get("accessories") or {}).get("description", "")), re.IGNORECASE)
+                       for subject in subjects) else "",
                 negative_prompts.get("tag", ""),
                 style.get("negative_tag", ""),
                 *negative_constraints,
@@ -233,6 +216,11 @@ class BaseImageSpecCompiler:
             ]
         )
 
+        if prompt_components is not None:
+            tag_text = prompt_components["tag_text"]
+            natural_text = prompt_components["natural_language_text"]
+            tag_negative = prompt_components["negative_tag_text"]
+            natural_negative = prompt_components["negative_natural_language_text"]
         positive_prompt, negative_prompt = self._effective_prompts(
             tag_text=tag_text,
             natural_text=natural_text,
@@ -256,6 +244,7 @@ class BaseImageSpecCompiler:
             "source_hash": source_hash,
             "prompt_type": self.prompt_type.value,
             "generation_mode": generation_mode.value,
+            "prompt_language": prompt_language.value,
             "prompt": prompt,
             "subjects": subjects,
             "scene": scene,
@@ -277,6 +266,55 @@ class BaseImageSpecCompiler:
             warnings=warnings,
             spec_hash=canonical_hash(spec),
         )
+
+    @classmethod
+    def reference_positive_components(cls, spec: dict[str, Any], identities: dict[str, str]) -> tuple[str, str]:
+        """实际传图后追加身份引用，稳定外貌、当前造型和本页变化仍共用文字规格。"""
+        subjects = deepcopy(spec.get("subjects") or [])
+        scene = cls._scene_prompt_projection(deepcopy(spec.get("scene") or {}))
+        render_text = bool((spec.get("shot_plan") or {}).get("render_text", False))
+        if not render_text:
+            subjects = cls._sanitize_prompt_value(subjects, mask_numbers=False)
+            scene = cls._sanitize_prompt_value(scene, mask_numbers=True)
+        subjects, scene = cls._deduplicate_accessory_mentions(subjects=subjects, scene=scene)
+        for subject in subjects:
+            instruction = identities.get(subject.get("character_key", ""))
+            if instruction:
+                subject.setdefault("identity", {})["reference_instruction"] = instruction
+        return cls._positive_components(subjects=subjects, scene=scene, style=spec.get("style") or {}, render_text=render_text)
+
+    @classmethod
+    def _positive_components(cls, *, subjects, scene, style, render_text) -> tuple[str, str]:
+        """文字规格与传图投影共用构图、状态和三类表达，避免两条路径丢失本页动作。"""
+        tag_text = cls._join_tags(
+            [
+                SINGLE_FRAME_TAGS,
+                NO_TEXT_TAGS if not render_text else "",
+                cls._tag_positive(
+                    subjects=subjects,
+                    scene=scene,
+                    style=style,
+                ),
+            ]
+        ).strip()
+        natural_text = cls._join_sentences(
+            [
+                SINGLE_FRAME_INSTRUCTION,
+                NO_TEXT_INSTRUCTION if not render_text else "",
+                cls._composition_instruction(
+                    subjects=subjects,
+                    scene=scene,
+                ),
+                cls._natural_language_positive(
+                    subjects=subjects,
+                    scene=scene,
+                    style=style,
+                ),
+                FINAL_SINGLE_FRAME_INSTRUCTION,
+                FINAL_NO_TEXT_INSTRUCTION if not render_text else "",
+            ]
+        ).strip()
+        return tag_text, natural_text
 
     def _effective_prompts(
         self,
@@ -307,7 +345,8 @@ class BaseImageSpecCompiler:
 
         if isinstance(value, dict):
             return {
-                key: cls._sanitize_prompt_value(item, mask_numbers=mask_numbers)
+                # 时刻和色温等数字是环境条件，不属于需要绘制的文字。
+                key: cls._sanitize_prompt_value(item, mask_numbers=mask_numbers and key != "scene_conditions")
                 for key, item in value.items()
             }
         if isinstance(value, list):
@@ -340,25 +379,19 @@ class BaseImageSpecCompiler:
 
     @staticmethod
     def _accessory_aliases(description: str) -> list[str]:
-        """从配饰描述提取稳定名称，供动作和构图引用同一实体。"""
+        """只识别明确带链的饰物名称，不把邮包、眼镜或任意描述后缀当成挂饰。"""
 
-        aliases: set[str] = set()
-        for segment in re.split(r"[;；。]", description):
-            value = segment.strip()
-            if not value:
-                continue
-            head = re.split(r"[（(]", value, maxsplit=1)[0].strip()
-            if not head:
-                continue
-            aliases.add(head)
-            cjk_groups = re.findall(r"[\u4e00-\u9fff]+", head)
-            for group in cjk_groups:
-                if 2 <= len(group) <= 6:
-                    aliases.add(group[-2:])
-            words = re.findall(r"[A-Za-z][A-Za-z-]*", head)
-            if 2 <= len(words) <= 5:
-                aliases.add(" ".join(words[-2:]))
-        return sorted((item for item in aliases if len(item) >= 2), key=len, reverse=True)
+        if not re.search(r"\b(?:chain|necklace)\b|链", description, re.IGNORECASE):
+            return []
+        if re.search(r"\b(?:without|no)\s+(?:a\s+|any\s+)?chain\b|(?:无|没有|不带|未连).{0,4}链", description, re.IGNORECASE):
+            return []
+        names = re.findall(r"\b(?:pocket watch|pendant|locket|necklace)\b|怀表|吊坠|挂坠|项链|坠饰", description, re.IGNORECASE)
+        return sorted(set(names), key=len, reverse=True)
+
+    @staticmethod
+    def _accessory_prompt_templates() -> dict[str, str]:
+        """配饰规则的生成文案集中存放，代码只负责判断同一物体是否被托起。"""
+        return json.loads(PromptLoader.load("image_spec_accessory_prompts.json"))
 
     @classmethod
     def _replace_accessory_mentions(cls, value: Any, aliases: list[str]) -> Any:
@@ -385,45 +418,41 @@ class BaseImageSpecCompiler:
     def _shot_manipulates_accessory(
         subject: dict[str, Any], aliases: list[str]
     ) -> bool:
-        """识别当前镜头是否把固定配饰从静止位置托起或打开。"""
+        """动作须直接以该饰物为对象；提到饰物同时打开其它盒子不能触发。"""
 
         shot = subject.get("shot") or {}
-        text = " ".join(
-            str(shot.get(key, "")) for key in ("action", "pose")
-        ).lower()
-        if not any(alias.lower() in text for alias in aliases):
+        if not aliases:
             return False
-        return bool(
-            re.search(
-                r"\b(?:hold|holds|holding|open|opens|opening|lift|lifts|lifting|"
-                r"raise|raises|raising|grasp|grasps|grasping|clutch|clutches|"
-                r"clutching|touch|touches|touching)\b|"
-                r"[拿握托捧举开抬攥抓触摸扶]",
-                text,
-                flags=re.IGNORECASE,
-            )
-        )
+        for key in ("action", "pose"):
+            text = str(shot.get(key, ""))
+            for alias in aliases:
+                if re.search(r"[\u4e00-\u9fff]", alias):
+                    prefix = r"(?:拿起|握住|握着|托起|托着|捧起|捧着|举起|抬起|攥着|抓住|托|捧|握|拿|举)(?:(?:胸前|颈间|腰间|的|那|这|一枚|一条|同一|银色|金色|黄铜|旧|小)\s*)*"
+                    pattern = prefix + re.escape(alias)
+                else:
+                    prefix = r"\b(?:hold|holds|holding|lift|lifts|lifting|raise|raises|raising|grasp|grasps|grasping|clutch|clutches|clutching)\s+(?:(?:the|a|an|his|her|their|same|attached|silver|gold|golden|brass|old|small|antique)\s+)*"
+                    pattern = prefix + re.escape(alias) + r"\b"
+                if re.search(pattern, text, re.IGNORECASE):
+                    return True
+        return False
 
-    @staticmethod
-    def _manipulated_accessory_description(description: str) -> str:
+    @classmethod
+    def _manipulated_accessory_description(cls, description: str) -> str:
         """手持时只保留一个空间位置，避免“胸前一枚、手里一枚”。"""
 
+        templates = cls._accessory_prompt_templates()
+        chest_position = bool(re.search(r"胸前|\b(?:on|at)\s+(?:the\s+)?chest\b", description, re.IGNORECASE))
         text = re.sub(
             r"(?:悬挂|垂挂|挂|佩戴)(?:在|于)?胸前(?:的)?(?:颈链上)?",
-            "当前由一只手托起且颈链仍连接",
+            templates["lifted_chest_zh"],
             description,
         )
         text = re.sub(
             r"(?i)\b(?:hanging|hung|worn)\s+(?:on|at)\s+(?:the\s+)?chest\b",
-            "currently lifted by one hand while its neck chain remains attached",
+            templates["lifted_chest_en"],
             text,
         )
-        return (
-            f"{text} In this shot, the currently hand-held accessory appears only in "
-            "that hand at the end of its still-attached chain; its normal chest resting "
-            "position is completely empty, with no pendant, dial, jewelry, or second "
-            "copy there"
-        )
+        return " ".join((text, templates["held_chain"], templates["empty_chest"] if chest_position else "")).strip()
 
     @classmethod
     def _deduplicate_accessory_mentions(
@@ -432,7 +461,7 @@ class BaseImageSpecCompiler:
         subjects: list[dict[str, Any]],
         scene: dict[str, Any],
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        """配饰只在规范描述中命名一次，其余字段引用同一对象，避免模型画出副本。"""
+        """只合并当前确实托起的挂链饰物，其它配件及取物来源保持原文。"""
 
         all_aliases: list[str] = []
         normalized_subjects: list[dict[str, Any]] = []
@@ -440,13 +469,17 @@ class BaseImageSpecCompiler:
             item = dict(subject)
             accessories = dict(item.get("accessories") or {})
             description = str(accessories.get("description", "")).strip()
-            aliases = cls._accessory_aliases(description)
+            aliases: list[str] = []
+            pieces = re.split(r"([;；。])", description)
+            for index, piece in enumerate(pieces):
+                piece_aliases = cls._accessory_aliases(piece)
+                if piece_aliases and cls._shot_manipulates_accessory(item, piece_aliases):
+                    pieces[index] = cls._manipulated_accessory_description(piece)
+                    aliases.extend(piece_aliases)
             all_aliases.extend(aliases)
-            if description and cls._shot_manipulates_accessory(item, aliases):
-                accessories["description"] = cls._manipulated_accessory_description(
-                    description
-                )
-            for key in ("shot", "conditions", "held_props", "visual_anchors"):
+            if aliases:
+                accessories["description"] = "".join(pieces)
+            for key in ("shot", "conditions", "held_props"):
                 if key in item:
                     item[key] = cls._replace_accessory_mentions(item[key], aliases)
             if "states" in accessories:
@@ -553,11 +586,14 @@ class BaseImageSpecCompiler:
         subjects: list[dict[str, Any]] = []
         for character in snapshot.get("characters", []):
             subject = dict(character)
+            # 历史快照可以读取，退役字段不再进入新 ImageSpec。
+            subject.pop("visual_anchors", None)
             subject_plan = plans.get(character["character_key"], {})
             if "visible_prop_keys" in subject_plan:
                 subject["held_props"] = [key for key in character.get("held_props", []) if key in subject_plan["visible_prop_keys"]]
             identity_assets = cls._usable_assets(list(character.get("identity_assets", [])))
             identity = dict(character.get("identity") or {})
+            identity.pop("visual_anchors", None)
             selected = [
                 item for item in reference_plan["items"]
                 if item["owner"]["category"] == VisualEntityType.CHARACTER.value
@@ -597,8 +633,40 @@ class BaseImageSpecCompiler:
         return subjects
 
     @classmethod
+    def _scene_prompt_projection(cls, scene: dict[str, Any]) -> dict[str, Any]:
+        """新版镜头用本页可见环境投影，原始场景事实仍留在规格中供审计。
+
+        静态名称、地标、光照及状态均可能夹带可移动物件，不能靠道具名称匹配
+        安全地删词。只把 Planner 已结合本页状态整理的 framing_notes 用于绘制，
+        避免把关在容器里的物品或参考图上的旧摆设重新变成可见物。
+        """
+
+        shot = scene.get("shot") or {}
+        if "visible_prop_keys" not in shot:
+            return scene  # 历史镜头尚无投影协议，保留原有渲染方式。
+        if shot.get("background_visible", True) and not str(shot.get("framing_notes", "")).strip():
+            raise ValueError("visible scene requires nonempty framing_notes for its current environment")
+        return {
+            "shot": shot,
+            "scene_conditions": scene.get("scene_conditions") or {},
+            "camera": scene.get("camera") or {},
+            "props": scene.get("props") or [],
+            "_shot_environment_projection": True,
+        }
+
+    @staticmethod
+    def _scene_prompt_templates() -> dict[str, str]:
+        """本页环境优先于通用参考图陈设的文案，供三种表达共用。"""
+
+        return json.loads(PromptLoader.load("image_spec_scene_prompts.json"))
+
+    @classmethod
     def _scene(cls, snapshot: dict[str, Any], shot_plan: dict[str, Any], reference_plan: dict[str, Any]) -> dict[str, Any]:
         scene = dict(snapshot.get("scene") or {})
+        # 页面条件独立于地点身份，参考图不能提供默认剧情天气或光照。
+        if snapshot.get("scene_conditions") is not None:
+            scene["scene_conditions"] = snapshot["scene_conditions"]
+        scene.pop("visual_anchors", None)
         assets = cls._usable_assets(list(scene.get("assets", [])))
         scene["assets"] = assets
         scene["references"] = [item for item in reference_plan["items"] if item["owner"]["category"] == VisualEntityType.SCENE.value]
@@ -607,7 +675,8 @@ class BaseImageSpecCompiler:
         for subject in shot_plan.get("subjects", []):
             visible.update(subject.get("visible_prop_keys", []))
         selected_prop_refs = [item for item in reference_plan["items"] if item["owner"]["category"] == VisualEntityType.PROP.value]
-        visible.update(item["owner"]["key"] for item in selected_prop_refs)
+        if "visible_prop_keys" not in (shot_plan.get("scene") or {}):
+            visible.update(item["owner"]["key"] for item in selected_prop_refs)
         scene["props"] = [
             {"prop_key": prop["key"], "name": prop.get("name") or prop["key"], "description": prop.get("description", ""), "negative_constraints": prop.get("negative_constraints", ""), "references": [item for item in selected_prop_refs if item["owner"]["key"] == prop["key"]]}
             for prop in snapshot.get("prop_catalog", []) if prop["key"] in visible
@@ -717,7 +786,10 @@ class BaseImageSpecCompiler:
             parts.extend(
                 (
                     subject.get("name") or subject.get("character_key"),
-                    identity.get("appearance"),
+                    # 背面不投影包含五官的固定外貌；当前发型、造型和局部状态仍保留。
+                    identity.get("appearance") if not cls._is_back_facing(shot) else "",
+                    identity.get("reference_instruction"),
+                    "rear view, face out of frame" if cls._is_back_facing(shot) else "",
                     subject.get("hairstyle"),
                     cls._outfit_prompt_description(outfit),
                     ", ".join(str(value) for value in outfit.get("trigger_tokens", [])),
@@ -727,6 +799,7 @@ class BaseImageSpecCompiler:
                     shot.get("pose"),
                     shot.get("orientation"),
                     shot.get("gaze"),
+                    shot.get("visible_state"),
                 )
             )
             parts.extend(cls._character_state_tokens(subject))
@@ -738,11 +811,12 @@ class BaseImageSpecCompiler:
                 camera.get("angle"),
                 scene.get("environment_details") if scene_shot.get("background_visible", True) else "",
                 scene.get("reference_description") if scene_shot.get("background_visible", True) else "",
-                scene.get("visual_anchors") if scene_shot.get("background_visible", True) else "",
                 scene.get("lighting"),
                 scene.get("weather") if scene_shot.get("background_visible", True) else "",
                 scene_shot.get("framing_notes"),
                 scene_shot.get("focal_point"),
+                cls._scene_prompt_templates()["reference_scope_tags"]
+                if scene.get("_shot_environment_projection") and scene_shot.get("background_visible", True) else "",
                 style.get("positive_tag"),
                 style.get("lighting"),
             )
@@ -750,6 +824,7 @@ class BaseImageSpecCompiler:
         if scene_shot.get("background_visible", True):
             parts.extend(cls._scene_state_tokens(scene))
         parts.extend(f"visible object {prop.get('name')}: {prop.get('description', '')}" for prop in scene.get("props", []))
+        parts.extend(str(value) for value in (scene.get("scene_conditions") or {}).values() if value)
         return cls._join_tags(parts)
 
     @classmethod
@@ -768,15 +843,13 @@ class BaseImageSpecCompiler:
             shot = subject.get("shot") or {}
             accessory_description = str(accessories.get("description", "")).strip()
             accessory_sentence = (
-                f" Their fixed accessories are {accessory_description}. Show one and only "
-                "one physical instance of each named accessory in the entire image; when a "
-                "hand touches, holds, or opens it, draw that same attached object once in "
-                "total and never create another copy."
+                " " + cls._accessory_prompt_templates()["accessory_description"].format(description=accessory_description)
                 if accessory_description
                 else ""
             )
             if cls._is_back_facing(shot):
                 appearance_sentence = (
+                    (str(identity.get("reference_instruction") or "") + " ") +
                     f"{subject.get('name') or subject.get('character_key')} appears once "
                     "and is shown strictly from behind; keep their face "
                     "entirely out of frame and do not add another view of them."
@@ -786,9 +859,12 @@ class BaseImageSpecCompiler:
                     f"{subject.get('name') or subject.get('character_key')} has "
                     f"{identity.get('appearance', '')}. Keep this exact appearance consistent."
                 )
+                if identity.get("reference_instruction"):
+                    appearance_sentence += " " + str(identity["reference_instruction"])
             sentence = (
-                f"{appearance_sentence} "
-                f"Their hairstyle is {subject.get('hairstyle', '')} and they wear "
+                f"{appearance_sentence} " +
+                (f"Their hairstyle is {subject.get('hairstyle')} and they wear "
+                 if subject.get("hairstyle") else "They wear ") +
                 f"{cls._outfit_prompt_description(outfit)}.{accessory_sentence} They are "
                 f"{shot.get('action', '')}, "
                 f"in a {shot.get('pose', '')} pose, oriented {shot.get('orientation', '')}, "
@@ -797,6 +873,8 @@ class BaseImageSpecCompiler:
             state_text = ", ".join(cls._character_state_tokens(subject))
             if state_text:
                 sentence = f"{sentence} Current persistent state: {state_text}."
+            if shot.get("visible_state"):
+                sentence = f"{sentence} Visible state on this page: {shot['visible_state']}."
             subject_sentences.append(" ".join(sentence.split()))
         camera = scene.get("camera") or {}
         camera_text = ", ".join(
@@ -813,14 +891,20 @@ class BaseImageSpecCompiler:
         scene_text = (
             f"The scene is {scene.get('name', '')}: {scene.get('environment_details', '')}. "
             f"{scene.get('reference_description', '')}. "
-            f"Keep these landmarks consistent: {scene.get('visual_anchors', '')}. "
             f"Lighting is {scene.get('lighting', '')}; weather is {scene.get('weather', '')}."
         )
+        if scene.get("_shot_environment_projection"):
+            scene_text = cls._scene_prompt_templates()["projected_environment"].format(
+                framing_notes=(scene.get("shot") or {}).get("framing_notes", "")
+            )
         if not (scene.get("shot") or {}).get("background_visible", True):
             scene_text = "This shot has no visible background; do not add scenery merely to reproduce a scene reference."
         scene_state = ", ".join(cls._scene_state_tokens(scene)) if (scene.get("shot") or {}).get("background_visible", True) else ""
         if scene_state:
             scene_text = f"{scene_text} Current scene state: {scene_state}."
+        conditions = "; ".join(f"{key}: {value}" for key, value in (scene.get("scene_conditions") or {}).items() if value)
+        if conditions:
+            scene_text += " " + cls._scene_prompt_templates()["page_conditions"].format(conditions=conditions)
         return cls._join_sentences(
             [
                 "Create one coherent standalone cinematic splash illustration",

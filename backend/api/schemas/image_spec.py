@@ -10,6 +10,8 @@ from backend.models.enums import (
     GenerationMode,
     ImagePromptPresetKind,
     ImagePromptType,
+    ImageSpecStaleReason,
+    PromptLanguage,
 )
 
 
@@ -17,9 +19,12 @@ class CompileImageSpecsRequest(BaseModel):
     style_profile_id: int | None = Field(default=None, gt=0)
     shot_planner_preset_id: int | None = Field(default=None, gt=0)
     negative_prompt_preset_id: int | None = Field(default=None, gt=0)
-    generation_mode: GenerationMode = GenerationMode.PREVIEW
+    # 兼容旧客户端；新准备统一使用可选参考图，不再提供模式选择。
+    generation_mode: GenerationMode = Field(default=GenerationMode.PREVIEW, deprecated=True)
+    prompt_language: PromptLanguage = PromptLanguage.ORIGINAL
     concurrency: int = Field(default=8, ge=1, le=20)
-    regenerate_continuity: bool = False
+    # 兼容旧客户端；新准备直接构建本页输入，不再提取跨页事件。
+    regenerate_continuity: bool = Field(default=False, deprecated=True)
     resume_existing: bool = True
 
 
@@ -123,3 +128,5 @@ class ImageSpecResponse(BaseModel):
     compiler_key: str
     compiler_version: str
     created_at: datetime
+    spec_stale: bool = False
+    stale_reasons: list[ImageSpecStaleReason] = Field(default_factory=list)

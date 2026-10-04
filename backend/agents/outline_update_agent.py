@@ -22,7 +22,7 @@ class OutlineUpdateAgent:
         """初始化子 Agent；不挂 checkpoint，避免污染主对话历史。"""
 
         self.llm = llm or self._default_llm()
-        self.prompt = PromptLoader.load(prompt_name)
+        self.prompt = PromptLoader.load_system(prompt_name)
         logger.info("Initializing OutlineUpdateAgent prompt=%s", prompt_name)
         self._agent = create_agent(
             model=self.llm,

@@ -35,9 +35,9 @@ class OutlineAgent:
         self.llm = llm or self._default_llm()
         self.memory_path = Path(memory_path)
         logger.info("Initializing OutlineAgent memory_path=%s", self.memory_path)
-        self.conversation_prompt = PromptLoader.load(conversation_prompt_name)
+        self.conversation_prompt = PromptLoader.load_system(conversation_prompt_name)
         self.finalize_prompt = PromptLoader.load(finalize_prompt_name)
-        self.snapshot_prompt = PromptLoader.load(snapshot_prompt_name)
+        self.snapshot_prompt = PromptLoader.load_system(snapshot_prompt_name)
         self._memory_context: AsyncIterator[AsyncSqliteSaver] | None = None
         self._checkpointer: AsyncSqliteSaver | None = None
         self._agent = None

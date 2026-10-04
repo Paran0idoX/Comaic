@@ -128,6 +128,14 @@ class PassingRunner:
         }
 
 
+class BelowBenchmarkRunner(PassingRunner):
+    def run(self, **kwargs):
+        result = super().run(**kwargs)
+        for track in result["tracks"]:
+            track["metrics"]["cids_cross"] = 0.01
+        return result
+
+
 class FailingRunner:
     def run(self, *, manifest, work_dir):
         del manifest, work_dir
@@ -300,7 +308,7 @@ def _service(fixture, *, runner=None, comfy=None):
     )
 
 
-def test_strict_readiness_requires_approved_identity_reference(
+def test_evaluation_checks_its_own_reference_baseline(
     evaluation_fixture,
 ) -> None:
     service = _service(evaluation_fixture)
@@ -410,7 +418,7 @@ def test_side_references_remain_eligible_face_visible_inputs(evaluation_fixture)
     assert readiness["manifest"]["characters"][0]["references"][0]["role"] == "identity_side"
 
 
-def test_run_gate_adopt_and_threshold_change_invalidates_current_gate(
+def test_advisory_evaluation_and_threshold_changes_do_not_invalidate_manual_selection(
     evaluation_fixture,
 ) -> None:
     comfy = FakeComfyClient()
@@ -430,7 +438,7 @@ def test_run_gate_adopt_and_threshold_change_invalidates_current_gate(
     service.adopt_track(track.id)
     gate = service.script_gate(evaluation_fixture["script_task_id"])
     assert gate["passed"] is True
-    assert gate["track_id"] == track.id
+    assert gate["track_id"] is None
 
     service.update_config(
         cids_cross_min=0.9,
@@ -440,10 +448,57 @@ def test_run_gate_adopt_and_threshold_change_invalidates_current_gate(
         occm_min=70,
         copy_paste_max=0.3,
     )
-    assert service.script_gate(evaluation_fixture["script_task_id"])["passed"] is False
+    assert service.script_gate(evaluation_fixture["script_task_id"])["passed"] is True
     with pytest.raises(AppError) as exc_info:
         service.adopt_track(track.id)
     assert exc_info.value.code == "consistency.result_stale"
+
+
+def test_optional_reference_batches_can_be_evaluated_and_low_scores_can_be_adopted(evaluation_fixture):
+    session = evaluation_fixture["session"]
+    batch = session.get(GenerationTask, evaluation_fixture["batch_id"])
+    batch.generation_mode = GenerationMode.PREVIEW
+    for run in session.query(GenerationRun).filter_by(batch_task_id=batch.id):
+        run.generation_mode = GenerationMode.PREVIEW
+    session.commit()
+    service = _service(evaluation_fixture, runner=BelowBenchmarkRunner())
+    assert service.batch_readiness(batch.id)["ready"]
+    task = service.run_task(service.create_task(batch.id).id)
+    assert task.status == ConsistencyEvaluationStatus.SUCCEEDED
+    track = task.tracks[0]
+    assert track.status == ConsistencyTrackStatus.FAILED
+    assert not track.passed
+    assert service.script_gate(evaluation_fixture["script_task_id"])["passed"] is False
+    service.adopt_track(track.id)
+    assert service.script_gate(evaluation_fixture["script_task_id"])["passed"] is True
+
+
+def test_manual_selection_completes_without_evaluation_or_a_reference_baseline(evaluation_fixture):
+    session = evaluation_fixture["session"]
+    session.delete(evaluation_fixture["reference"])
+    pages = session.query(ComicPage).all()
+    for page in pages:
+        image = page.images[0]
+        page.selected_image_id = image.id
+        image.is_selected = True
+    session.commit()
+    service = _service(evaluation_fixture)
+    assert not service.batch_readiness(evaluation_fixture["batch_id"])["ready"]
+    assert service.script_gate(evaluation_fixture["script_task_id"])["passed"] is True
+    pages[0].selected_image_id = None
+    session.commit()
+    assert service.script_gate(evaluation_fixture["script_task_id"])["passed"] is False
+
+
+def test_failed_evaluation_does_not_invalidate_existing_manual_selection(evaluation_fixture):
+    service = _service(evaluation_fixture)
+    task = service.run_task(service.create_task(evaluation_fixture["batch_id"]).id)
+    service.adopt_track(task.tracks[0].id)
+    service.update_config(cids_cross_min=0.99, cids_self_min=0.6, csd_cross_min=0.35, csd_self_min=0.6, occm_min=70, copy_paste_max=0.3)
+    service.process_runner = FailingRunner()
+    failed = service.run_task(service.create_task(evaluation_fixture["batch_id"]).id)
+    assert failed.status == ConsistencyEvaluationStatus.FAILED
+    assert service.script_gate(evaluation_fixture["script_task_id"])["passed"] is True
 
 
 def test_gate_uses_and_and_skips_only_explicitly_inapplicable_metrics() -> None:

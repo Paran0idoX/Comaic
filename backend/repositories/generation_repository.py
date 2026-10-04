@@ -1,4 +1,4 @@
-from sqlalchemy import select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session, selectinload
 
 from backend.models.comic import (
@@ -111,6 +111,12 @@ class GenerationRepository:
         run = self.session.get(GenerationRun, run_id)
         if run is None:
             raise ValueError(f"GenerationRun not found: {run_id}")
+        if status in {GenerationRunStatus.QUEUED, GenerationRunStatus.RUNNING, GenerationRunStatus.SUCCEEDED}:
+            # 原请求超时后可能通过 Provider 历史恢复成功，不能继续展示旧失败状态。
+            run.error_code = None
+            run.error_message = None
+            if status != GenerationRunStatus.SUCCEEDED:
+                run.finished_at = None
         for field_name, value in {
             "status": status,
             "external_request_id": external_request_id,
@@ -214,3 +220,47 @@ class GenerationRepository:
                 )
             )
         )
+
+    def batch_progress(self, batch_task_ids: list[int]) -> dict[int, dict[str, int | None]]:
+        """两次分组查询读取进度；恢复包装子任务不会被算成额外候选。"""
+
+        result = {
+            batch_id: {"completed_candidates": 0, "images_count": 0, "latest_image_id": None, "active_runs": 0}
+            for batch_id in batch_task_ids
+        }
+        if not result:
+            return result
+        # 同一候选可有失败重试、多个成功历史或多个输出，完成数按页/候选去重，
+        # 实际图片数仍保留所有已落库产物；无图片的 succeeded run 不算已完成。
+        candidates = (
+            select(
+                GenerationRun.batch_task_id.label("batch_id"),
+                GenerationRun.page_id,
+                GenerationRun.candidate_index,
+                func.count(ComicImage.id).label("images_count"),
+                func.max(ComicImage.id).label("latest_image_id"),
+                func.max(case((GenerationRun.status == GenerationRunStatus.SUCCEEDED, 1), else_=0)).label("completed"),
+            )
+            .join(ComicImage, ComicImage.generation_run_id == GenerationRun.id)
+            .where(GenerationRun.batch_task_id.in_(batch_task_ids))
+            .group_by(GenerationRun.batch_task_id, GenerationRun.page_id, GenerationRun.candidate_index)
+            .subquery()
+        )
+        for batch_id, completed, images_count, latest_image_id in self.session.execute(
+            select(
+                candidates.c.batch_id, func.sum(candidates.c.completed),
+                func.sum(candidates.c.images_count), func.max(candidates.c.latest_image_id),
+            ).group_by(candidates.c.batch_id)
+        ):
+            result[batch_id].update(completed_candidates=int(completed), images_count=int(images_count), latest_image_id=latest_image_id)
+        for batch_id, active in self.session.execute(
+            select(GenerationRun.batch_task_id, func.count(GenerationRun.id))
+            .where(
+                GenerationRun.batch_task_id.in_(batch_task_ids),
+                GenerationRun.status.in_([GenerationRunStatus.PENDING, GenerationRunStatus.QUEUED, GenerationRunStatus.RUNNING]),
+            )
+            .group_by(GenerationRun.batch_task_id)
+        ):
+            # 批次暂停不代表当前外部请求终止，不能用 parent/child 心跳过滤掉它。
+            result[batch_id]["active_runs"] = int(active)
+        return result

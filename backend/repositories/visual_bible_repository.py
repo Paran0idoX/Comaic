@@ -1,12 +1,14 @@
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session
 
 from backend.models.comic import (
     ComicImage,
     ComicProject,
+    CharacterReferenceGenerationRun,
+    CharacterReferenceImage,
     OutlineCharacter,
     OutfitVariant,
     SceneVisualVersion,
@@ -24,6 +26,7 @@ from backend.models.enums import (
     VisualEntityType,
 )
 from backend.models.time import utc_now
+from backend.i18n.errors import AppError
 
 
 class VisualBibleRepository:
@@ -68,7 +71,10 @@ class VisualBibleRepository:
         project_id: int,
         outline_character_id: int | None = None,
     ) -> list[OutfitVariant]:
-        statement = select(OutfitVariant).where(OutfitVariant.project_id == project_id)
+        statement = select(OutfitVariant).where(
+            OutfitVariant.project_id == project_id,
+            OutfitVariant.status != ApprovalStatus.DELETED,
+        )
         if outline_character_id is not None:
             statement = statement.where(
                 OutfitVariant.outline_character_id == outline_character_id
@@ -92,14 +98,13 @@ class VisualBibleRepository:
         outline_character_id: int,
         key: str,
     ) -> OutfitVariant | None:
-        """按角色与稳定 key 读取最新服装版本，供自动草稿重试时复用。"""
+        """按 key 读取最新版本，包含删除/归档标记以阻止已舍弃内容重新派生。"""
 
         statement = (
             select(OutfitVariant)
             .where(
                 OutfitVariant.outline_character_id == outline_character_id,
                 OutfitVariant.key == key,
-                OutfitVariant.status != ApprovalStatus.ARCHIVED,
             )
             .order_by(OutfitVariant.version.desc())
             .limit(1)
@@ -115,10 +120,30 @@ class VisualBibleRepository:
         )
         return int(current or 0) + 1
 
-    def create_outfit_variant(self, **values: Any) -> OutfitVariant:
+    def create_outfit_variant(
+        self, *, apply_to_character_id: int | None = None,
+        expected_outfit_variant_id: int | None = None, **values: Any,
+    ) -> OutfitVariant:
+        """将新增、人工确认与单个分段的绑定放在同一事务中。"""
         variant = OutfitVariant(**values)
         self.session.add(variant)
-        self.session.commit()
+        try:
+            if apply_to_character_id is not None:
+                variant.status = ApprovalStatus.APPROVED
+                variant.approved_at = utc_now()
+                self.session.flush()
+                result = self.session.execute(
+                    update(ScriptCharacter).where(
+                        ScriptCharacter.id == apply_to_character_id,
+                        ScriptCharacter.outfit_variant_id == expected_outfit_variant_id,
+                    ).values(outfit_variant_id=variant.id).execution_options(synchronize_session=False)
+                )
+                if result.rowcount != 1:
+                    raise AppError(code="visual.configuration_binding_changed", status_code=409)
+            self.session.commit()
+        except Exception:
+            self.session.rollback()
+            raise
         self.session.refresh(variant)
         return variant
 
@@ -173,7 +198,8 @@ class VisualBibleRepository:
         script_scene_id: int | None = None,
     ) -> list[SceneVisualVersion]:
         statement = select(SceneVisualVersion).where(
-            SceneVisualVersion.project_id == project_id
+            SceneVisualVersion.project_id == project_id,
+            SceneVisualVersion.status != ApprovalStatus.DELETED,
         )
         if script_scene_id is not None:
             statement = statement.where(
@@ -202,13 +228,12 @@ class VisualBibleRepository:
         color_palette_json: str,
         lighting_state_json: str,
     ) -> SceneVisualVersion | None:
-        """按规范化内容匹配场景版本，避免把人工版本误当成自动草稿。"""
+        """按内容匹配版本，保留删除/归档标记供自动派生识别用户舍弃意图。"""
 
         statement = (
             select(SceneVisualVersion)
             .where(
                 SceneVisualVersion.script_scene_id == script_scene_id,
-                SceneVisualVersion.status != ApprovalStatus.ARCHIVED,
                 SceneVisualVersion.landmarks_json == landmarks_json,
                 SceneVisualVersion.spatial_relations_json == spatial_relations_json,
                 SceneVisualVersion.camera_presets_json == camera_presets_json,
@@ -229,10 +254,30 @@ class VisualBibleRepository:
         )
         return int(current or 0) + 1
 
-    def create_scene_version(self, **values: Any) -> SceneVisualVersion:
+    def create_scene_version(
+        self, *, apply_to_scene: bool = False,
+        expected_visual_version_id: int | None = None, **values: Any,
+    ) -> SceneVisualVersion:
+        """仅更新目标场景；原绑定变化时回滚新增版本及确认状态。"""
         version = SceneVisualVersion(**values)
         self.session.add(version)
-        self.session.commit()
+        try:
+            if apply_to_scene:
+                version.status = ApprovalStatus.APPROVED
+                version.approved_at = utc_now()
+                self.session.flush()
+                result = self.session.execute(
+                    update(ScriptScene).where(
+                        ScriptScene.id == version.script_scene_id,
+                        ScriptScene.selected_visual_version_id == expected_visual_version_id,
+                    ).values(selected_visual_version_id=version.id).execution_options(synchronize_session=False)
+                )
+                if result.rowcount != 1:
+                    raise AppError(code="visual.configuration_binding_changed", status_code=409)
+            self.session.commit()
+        except Exception:
+            self.session.rollback()
+            raise
         self.session.refresh(version)
         return version
 
@@ -249,6 +294,28 @@ class VisualBibleRepository:
         self.session.commit()
         self.session.refresh(scene)
         return scene
+
+    def configuration_bindings(
+        self, entity: OutfitVariant | SceneVisualVersion,
+    ) -> list[ScriptCharacter | ScriptScene]:
+        """查询所有脚本任务中的绑定，删除共享服装不能只处理当前分段。"""
+        if isinstance(entity, OutfitVariant):
+            statement = select(ScriptCharacter).where(ScriptCharacter.outfit_variant_id == entity.id)
+        else:
+            statement = select(ScriptScene).where(ScriptScene.selected_visual_version_id == entity.id)
+        return list(self.session.scalars(statement))
+
+    def retire_configuration(
+        self, entity: OutfitVariant | SceneVisualVersion, status: ApprovalStatus,
+    ) -> None:
+        """同一事务解除绑定并记录删除/归档；保留行和原图，避免历史溯源断裂。"""
+        for binding in self.configuration_bindings(entity):
+            if isinstance(binding, ScriptCharacter):
+                binding.outfit_variant_id = None
+            else:
+                binding.selected_visual_version_id = None
+        entity.status = status
+        self.session.commit()
 
     # Visual assets -----------------------------------------------------
     def list_assets(
@@ -352,6 +419,10 @@ class VisualBibleRepository:
             approved_at=approved_at,
         )
         self.session.add(asset)
+        if status == ApprovalStatus.APPROVED:
+            # 先获得新素材 id，与同槽旧图的撤回一起提交，不能留下两个当前参考图。
+            self.session.flush()
+            self.set_asset_approval_status(asset, status, commit=False)
         if commit:
             self.session.commit()
             self.session.refresh(asset)
@@ -365,8 +436,72 @@ class VisualBibleRepository:
         entity: OutfitVariant | StyleProfile | SceneVisualVersion | VisualAsset,
         status: ApprovalStatus,
     ):
+        if isinstance(entity, VisualAsset):
+            return self.set_asset_approval_status(entity, status)
         entity.status = status
         entity.approved_at = utc_now() if status == ApprovalStatus.APPROVED else None
         self.session.commit()
         self.session.refresh(entity)
         return entity
+
+    def set_asset_approval_status(self, asset: VisualAsset, status: ApprovalStatus, *, commit: bool = True):
+        """确认图与同用途、同适用范围旧图的撤回在同一事务中完成；旧图回到候选。"""
+        changed_ids = [asset.id]
+        if status == ApprovalStatus.APPROVED:
+            scope = self._reference_slot_scope(asset)
+            if scope is not None:
+                changed_ids.extend(self.session.scalars(update(VisualAsset).where(
+                    VisualAsset.id != asset.id, VisualAsset.status == ApprovalStatus.APPROVED, *scope,
+                ).values(status=ApprovalStatus.DRAFT, approved_at=None).returning(VisualAsset.id)))
+        previously_approved = asset.status == ApprovalStatus.APPROVED
+        asset.status = status
+        if status != ApprovalStatus.APPROVED:
+            asset.approved_at = None
+        elif not previously_approved or asset.approved_at is None:
+            asset.approved_at = utc_now()
+        self.session.flush()
+        runs = self.session.scalars(select(CharacterReferenceGenerationRun).where(
+            CharacterReferenceGenerationRun.id.in_(select(CharacterReferenceImage.run_id).where(
+                CharacterReferenceImage.promoted_asset_id.in_(changed_ids)))))
+        for run in runs:
+            # promoted_asset_id 保留转存关联；是否可用由素材当前状态决定，便于再次确认同一原图。
+            run.review_status = ApprovalStatus.APPROVED if any(
+                image.promoted_asset and image.promoted_asset.status == ApprovalStatus.APPROVED
+                for image in run.images) else ApprovalStatus.DRAFT
+        if commit:
+            self.session.commit()
+            self.session.refresh(asset)
+        return asset
+
+    def _reference_slot_scope(self, asset: VisualAsset):
+        """仅三个参考类别互斥，控制图与历史风格不参与；人物用途和场景范围不能互相撤回。"""
+        scope = [VisualAsset.project_id == asset.project_id, VisualAsset.entity_type == asset.entity_type,
+                 VisualAsset.role == asset.role]
+        if asset.entity_type == VisualEntityType.CHARACTER and asset.role in {
+            VisualAssetRole.IDENTITY_FACE, VisualAssetRole.IDENTITY_FULL_BODY,
+            VisualAssetRole.IDENTITY_SIDE, VisualAssetRole.IDENTITY_BACK,
+        }:
+            scope.append(VisualAsset.entity_id == asset.entity_id)
+            if asset.role != VisualAssetRole.IDENTITY_FACE:
+                scope.append(VisualAsset.outfit_variant_id == asset.outfit_variant_id)
+        elif asset.entity_type == VisualEntityType.SCENE and asset.role == VisualAssetRole.SCENE_MASTER:
+            scope.append(VisualAsset.entity_id == asset.entity_id)
+            subject_id = asset.reference_subject_id
+            if asset.entity_id is not None:
+                version = self.get_scene_version(asset.entity_id)
+                subject_id = subject_id or (version.script_scene.reference_subject_id if version else None)
+                # 旧版本专用图没有目录 id；只与本版本当前条目的新图互斥，避免波及已改绑条目。
+                scope.append(or_(VisualAsset.reference_subject_id == subject_id,
+                                 VisualAsset.reference_subject_id.is_(None)))
+            else:
+                scope.append(VisualAsset.reference_subject_id == subject_id)
+                if subject_id is None:
+                    scope.append(VisualAsset.entity_key == asset.entity_key)
+        elif asset.entity_type == VisualEntityType.PROP and asset.role == VisualAssetRole.PROP_REFERENCE:
+            scope.extend([VisualAsset.reference_subject_id == asset.reference_subject_id,
+                          VisualAsset.entity_id == asset.entity_id])
+            if asset.reference_subject_id is None:
+                scope.append(VisualAsset.entity_key == asset.entity_key)
+        else:
+            return None
+        return scope

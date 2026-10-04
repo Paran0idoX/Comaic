@@ -1,6 +1,40 @@
 from enum import Enum
 
 
+class SystemPromptKey(str, Enum):
+    """设置页允许维护的任务提示词，业务协议仍由代码和只读模板约束。"""
+
+    OUTLINE_CONVERSATION = "outline_conversation"
+    OUTLINE_UPDATE = "outline_update"
+    OUTLINE_CHARACTER = "outline_character"
+    OUTLINE_SNAPSHOT = "outline_snapshot"
+    SCRIPT_PLANNING = "script_planning"
+    SCRIPT_WRITER = "script_writer"
+    SCRIPT_SUPERVISOR = "script_supervisor"
+    SHOT_PLANNER = "shot_planner"
+    SHOT_LANGUAGE = "shot_language"
+
+
+class ImageSpecStaleReason(str, Enum):
+    """提示词来源变化原因，供界面翻译并引导重新准备。"""
+
+    PAGE_SCRIPT_CHANGED = "page_script_changed"
+    CHARACTER_INPUTS_CHANGED = "character_inputs_changed"
+    SCENE_INPUTS_CHANGED = "scene_inputs_changed"
+    PROP_INPUTS_CHANGED = "prop_inputs_changed"
+    PROMPT_RULES_CHANGED = "prompt_rules_changed"
+    INPUTS_CHANGED = "inputs_changed"
+
+
+class OutlineEntityKind(str, Enum):
+    """大纲提取时的临时实体分类，不作为角色视觉类型或数据库字段。"""
+
+    CHARACTER = "character"
+    PROP = "prop"
+    SCENE = "scene"
+    CONCEPT = "concept"
+
+
 class ComicPageStatus(str, Enum):
     """漫画页面在 MVP 流程中的处理状态。"""
 
@@ -118,6 +152,14 @@ class ImageGenerationProvider(str, Enum):
     OPENAI_IMAGES_COMPATIBLE = "openai_images_compatible"
 
 
+class PromptLanguage(str, Enum):
+    """最终漫画提示词的输出语言；原文模式兼容现有编译结果。"""
+
+    ORIGINAL = "original"
+    CHINESE = "zh"
+    ENGLISH = "en"
+
+
 class ImagePromptType(str, Enum):
     """ImageSpec 的 Prompt 表达类型。"""
 
@@ -156,7 +198,7 @@ class VisualAssetRole(str, Enum):
     """视觉资产在生图条件中的固定用途。"""
 
     IDENTITY_FACE = "identity_face"
-    IDENTITY_HALF_BODY = "identity_half_body"
+    IDENTITY_HALF_BODY = "identity_half_body"  # 仅解码历史记录，新生成与选图已停用。
     IDENTITY_FULL_BODY = "identity_full_body"
     IDENTITY_SIDE = "identity_side"
     IDENTITY_BACK = "identity_back"
@@ -248,6 +290,8 @@ class ApprovalStatus(str, Enum):
     DRAFT = "draft"
     APPROVED = "approved"
     ARCHIVED = "archived"
+    # 仅用于设定草稿的内部删除标记，保留原图归属和自动派生去重依据。
+    DELETED = "deleted"
 
 
 class CompilationStatus(str, Enum):
@@ -339,3 +383,49 @@ class LLMProvider(str, Enum):
     OLLAMA = "ollama"
     AWS_BEDROCK = "aws_bedrock"
     XAI = "xai"
+
+
+class ReferenceProfileKind(str, Enum):
+    """参考图视觉摘要的独立来源，版本不能重新定义人物身份。"""
+
+    CHARACTER = "character"
+    OUTFIT = "outfit"
+    SCENE_SUBJECT = "scene_subject"
+    SCENE_VERSION = "scene_version"
+    PROP_SUBJECT = "prop_subject"
+
+
+class ReferenceProfileView(str, Enum):
+    """视觉摘要仅使用当前可生成用途，不向模型暴露历史资产用途。"""
+
+    IDENTITY_FACE = "identity_face"
+    IDENTITY_FULL_BODY = "identity_full_body"
+    IDENTITY_SIDE = "identity_side"
+    IDENTITY_BACK = "identity_back"
+    SCENE_MASTER = "scene_master"
+    PROP_REFERENCE = "prop_reference"
+
+
+class ReferenceFactKind(str, Enum):
+    """视觉事实的语义，用于服装覆盖及视角投影。"""
+
+    IDENTITY = "identity"
+    FACE = "face"
+    HEAD = "head"
+    BODY = "body"
+    CLOTHING = "clothing"
+    WEARABLE = "wearable"
+    COLOR = "color"
+    ENVIRONMENT = "environment"
+    LAYOUT = "layout"
+    MATERIAL = "material"
+    LIGHTING = "lighting"
+    OBJECT_STATE = "object_state"
+    SHAPE = "shape"
+
+
+class ReferenceFactPolarity(str, Enum):
+    """正向视觉事实和负向排除项必须分开。"""
+
+    REQUIRED = "required"
+    FORBIDDEN = "forbidden"

@@ -26,6 +26,7 @@ from backend.models.enums import (
     VisualAssetStorageKind,
     VisualEntityType,
 )
+from backend.models.scene_conditions import SCENE_DEFINITION_VERSION
 from backend.repositories.visual_bible_repository import VisualBibleRepository
 from backend.utils.json_utils import canonical_json
 
@@ -39,7 +40,6 @@ IMAGE_FORMATS = {
 ALLOWED_ASSET_ROLES = {
     VisualEntityType.CHARACTER: {
         VisualAssetRole.IDENTITY_FACE,
-        VisualAssetRole.IDENTITY_HALF_BODY,
         VisualAssetRole.IDENTITY_FULL_BODY,
         VisualAssetRole.IDENTITY_SIDE,
         VisualAssetRole.IDENTITY_BACK,
@@ -203,6 +203,10 @@ class VisualBibleService:
                 outline_character_id=outline_character.id,
                 key=outfit_key,
             )
+            # 用户已舍弃的内容保持空绑定；内容变化会产生新的 key，仍可派生草稿。
+            if outfit is not None and outfit.status in (ApprovalStatus.DELETED, ApprovalStatus.ARCHIVED):
+                summary.skipped_characters += 1
+                continue
             if outfit is None:
                 outfit = self.repository.create_outfit_variant(
                     project_id=project_id,
@@ -247,7 +251,6 @@ class VisualBibleService:
 
             scene_content = {
                 "landmarks": self._distinct_text_list(
-                    scene.visual_anchors,
                     scene.environment_details,
                 ),
                 "spatial_relations": {},
@@ -258,7 +261,7 @@ class VisualBibleService:
                     lighting=scene.lighting,
                     time_of_day=scene.time_of_day,
                     weather=scene.weather,
-                ),
+                ) if scene.task.scene_definition_version < 2 else {},
             }
             serialized = {
                 f"{field_name}_json": canonical_json(value)
@@ -268,6 +271,8 @@ class VisualBibleService:
                 script_scene_id=scene.id,
                 **serialized,
             )
+            if version is not None and version.status in (ApprovalStatus.DELETED, ApprovalStatus.ARCHIVED):
+                continue
             if version is None:
                 version = self.repository.create_scene_version(
                     project_id=project_id,
@@ -410,10 +415,24 @@ class VisualBibleService:
         accessories: list[Any] | None = None,
         trigger_tokens: list[Any] | None = None,
         negative_constraints: str = "",
+        apply_to: dict[str, Any] | None = None,
     ) -> OutfitVariant:
+        """追加造型版本，可由明确的分段编辑入口一次确认并应用。"""
         self._validate_character_owner(project_id, outline_character_id)
+        character = None
+        if apply_to is not None:
+            character = self.repository.get_script_character(apply_to["script_character_id"])
+            if (
+                character is None
+                or character.section.task_id != apply_to["script_task_id"]
+                or character.section.task.project_id != project_id
+                or character.outline_character_id != outline_character_id
+            ):
+                raise AppError(code="visual.configuration_apply_target_invalid", status_code=422)
         normalized_key = self._required(key, "Outfit key")
         return self.repository.create_outfit_variant(
+            apply_to_character_id=character.id if character is not None else None,
+            expected_outfit_variant_id=apply_to["expected_outfit_variant_id"] if apply_to else None,
             project_id=project_id,
             outline_character_id=outline_character_id,
             key=normalized_key,
@@ -480,9 +499,20 @@ class VisualBibleService:
         object_states: dict[str, Any] | None = None,
         color_palette: list[Any] | None = None,
         lighting_state: dict[str, Any] | None = None,
+        apply_to: dict[str, Any] | None = None,
     ) -> SceneVisualVersion:
+        """追加场景版本；应用目标必须仍是编辑入口所属任务的场景。"""
         self._validate_scene_owner(project_id, script_scene_id)
+        scene = self.repository.get_script_scene(script_scene_id)
+        if scene.task.scene_definition_version >= SCENE_DEFINITION_VERSION:
+            # 新地点版本只保存固定空间事实，临时状态与光照由页面条件负责。
+            object_states, lighting_state = {}, {}
+        if apply_to is not None:
+            if scene.task_id != apply_to["script_task_id"]:
+                raise AppError(code="visual.configuration_apply_target_invalid", status_code=422)
         return self.repository.create_scene_version(
+            apply_to_scene=apply_to is not None,
+            expected_visual_version_id=apply_to["expected_visual_version_id"] if apply_to else None,
             project_id=project_id,
             script_scene_id=script_scene_id,
             version=self.repository.next_scene_version(script_scene_id),
@@ -507,6 +537,43 @@ class VisualBibleService:
             script_scene_id=script_scene_id,
         )
 
+    def _require_removable_configuration(
+        self, kind: VisualEntityType, item_id: int,
+    ) -> OutfitVariant | SceneVisualVersion:
+        """删除入口只允许服装和场景，风格及参考原图不参与此次生命周期变更。"""
+        getters = {
+            VisualEntityType.OUTFIT: self.repository.get_outfit_variant,
+            VisualEntityType.SCENE: self.repository.get_scene_version,
+        }
+        getter = getters.get(kind)
+        if getter is None:
+            raise AppError(code="common.validation_error", status_code=422)
+        entity = getter(item_id)
+        if entity is None:
+            raise AppError(code="common.not_found", status_code=404)
+        return entity
+
+    def configuration_usage(self, *, kind: VisualEntityType, item_id: int) -> dict:
+        """返回跨任务的真实绑定范围，供删除确认框展示。"""
+        entity = self._require_removable_configuration(kind, item_id)
+        bindings = self.repository.configuration_bindings(entity)
+        return {
+            "id": entity.id,
+            "status": entity.status.value,
+            "binding_count": len(bindings),
+            "bindings": [{"id": binding.id, "name": binding.name} for binding in bindings],
+        }
+
+    def delete_configuration_draft(self, *, kind: VisualEntityType, item_id: int) -> dict:
+        """删除草稿并解除所有脚本绑定；已确认版本须使用归档入口。"""
+        entity = self._require_removable_configuration(kind, item_id)
+        if entity.status == ApprovalStatus.DELETED:
+            return {"id": item_id}
+        if entity.status != ApprovalStatus.DRAFT:
+            raise AppError(code="visual.configuration_delete_requires_draft", status_code=409)
+        self.repository.retire_configuration(entity, ApprovalStatus.DELETED)
+        return {"id": item_id}
+
     def set_configuration_status(
         self,
         *,
@@ -525,6 +592,11 @@ class VisualBibleService:
         entity = getter(item_id)
         if entity is None:
             raise ValueError(f"Visual configuration not found: {kind}/{item_id}")
+        if entity.status == ApprovalStatus.DELETED or status == ApprovalStatus.DELETED:
+            raise AppError(code="visual.configuration_deleted", status_code=409)
+        if status == ApprovalStatus.ARCHIVED and isinstance(entity, (OutfitVariant, SceneVisualVersion)):
+            self.repository.retire_configuration(entity, status)
+            return entity
         return self.repository.set_approval_status(entity, status)
 
     def assign_outfit(self, *, script_character_id: int, outfit_variant_id: int | None):
@@ -745,7 +817,7 @@ class VisualBibleService:
             outfit_variant_id=outfit_variant_id,
         )
 
-    def set_asset_status(self, *, asset_id: int, status: ApprovalStatus) -> VisualAsset:
+    def set_asset_status(self, *, asset_id: int, status: ApprovalStatus, commit: bool = True) -> VisualAsset:
         asset = self.repository.get_asset(asset_id)
         if asset is None:
             raise ValueError(f"VisualAsset not found: {asset_id}")
@@ -757,7 +829,7 @@ class VisualBibleService:
                 mask_asset_id=asset.mask_asset_id,
                 require_approved=True,
             )
-        return self.repository.set_approval_status(asset, status)
+        return self.repository.set_asset_approval_status(asset, status, commit=commit)
 
     def asset_file(self, asset_id: int) -> tuple[Path, str | None]:
         asset = self.repository.get_asset(asset_id)
@@ -780,6 +852,8 @@ class VisualBibleService:
             if entity_type not in {VisualEntityType.SCENE, VisualEntityType.PROP}:
                 raise AppError("reference.owner_invalid", status_code=422)
             if entity_id is not None:
+                if entity_type == VisualEntityType.SCENE and subject.scene_definition_version >= SCENE_DEFINITION_VERSION:
+                    raise AppError("reference.owner_invalid", status_code=422)
                 version = self.repository.get_scene_version(entity_id) if entity_type == VisualEntityType.SCENE else None
                 if (version is None or version.project_id != project_id
                         or version.script_scene.task.project_id != project_id

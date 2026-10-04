@@ -7,10 +7,10 @@ from backend.api.schemas.visual_bible import (
     ApprovalRequest,
     AssignOutfitRequest,
     CharacterVisualTypeResponse,
-    OutfitVariantRequest,
+    OutfitVariantCreateRequest,
     OutfitVariantResponse,
     PromoteImageRequest,
-    SceneVisualVersionRequest,
+    SceneVisualVersionCreateRequest,
     SceneVisualVersionResponse,
     SelectSceneVersionRequest,
     StyleProfileRequest,
@@ -115,6 +115,7 @@ def scene_response(item: SceneVisualVersion) -> SceneVisualVersionResponse:
         project_id=item.project_id,
         script_scene_id=item.script_scene_id,
         version=item.version,
+        scene_definition_version=item.script_scene.task.scene_definition_version,
         landmarks=json.loads(item.landmarks_json),
         spatial_relations=json.loads(item.spatial_relations_json),
         camera_presets=json.loads(item.camera_presets_json),
@@ -182,14 +183,14 @@ def list_outfits(
 )
 def create_outfit(
     project_id: int,
-    payload: OutfitVariantRequest,
+    payload: OutfitVariantCreateRequest,
     request: Request,
 ) -> OutfitVariantResponse:
     with SessionLocal() as session:
         service = VisualBibleService(VisualBibleRepository(session))
         try:
             item = service.create_outfit(project_id=project_id, **payload.model_dump())
-        except ValueError as exc:
+        except Exception as exc:
             raise http_exception(exc, request_locale(request)) from exc
         return outfit_response(item)
 
@@ -252,14 +253,14 @@ def list_scene_versions(
 )
 def create_scene_version(
     project_id: int,
-    payload: SceneVisualVersionRequest,
+    payload: SceneVisualVersionCreateRequest,
     request: Request,
 ) -> SceneVisualVersionResponse:
     with SessionLocal() as session:
         service = VisualBibleService(VisualBibleRepository(session))
         try:
             item = service.create_scene_version(project_id=project_id, **payload.model_dump())
-        except ValueError as exc:
+        except Exception as exc:
             raise http_exception(exc, request_locale(request)) from exc
         return scene_response(item)
 
@@ -279,9 +280,31 @@ def set_configuration_status(
                 item_id=item_id,
                 status=payload.status,
             )
-        except ValueError as exc:
+        except Exception as exc:
             raise http_exception(exc, request_locale(request)) from exc
         return {"id": item.id, "status": item.status.value}
+
+
+@router.get("/configurations/{kind}/{item_id}/usage")
+def configuration_usage(kind: VisualEntityType, item_id: int, request: Request) -> dict:
+    """删除前展示所有任务中的绑定范围。"""
+    with SessionLocal() as session:
+        service = VisualBibleService(VisualBibleRepository(session))
+        try:
+            return service.configuration_usage(kind=kind, item_id=item_id)
+        except Exception as exc:
+            raise http_exception(exc, request_locale(request)) from exc
+
+
+@router.delete("/configurations/{kind}/{item_id}")
+def delete_configuration_draft(kind: VisualEntityType, item_id: int, request: Request) -> dict:
+    """移除草稿但不删除关联原图和历史运行记录。"""
+    with SessionLocal() as session:
+        service = VisualBibleService(VisualBibleRepository(session))
+        try:
+            return service.delete_configuration_draft(kind=kind, item_id=item_id)
+        except Exception as exc:
+            raise http_exception(exc, request_locale(request)) from exc
 
 
 @router.put("/script-characters/{character_id}/outfit")
