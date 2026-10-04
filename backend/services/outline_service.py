@@ -1,6 +1,7 @@
 from uuid import uuid4
 
 from backend.agents.outline_character_agent import OutlineCharacterAgent
+from backend.i18n.errors import AppError
 from backend.models.comic import ComicProject, OutlineCharacter, OutlineVersion, Session
 from backend.models.enums import OutlineVersionStatus, SessionPurpose
 from backend.repositories.comic_repository import ComicRepository
@@ -69,37 +70,49 @@ class OutlineService:
             content=outline,
         )
 
-    async def generate_and_save_outline_characters(
+    async def generate_and_save_outline_snapshot(
         self,
         *,
-        outline_version: OutlineVersion,
+        thread_id: str,
+        outline: str,
         user_message: str = "",
-    ) -> list[OutlineCharacter]:
-        """为大纲版本生成角色基准设定草案，并保存到 outline_character。"""
+    ) -> OutlineVersion:
+        """角色提取通过后才切换活动大纲，失败不留下空角色版本。"""
+
+        session = self.repository.get_session_by_thread_id(thread_id)
+        if session is None:
+            raise AppError("session.not_found", status_code=404)
+        if session.purpose != SessionPurpose.OUTLINE:
+            raise AppError("outline.session_invalid")
 
         previous_characters = []
-        versions = self.repository.list_outline_versions(outline_version.session_id)
-        for version in reversed(versions):
-            if version.id == outline_version.id:
-                continue
+        versions = self.repository.list_outline_versions(session.id)
+        if versions:
+            # 最近版本没有角色也是合法结果，不能回退到更旧版本复活已移除的角色。
+            version = versions[-1]
             previous_characters = [
                 self.outline_character_to_payload(character)
                 for character in self.repository.list_outline_characters(version.id)
             ]
-            if previous_characters:
-                break
 
-        characters = await OutlineCharacterAgent().generate_characters(
-            outline=outline_version.content,
-            previous_characters=previous_characters,
-            user_message=user_message,
-        )
-        normalized = [
-            self._normalize_outline_character_payload(character)
-            for character in characters
-        ]
-        return self.repository.replace_outline_characters(
-            outline_version_id=outline_version.id,
+        # 模型配置错误仍由已有错误映射处理，不能伪装成角色分类失败。
+        agent = OutlineCharacterAgent()
+        try:
+            characters = await agent.generate_characters(
+                outline=outline,
+                previous_characters=previous_characters,
+                user_message=user_message,
+            )
+            normalized = [
+                self._normalize_outline_character_payload(character)
+                for character in characters
+            ]
+        except ValueError as exc:
+            raise AppError("outline.characters_invalid", status_code=502) from exc
+
+        return self.repository.create_outline_version(
+            session_id=session.id,
+            content=outline,
             characters=normalized,
         )
 
@@ -131,7 +144,6 @@ class OutlineService:
             "role": character.role,
             "background": character.background,
             "appearance": character.appearance,
-            "visual_anchors": character.visual_anchors,
             "negative_constraints": character.negative_constraints,
             "default_hairstyle": character.default_hairstyle,
             "default_clothing": character.default_clothing,
@@ -149,7 +161,6 @@ class OutlineService:
             "role": str(raw_character.get("role", "")).strip(),
             "background": str(raw_character.get("background", "")).strip(),
             "appearance": str(raw_character.get("appearance", "")).strip(),
-            "visual_anchors": str(raw_character.get("visual_anchors", "")).strip(),
             "negative_constraints": str(raw_character.get("negative_constraints", "")).strip(),
             "default_hairstyle": str(raw_character.get("default_hairstyle", "")).strip(),
             "default_clothing": str(raw_character.get("default_clothing", "")).strip(),

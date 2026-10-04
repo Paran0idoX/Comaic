@@ -1,0 +1,142 @@
+{
+  "identity_face": {
+    "positive": "Create one front-facing identity close-up of one character. Show the head and its natural upper-body connection; the face is large and unobstructed. Use a neutral expression and a simple background, with the body continuing beyond the lower edge.",
+    "human_positive": "Create one front-facing head-and-shoulders identity portrait. Use an upper-chest crop, a large unobstructed face, natural proportions and a neutral expression. The torso continues beyond the lower edge. Use a simple background.",
+    "tags": [
+      "one character",
+      "front-facing identity close-up",
+      "neutral expression",
+      "simple background"
+    ],
+    "human_tags": [
+      "one character",
+      "front-facing head-and-shoulders portrait",
+      "upper-chest crop",
+      "neutral expression",
+      "natural proportions",
+      "simple background"
+    ],
+    "negative": "Exclude full-body framing, obscured facial features, additional characters, portable story objects, captions, borders and multi-view sheets.",
+    "negative_tags": [
+      "full-body framing",
+      "obscured face",
+      "additional characters",
+      "portable story objects",
+      "captions",
+      "borders",
+      "multi-view sheet"
+    ]
+  },
+  "identity_full_body": {
+    "positive": "Create one front-facing full-body reference of one character. Show the complete natural anatomy from head to the lowest extremities, with a relaxed neutral pose and natural proportions. Use a simple background.",
+    "human_positive": "Create one front-facing full-body reference of one character. Keep the entire head and both feet inside the frame. Use natural proportions, a relaxed neutral standing pose and a simple background.",
+    "tags": [
+      "one character",
+      "front-facing full body",
+      "complete natural anatomy",
+      "neutral pose",
+      "natural proportions",
+      "simple background"
+    ],
+    "negative": "Exclude cropped extremities, additional characters, portable story objects, action scenes, captions, borders and multi-view sheets.",
+    "negative_tags": [
+      "cropped extremities",
+      "additional characters",
+      "portable story objects",
+      "action scene",
+      "captions",
+      "borders",
+      "multi-view sheet"
+    ]
+  },
+  "identity_side": {
+    "positive": "Create one complete full-body reference of one character in a strict 90-degree side profile. Show the natural side silhouette, with natural proportions, a neutral pose and a simple background.",
+    "tags": [
+      "one character",
+      "complete full body",
+      "strict 90-degree side profile",
+      "side silhouette",
+      "neutral pose",
+      "simple background",
+      "natural proportions"
+    ],
+    "negative": "Exclude front-facing or three-quarter views, a face turned toward the camera, simultaneous frontal facial features, cropped extremities, portable story objects, additional characters, captions and multi-view sheets.",
+    "negative_tags": [
+      "front-facing view",
+      "three-quarter view",
+      "face turned toward camera",
+      "frontal facial features",
+      "cropped extremities",
+      "portable story objects",
+      "additional characters",
+      "captions",
+      "multi-view sheet"
+    ]
+  },
+  "identity_back": {
+    "positive": "Create one complete full-body reference of one character viewed directly from behind. Show the rear head shape, back silhouette and rear appearance. The head faces away from the camera. Use natural proportions, a neutral pose and a simple background.",
+    "tags": [
+      "one character",
+      "complete full body",
+      "direct rear view",
+      "rear silhouette",
+      "head facing away",
+      "neutral pose",
+      "simple background",
+      "natural proportions"
+    ],
+    "negative": "Exclude a visible face, frontal markings, a head turned toward the camera, front-facing or three-quarter views, cropped extremities, portable story objects, additional characters, captions and multi-view sheets.",
+    "negative_tags": [
+      "visible face",
+      "frontal markings",
+      "head turned toward camera",
+      "front-facing view",
+      "three-quarter view",
+      "cropped extremities",
+      "portable story objects",
+      "additional characters",
+      "captions",
+      "multi-view sheet"
+    ]
+  },
+  "scene_master": {
+    "positive": "Create one clear reference image of one coherent location. Show its established architecture, spatial layout, materials and fixed landmarks clearly. Use neutral illumination for readability; do not establish story-specific time of day, weather, atmosphere or temporary object states.",
+    "tags": [
+      "one coherent location",
+      "clear environment reference",
+      "established spatial layout"
+    ],
+    "negative": "Exclude characters, story actions, unrelated locations, location collages, captions, labels and borders.",
+    "negative_tags": [
+      "characters",
+      "story action",
+      "unrelated locations",
+      "location collage",
+      "captions",
+      "labels",
+      "borders"
+    ]
+  },
+  "prop_reference": {
+    "positive": "Create one clear reference image of one object. Show its complete exterior shape and visible identifying details against a simple background, with natural proportions.",
+    "tags": [
+      "one object",
+      "complete exterior",
+      "clear object reference",
+      "simple background",
+      "natural proportions"
+    ],
+    "negative": "Exclude people, hands holding the object, story actions, duplicate objects, invented interior contents, captions, labels, borders and multi-view sheets.",
+    "negative_tags": [
+      "people",
+      "holding hands",
+      "story action",
+      "duplicate objects",
+      "invented interior contents",
+      "captions",
+      "labels",
+      "borders",
+      "multi-view sheet"
+    ]
+  }
+}

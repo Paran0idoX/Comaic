@@ -1,0 +1,18 @@
+{
+  "header": "结合以下按实际传入顺序排列的独立参考图生成画面：",
+  "canvas_header": "使用以下按实际传入顺序排列的独立图片进行编辑：",
+  "source": "{label}：{name}（{category}；归属标识 {key}）；用途：{purpose}；参考内容：{role}。",
+  "categories": { "character": "人物", "scene": "场景", "prop": "物品", "canvas": "画布" },
+  "purposes": { "identity": "人物身份", "appearance": "当前外观", "scene": "场景环境", "prop": "可见物品", "canvas": "编辑画布" },
+  "role_names": {
+    "identity_face": "脸部", "identity_full_body": "全身", "identity_side": "侧面", "identity_back": "背面",
+    "outfit_front": "造型正面", "outfit_back": "造型背面", "outfit_detail": "造型细节", "scene_master": "场景环境",
+    "prop_reference": "物品外观", "pose": "姿势", "depth": "空间深度", "canny": "轮廓", "lineart": "线稿", "segmentation": "区域划分", "mask": "编辑区域"
+  },
+  "identity": "结合{reference}与固定外貌描述保持{name}的身份一致。本页已确认的发型、服装和可见局部状态必须保留，参考图中的造型或过去状态不得覆盖它们。",
+  "back_identity": "使用{reference}保持{name}的身份和轮廓一致，只呈现要求的背面视角。脸部完全不入镜，保留本页已确认的发型、服装及可见局部状态。",
+  "source_scope": "这些图片提供参考素材。按照指定镜头、动作、表情和空间关系建立新构图。未经要求，不照搬参考姿势或背景。",
+  "canvas_scope": "{canvas}是编辑画布。保留其构图和未指定修改的内容，仅进行明确要求的修改。其他图片仅提供参考素材。",
+  "ownership": "归属相同的图片表示同一个角色或物品，不代表额外的人或物。不同归属保持区分，不混合身份，不在角色之间转移配饰。",
+  "roles": "人物参考用于保持身份；造型参考仅用于对应的服装或外貌。身体图未标注服装关联时，保留本页已确认服装。场景参考指导建筑、布局、材质和固定陈设，实际时段、天气、光照和氛围以本页条件为准，不照搬参考图的偶然环境条件、临时物品或过去的位置。物品参考指导可见物品的身份与设计，不增加副本。回退的参考角度不得改变指定镜头方向。"
+}

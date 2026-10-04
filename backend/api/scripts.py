@@ -9,6 +9,7 @@ from backend.api.schemas.script import (
     CreatePageScriptRequest,
     GenerateBatchScriptRequest,
     GenerateSinglePageScriptRequest,
+    ReviewScriptPagesRequest,
     ScriptPageListResponse,
     ScriptPageResponse,
     ScriptCharacterListResponse,
@@ -24,8 +25,9 @@ from backend.api.schemas.script import (
 from backend.models.comic import ComicPage, ScriptCharacter, ScriptGenerationTask, ScriptScene, ScriptSection
 from backend.models.database import SessionLocal
 from backend.models.enums import ScriptGenerationMode, ScriptGenerationTaskStatus
+from backend.models.scene_conditions import page_binding_payload
 from backend.repositories.comic_repository import ComicRepository
-from backend.i18n.errors import http_exception, sse_error_payload
+from backend.i18n.errors import AppError, http_exception, sse_error_payload
 from backend.i18n.locale import request_locale
 from backend.services.script_service import ScriptService
 
@@ -60,6 +62,7 @@ def task_to_response(task: ScriptGenerationTask) -> ScriptTaskResponse:
         status=task.status.value,
         mode=task.mode.value,
         total_pages=task.total_pages,
+        scene_definition_version=task.scene_definition_version,
         target_page_no=task.target_page_no,
         user_requirement=task.user_requirement,
         section_plan=task.section_plan,
@@ -79,6 +82,7 @@ def page_to_response(page: ComicPage) -> ScriptPageResponse:
         section_no=page.section.section_no if page.section is not None else None,
         task_id=page.section.task_id if page.section is not None else None,
         scene_id=page.scene_id,
+        **page_binding_payload(page),
         scene_key=page.script_scene.scene_key if page.script_scene is not None else None,
         character_keys=[
             character.character_key
@@ -92,7 +96,6 @@ def page_to_response(page: ComicPage) -> ScriptPageResponse:
         composition=page.composition,
         character_action=page.character_action,
         dialogue=page.dialogue,
-        image_prompt=page.image_prompt,
         status=page.status.value,
         script_review_status=page.script_review_status.value,
         script_review_error=page.script_review_error,
@@ -107,6 +110,7 @@ def scene_to_response(scene: ScriptScene) -> ScriptSceneResponse:
     return ScriptSceneResponse(
         id=scene.id,
         task_id=scene.task_id,
+        scene_definition_version=scene.task.scene_definition_version,
         scene_key=scene.scene_key,
         name=scene.name,
         location_type=scene.location_type,
@@ -115,8 +119,9 @@ def scene_to_response(scene: ScriptScene) -> ScriptSceneResponse:
         weather=scene.weather,
         environment_details=scene.environment_details,
         color_palette=scene.color_palette,
-        visual_anchors=scene.visual_anchors,
         negative_constraints=scene.negative_constraints,
+        selected_visual_version_id=scene.selected_visual_version_id,
+        reference_subject_id=scene.reference_subject_id,
         created_at=scene.created_at,
         updated_at=scene.updated_at,
     )
@@ -133,6 +138,7 @@ def character_to_response(character: ScriptCharacter) -> ScriptCharacterResponse
         section_id=character.section_id,
         section_no=character.section.section_no if character.section is not None else None,
         outline_character_id=character.outline_character_id,
+        outfit_variant_id=character.outfit_variant_id,
         character_key=character.character_key,
         name=character.name,
         section_role=character.section_role,
@@ -142,7 +148,6 @@ def character_to_response(character: ScriptCharacter) -> ScriptCharacterResponse
         current_state=character.current_state,
         emotion=character.emotion,
         temporary_changes=character.temporary_changes,
-        visual_anchors=character.visual_anchors,
         negative_constraints=character.negative_constraints,
         outline_character=(
             {
@@ -151,12 +156,12 @@ def character_to_response(character: ScriptCharacter) -> ScriptCharacterResponse
                 "role": outline_character.role,
                 "background": outline_character.background,
                 "appearance": outline_character.appearance,
-                "visual_anchors": outline_character.visual_anchors,
                 "negative_constraints": outline_character.negative_constraints,
                 "default_hairstyle": outline_character.default_hairstyle,
                 "default_clothing": outline_character.default_clothing,
                 "default_accessories": outline_character.default_accessories,
                 "default_color_palette": outline_character.default_color_palette,
+                "visual_type": outline_character.visual_type.value,
             }
             if outline_character is not None
             else None
@@ -273,6 +278,32 @@ def stream_continue_batch_script_generation(
                     yield sse_event(event, payload)
             except Exception as exc:
                 logger.exception("Unhandled script continue SSE error task_id=%s", task_id)
+                yield sse_event("error", sse_error_payload(exc, locale))
+
+    return EventSourceResponse(event_generator(), headers=SSE_HEADERS, ping=5)
+
+
+@router.post("/tasks/{task_id}/review/stream")
+def stream_review_script_pages(
+    task_id: int,
+    request: ReviewScriptPagesRequest,
+    http_request: Request,
+) -> EventSourceResponse:
+    """复审已落库脚本；不会调用 Writer 或覆盖人工编辑。"""
+
+    locale = request_locale(http_request)
+
+    async def event_generator():
+        with SessionLocal() as db_session:
+            service = ScriptService(ComicRepository(db_session))
+            try:
+                async for event, payload in service.stream_review_script_pages(
+                    task_id=task_id,
+                    page_nos=request.page_nos,
+                ):
+                    yield sse_event(event, payload)
+            except Exception as exc:
+                logger.exception("Unhandled script review SSE error task_id=%s", task_id)
                 yield sse_event("error", sse_error_payload(exc, locale))
 
     return EventSourceResponse(event_generator(), headers=SSE_HEADERS, ping=5)
@@ -453,8 +484,9 @@ def create_page_script(
                 composition=request.composition,
                 character_action=request.character_action,
                 dialogue=request.dialogue,
+                **request.model_dump(exclude_unset=True, include={"scene_id", "character_ids", "scene_conditions"}),
             )
-        except ValueError as exc:
+        except (ValueError, AppError) as exc:
             raise http_exception(exc, request_locale(http_request)) from exc
         return page_to_response(page)
 
@@ -482,8 +514,9 @@ def update_page_script(
                 composition=request.composition,
                 character_action=request.character_action,
                 dialogue=request.dialogue,
+                **request.model_dump(exclude_unset=True, include={"scene_id", "character_ids", "scene_conditions"}),
             )
-        except ValueError as exc:
+        except (ValueError, AppError) as exc:
             raise http_exception(exc, request_locale(http_request)) from exc
         return page_to_response(page)
 

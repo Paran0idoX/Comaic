@@ -34,7 +34,10 @@ class PageScriptWriterAgent:
 
         self.llm = llm or self._default_llm()
         self.max_structured_retries = max_structured_retries
-        self.prompt = PromptLoader.load(prompt_name)
+        self.prompt = "\n\n".join([
+            PromptLoader.load_system(prompt_name),
+            PromptLoader.load("script_visual_context_protocol.md"),
+        ])
         logger.info("Initializing PageScriptWriterAgent prompt=%s", prompt_name)
         self._agent = create_structured_agent(
             model=self.llm,
@@ -91,7 +94,8 @@ class PageScriptWriterAgent:
             response_model=PageScriptWriterResponse,
             operation=f"page_script_writer_section_{current_section.get('section_no')}",
             max_retries=self.max_structured_retries,
-            validator=self._validate_response,
+            validator=lambda value: self._validate_response(value, require_conditions=any(
+                scene.get("scene_definition_version", 1) >= 2 for scene in section_scenes)),
         )
         pages = [page.model_dump() for page in response.pages]
         logger.info(
@@ -103,11 +107,13 @@ class PageScriptWriterAgent:
         return pages
 
     @staticmethod
-    def _validate_response(response: PageScriptWriterResponse) -> None:
+    def _validate_response(response: PageScriptWriterResponse, *, require_conditions: bool = False) -> None:
         """页面编写至少需要返回一页；具体页码范围由 Service 做权威校验。"""
 
         if not response.pages:
             raise ValueError("PageScriptWriterAgent structured_response contains no pages.")
+        if require_conditions and any(page.scene_conditions is None for page in response.pages):
+            raise ValueError("New page scripts must include scene_conditions.")
 
     @staticmethod
     def _build_section_input(
@@ -126,6 +132,18 @@ class PageScriptWriterAgent:
         current_pages: list[dict],
     ) -> str:
         """构造单页脚本输入；用自然语言说明替代原始 JSON。"""
+
+        allowed_scene_keys = [
+            str(scene.get("scene_key", "")).strip()
+            for scene in section_scenes
+            if isinstance(scene, dict) and str(scene.get("scene_key", "")).strip()
+        ]
+        allowed_character_keys = [
+            str(character.get("character_key", "")).strip()
+            for character in section_characters
+            if isinstance(character, dict)
+            and str(character.get("character_key", "")).strip()
+        ]
 
         if is_revision:
             mode_text = "监督修订：只输出当前目标页的修订稿。"
@@ -148,6 +166,10 @@ class PageScriptWriterAgent:
                 f"当前模式：{mode_text}",
                 f"本次唯一允许输出页码：{target_page_no}",
                 f"总页数：{total_pages}",
+                "本页 scene_key 允许值（只能逐字复制其中一个）："
+                + ("、".join(allowed_scene_keys) or "无"),
+                "本页 character_keys 允许值（只能逐字复制，或无角色时返回空数组）："
+                + ("、".join(allowed_character_keys) or "无"),
                 "当前需要生成的已锁定分段：",
                 format_section(current_section),
                 "当前分段可引用的中心化场景设定：",

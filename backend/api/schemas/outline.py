@@ -42,7 +42,6 @@ class OutlineCharacterResponse(BaseModel):
     role: str
     background: str
     appearance: str
-    visual_anchors: str
     negative_constraints: str
     default_hairstyle: str
     default_clothing: str

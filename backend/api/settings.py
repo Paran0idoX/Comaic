@@ -10,16 +10,93 @@ from backend.api.schemas.settings import (
     TestLLMConfigResponse,
     UpdateAppSettingsRequest,
     UpdateLLMConfigRequest,
+    SystemPromptResponse,
+    UpdateSystemPromptRequest,
+    UpdateModelSystemPromptRequest,
 )
+from backend.models.enums import SystemPromptKey
+from backend.api.schemas.consistency_evaluation import (
+    ConsistencySettingsResponse,
+    UpdateConsistencyThresholdsRequest,
+)
+from backend.evaluation.runtime import METRIC_VERSION
 from backend.i18n.errors import http_exception
 from backend.i18n.locale import request_locale
 from backend.models.comic import LLMConfig
 from backend.models.database import SessionLocal
 from backend.repositories.comic_repository import ComicRepository
+from backend.repositories.consistency_evaluation_repository import (
+    ConsistencyEvaluationRepository,
+)
+from backend.services.consistency_evaluation_service import ConsistencyEvaluationService
 from backend.services.settings_service import SettingsService
 
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
+
+
+@router.get("/system-prompts", response_model=list[SystemPromptResponse])
+def list_system_prompts(http_request: Request):
+    """读取可维护的任务提示词白名单。"""
+    db_session, service = create_service()
+    try:
+        return service.list_system_prompts()
+    except Exception as exc:
+        raise http_exception(exc, request_locale(http_request)) from exc
+    finally:
+        db_session.close()
+
+
+@router.put("/system-prompts/{key}", response_model=SystemPromptResponse)
+def update_system_prompt(key: SystemPromptKey, request: UpdateSystemPromptRequest, http_request: Request):
+    """更新一个任务节点或删除其覆盖。"""
+    db_session, service = create_service()
+    try:
+        return service.update_system_prompt(key=key, content=request.content)
+    except Exception as exc:
+        raise http_exception(exc, request_locale(http_request)) from exc
+    finally:
+        db_session.close()
+
+
+@router.get("/llm/configs/{config_id}/system-prompts", response_model=list[SystemPromptResponse])
+def list_model_system_prompts(config_id: int, http_request: Request):
+    """不返回 Key 等 API 敏感配置，仅返回每个模型的提示词。"""
+    db_session, service = create_service()
+    try:
+        return service.list_model_system_prompts(config_id=config_id)
+    except Exception as exc:
+        raise http_exception(exc, request_locale(http_request)) from exc
+    finally:
+        db_session.close()
+
+
+@router.put("/llm/configs/{config_id}/system-prompts", response_model=SystemPromptResponse)
+def update_model_system_prompt(config_id: int, request: UpdateModelSystemPromptRequest, http_request: Request):
+    """模型名通过请求体传递，兼容名称包含斜线的 Provider。"""
+    db_session, service = create_service()
+    try:
+        return service.update_model_system_prompt(config_id=config_id, **request.model_dump())
+    except Exception as exc:
+        raise http_exception(exc, request_locale(http_request)) from exc
+    finally:
+        db_session.close()
+
+
+def consistency_settings_response(
+    service: ConsistencyEvaluationService,
+) -> ConsistencySettingsResponse:
+    config = service.get_config()
+    return ConsistencySettingsResponse(
+        cids_cross_min=config.cids_cross_min,
+        cids_self_min=config.cids_self_min,
+        csd_cross_min=config.csd_cross_min,
+        csd_self_min=config.csd_self_min,
+        occm_min=config.occm_min,
+        copy_paste_max=config.copy_paste_max,
+        runtime=service.runtime_readiness(),
+        metric_version=METRIC_VERSION,
+    )
 
 
 def create_service() -> tuple:
@@ -79,6 +156,40 @@ def update_app_settings(
         raise http_exception(exc, request_locale(http_request)) from exc
     finally:
         db_session.close()
+
+
+@router.get("/consistency-evaluation", response_model=ConsistencySettingsResponse)
+def get_consistency_evaluation_settings(
+    http_request: Request,
+) -> ConsistencySettingsResponse:
+    """读取一致性准出阈值与当前 comaic 环境 readiness。"""
+
+    with SessionLocal() as db_session:
+        service = ConsistencyEvaluationService(
+            ConsistencyEvaluationRepository(db_session)
+        )
+        try:
+            return consistency_settings_response(service)
+        except Exception as exc:
+            raise http_exception(exc, request_locale(http_request)) from exc
+
+
+@router.put("/consistency-evaluation", response_model=ConsistencySettingsResponse)
+def update_consistency_evaluation_settings(
+    request: UpdateConsistencyThresholdsRequest,
+    http_request: Request,
+) -> ConsistencySettingsResponse:
+    """更新可编辑阈值；阈值变化会让旧结果不再代表当前准出配置。"""
+
+    with SessionLocal() as db_session:
+        service = ConsistencyEvaluationService(
+            ConsistencyEvaluationRepository(db_session)
+        )
+        try:
+            service.update_config(**request.model_dump())
+            return consistency_settings_response(service)
+        except Exception as exc:
+            raise http_exception(exc, request_locale(http_request)) from exc
 
 
 @router.get("/llm", response_model=LLMConfigListResponse)

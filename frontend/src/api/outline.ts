@@ -18,7 +18,6 @@ export type OutlineCharacter = {
   role: string
   background: string
   appearance: string
-  visual_anchors: string
   negative_constraints: string
   default_hairstyle: string
   default_clothing: string

@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 from fastapi import APIRouter, Request, Response, status
 from fastapi.responses import FileResponse
@@ -10,7 +11,9 @@ from backend.api.schemas.image_generation import (
     ComfyWorkflowPresetRequest,
     ComfyWorkflowPresetResponse,
     GenerateImagesRequest,
+    GenerationBatchListResponse,
     GenerationTaskResponse,
+    GenerationRunResponse,
     ImageGenerationToolPresetListResponse,
     ImageGenerationToolPresetRequest,
     ImageGenerationToolPresetResponse,
@@ -18,12 +21,16 @@ from backend.api.schemas.image_generation import (
     ImageGenerationPageResponse,
 )
 from backend.api.scripts import SSE_HEADERS, sse_event
-from backend.models.comic import ComicImage, ComicPage, GenerationTask, ImageGenerationToolPreset
+from backend.models.comic import ComicImage, ComicPage, GenerationRun, GenerationTask, ImageGenerationToolPreset
 from backend.models.database import SessionLocal
+from backend.models.enums import GenerationMode, ImagePromptType
 from backend.repositories.comic_repository import ComicRepository
+from backend.repositories.generation_repository import GenerationRepository
+from backend.repositories.image_spec_repository import ImageSpecRepository
 from backend.i18n.errors import AppError, http_exception, sse_error_payload
 from backend.i18n.locale import request_locale
 from backend.services.image_generation_service import ImageGenerationService
+from backend.services.image_spec_service import ImageSpecService
 
 
 router = APIRouter(prefix="/api/image-generation", tags=["image-generation"])
@@ -35,9 +42,12 @@ def tool_to_response(preset: ImageGenerationToolPreset) -> ImageGenerationToolPr
     return ImageGenerationToolPresetResponse(
         id=preset.id,
         name=preset.name,
-        kind=preset.kind,
+        provider=preset.provider,
+        prompt_type=preset.prompt_type,
         description=preset.description,
         is_default=preset.is_default,
+        capabilities=json.loads(preset.capabilities_json),
+        bindings=json.loads(preset.bindings_json),
         comfy_base_url=preset.comfy_base_url,
         workflow_json=preset.workflow_json,
         positive_node_id=preset.positive_node_id,
@@ -69,6 +79,8 @@ def image_to_response(image: ComicImage) -> ComicImageResponse:
     return ComicImageResponse(
         id=image.id,
         page_id=image.page_id,
+        generation_run_id=image.generation_run_id,
+        artifact_index=image.artifact_index,
         image_url=f"/api/image-generation/images/{image.id}/file",
         local_path=image.local_path,
         seed=image.seed,
@@ -76,41 +88,123 @@ def image_to_response(image: ComicImage) -> ComicImageResponse:
         prompt=image.prompt,
         negative_prompt=image.negative_prompt,
         score=image.score,
+        sha256=image.sha256,
+        width=image.width,
+        height=image.height,
         is_selected=image.is_selected,
         created_at=image.created_at,
     )
 
 
-def page_to_response(page: ComicPage, repo: ComicRepository) -> ImageGenerationPageResponse:
+def page_to_response(
+    page: ComicPage,
+    repo: ComicRepository,
+    *,
+    prompt_type: ImagePromptType = ImagePromptType.NATURAL_LANGUAGE,
+    generation_mode: GenerationMode = GenerationMode.PREVIEW,
+    current_context_hash: str | None = None,
+) -> ImageGenerationPageResponse:
     """把页面和其生成图片列表转换为图片生成页面响应。"""
 
+    spec = GenerationRepository(repo.session).latest_spec_for_page(
+        page_id=page.id,
+        prompt_type=prompt_type,
+        generation_mode=generation_mode,
+    )
+    images = repo.list_page_images(page.id)
+    completed_candidates = (
+        len(
+            {
+                run.candidate_index
+                for run in GenerationRepository(repo.session).list_successful_runs(
+                    page_id=page.id,
+                    prompt_type=prompt_type,
+                    generation_mode=generation_mode,
+                    image_spec_id=spec.id,
+                )
+            }
+        )
+        if spec is not None
+        else 0
+    )
     return ImageGenerationPageResponse(
         page_id=page.id,
         page_no=page.page_no,
-        image_prompt=page.image_prompt,
+        prompt_type=spec.prompt_type if spec else None,
+        positive_prompt=spec.positive_prompt if spec else None,
         status=page.status.value,
         selected_image_id=page.selected_image_id,
-        images=[image_to_response(image) for image in repo.list_page_images(page.id)],
+        latest_spec_id=spec.id if spec else None,
+        spec_stale=bool(spec is not None and current_context_hash is not None and (
+            not ImageSpecService(ImageSpecRepository(repo.session)).page_context_is_current(spec.snapshot, current_context_hash)
+            or spec.source_hash != ImageSpecService(ImageSpecRepository(repo.session)).current_image_spec_source_hash(spec)
+        )),
+        spec_warnings=json.loads(spec.warnings_json) if spec else [],
+        completed_candidates=completed_candidates,
+        images=[image_to_response(image) for image in images],
     )
 
 
-def task_to_response(task: GenerationTask) -> GenerationTaskResponse:
+def task_to_response(
+    task: GenerationTask, *, progress: dict[str, int | None] | None = None,
+) -> GenerationTaskResponse:
     """把 ComfyUI 生成任务转换为 API 响应。"""
 
     return GenerationTaskResponse(
         id=task.id,
         project_id=task.project_id,
         page_id=task.page_id,
+        script_task_id=task.script_task_id,
+        tool_preset_id=task.tool_preset_id,
+        parent_task_id=task.parent_task_id,
+        task_kind=task.task_kind.value,
+        generation_mode=task.generation_mode.value if task.generation_mode else None,
+        seed_strategy=task.seed_strategy.value if task.seed_strategy else None,
+        candidate_count=task.candidate_count,
         comfy_prompt_id=task.comfy_prompt_id,
         status=task.status.value,
         batch_size=task.batch_size,
         error_message=task.error_message,
         created_at=task.created_at,
         updated_at=task.updated_at,
+        progress=progress,
     )
 
 
-@router.get("/workflows", response_model=ComfyWorkflowPresetListResponse)
+def run_to_response(run: GenerationRun) -> GenerationRunResponse:
+    """把单候选 GenerationRun 转换为完整溯源响应。"""
+
+    return GenerationRunResponse(
+        id=run.id,
+        generation_task_id=run.generation_task_id,
+        batch_task_id=run.batch_task_id,
+        page_id=run.page_id,
+        image_spec_id=run.image_spec_id,
+        tool_preset_id=run.tool_preset_id,
+        provider=run.provider,
+        prompt_type=run.prompt_type,
+        candidate_index=run.candidate_index,
+        seed=run.seed,
+        seed_applied=run.seed_applied,
+        seed_strategy=run.seed_strategy.value,
+        generation_mode=run.generation_mode.value,
+        status=run.status.value,
+        external_request_id=run.external_request_id,
+        workflow=json.loads(run.workflow_json) if run.workflow_json else None,
+        workflow_hash=run.workflow_hash,
+        bindings=json.loads(run.bindings_json),
+        resolved_assets=json.loads(run.resolved_assets_json),
+        degradations=json.loads(run.degradation_json),
+        applied_spec=json.loads(run.applied_spec_json),
+        error_code=run.error_code,
+        error_message=run.error_message,
+        created_at=run.created_at,
+        updated_at=run.updated_at,
+        finished_at=run.finished_at,
+    )
+
+
+@router.get("/workflows", response_model=ComfyWorkflowPresetListResponse, deprecated=True)
 def list_workflows() -> ComfyWorkflowPresetListResponse:
     """读取 ComfyUI workflow 配置列表。"""
 
@@ -176,7 +270,12 @@ def delete_tool(tool_id: int, http_request: Request) -> Response:
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@router.post("/workflows", response_model=ComfyWorkflowPresetResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/workflows",
+    response_model=ComfyWorkflowPresetResponse,
+    status_code=status.HTTP_201_CREATED,
+    deprecated=True,
+)
 def create_workflow(
     request: ComfyWorkflowPresetRequest,
     http_request: Request,
@@ -192,7 +291,11 @@ def create_workflow(
         return workflow_to_response(preset)
 
 
-@router.put("/workflows/{workflow_id}", response_model=ComfyWorkflowPresetResponse)
+@router.put(
+    "/workflows/{workflow_id}",
+    response_model=ComfyWorkflowPresetResponse,
+    deprecated=True,
+)
 def update_workflow(
     workflow_id: int,
     request: ComfyWorkflowPresetRequest,
@@ -209,7 +312,11 @@ def update_workflow(
         return workflow_to_response(preset)
 
 
-@router.delete("/workflows/{workflow_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/workflows/{workflow_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    deprecated=True,
+)
 def delete_workflow(workflow_id: int, http_request: Request) -> Response:
     """删除 ComfyUI workflow 配置。"""
 
@@ -223,21 +330,65 @@ def delete_workflow(workflow_id: int, http_request: Request) -> Response:
 
 
 @router.get("/script-tasks/{task_id}/pages", response_model=ImageGenerationPageListResponse)
-def list_generation_pages(task_id: int, http_request: Request) -> ImageGenerationPageListResponse:
+def list_generation_pages(
+    task_id: int,
+    http_request: Request,
+    prompt_type: ImagePromptType = ImagePromptType.NATURAL_LANGUAGE,
+    generation_mode: GenerationMode = GenerationMode.PREVIEW,
+) -> ImageGenerationPageListResponse:
     """读取脚本任务下的图片生成页面状态和已有图片。"""
 
+    # 接受旧查询参数，但新任务只有一套可选参考图提示词。
+    generation_mode = GenerationMode.PREVIEW
     with SessionLocal() as db_session:
         repo = ComicRepository(db_session)
         service = ImageGenerationService(repo)
         try:
             pages = service.list_script_task_pages(task_id)
+            # 只检查当前来源，让就绪度与生成前校验一致；不调用模型或重新准备。
+            current_hashes = ImageSpecService(ImageSpecRepository(db_session)).current_page_context_hashes(
+                task_id, page_ids=[page.id for page in pages],
+            ) if pages else {}
         except ValueError as exc:
             raise http_exception(exc, request_locale(http_request)) from exc
         project_id = pages[0].project_id if pages else 0
         return ImageGenerationPageListResponse(
             task_id=task_id,
             project_id=project_id,
-            items=[page_to_response(page, repo) for page in pages],
+            items=[
+                page_to_response(
+                    page,
+                    repo,
+                    prompt_type=prompt_type,
+                    generation_mode=generation_mode,
+                    current_context_hash=current_hashes.get(page.id),
+                )
+                for page in pages
+            ],
+        )
+
+
+@router.get(
+    "/script-tasks/{task_id}/batches",
+    response_model=GenerationBatchListResponse,
+)
+def list_generation_batches(
+    task_id: int,
+    http_request: Request,
+) -> GenerationBatchListResponse:
+    """读取脚本任务下具有明确轨道身份的新式生成批次。"""
+
+    with SessionLocal() as db_session:
+        repo = ComicRepository(db_session)
+        if not repo.script_task_exists(task_id):
+            raise http_exception(
+                ValueError(f"ScriptGenerationTask not found: {task_id}"),
+                request_locale(http_request),
+            )
+        batches = repo.list_generation_batches(task_id)
+        progress = GenerationRepository(db_session).batch_progress([item.id for item in batches])
+        return GenerationBatchListResponse(
+            items=[task_to_response(item, progress=progress[item.id]) for item in batches]
         )
 
 
@@ -247,7 +398,7 @@ def stream_generate_for_script_task(
     request: GenerateImagesRequest,
     http_request: Request,
 ) -> EventSourceResponse:
-    """批量生成脚本任务下所有页面图片，并用 SSE 返回进度。"""
+    """使用已准备好的提示词生成所选页面；未传页码时兼容整批生成。"""
 
     locale = request_locale(http_request)
 
@@ -257,10 +408,15 @@ def stream_generate_for_script_task(
             try:
                 async for event, payload in service.stream_generate_for_script_task(
                     task_id=task_id,
+                    page_ids=request.page_ids,
+                    width=request.width,
+                    height=request.height,
                     tool_preset_id=request.effective_tool_preset_id,
                     poll_interval_seconds=request.poll_interval_seconds,
+                    wait_timeout_seconds=request.wait_timeout_seconds,
                     candidates_per_page=request.candidates_per_page,
-                    negative_prompt=request.negative_prompt,
+                    generation_mode=request.generation_mode,
+                    seed_strategy=request.seed_strategy,
                 ):
                     yield sse_event(event, payload)
             except Exception as exc:
@@ -287,8 +443,40 @@ def stream_continue_for_script_task(
                     task_id=task_id,
                     tool_preset_id=request.effective_tool_preset_id,
                     poll_interval_seconds=request.poll_interval_seconds,
+                    wait_timeout_seconds=request.wait_timeout_seconds,
                     candidates_per_page=request.candidates_per_page,
-                    negative_prompt=request.negative_prompt,
+                    generation_mode=request.generation_mode,
+                    seed_strategy=request.seed_strategy,
+                ):
+                    yield sse_event(event, payload)
+            except Exception as exc:
+                yield sse_event("error", sse_error_payload(exc, locale))
+
+    return EventSourceResponse(event_generator(), headers=SSE_HEADERS, ping=5)
+
+
+@router.post("/batches/{batch_task_id}/continue/stream")
+def stream_continue_for_batch(
+    batch_task_id: int,
+    request: GenerateImagesRequest,
+    http_request: Request,
+) -> EventSourceResponse:
+    """只在指定批次内补齐候选，防止续生成跨批次拼接。"""
+
+    locale = request_locale(http_request)
+
+    async def event_generator():
+        with SessionLocal() as db_session:
+            service = ImageGenerationService(ComicRepository(db_session))
+            try:
+                async for event, payload in service.stream_continue_for_batch(
+                    batch_task_id=batch_task_id,
+                    tool_preset_id=request.effective_tool_preset_id,
+                    poll_interval_seconds=request.poll_interval_seconds,
+                    wait_timeout_seconds=request.wait_timeout_seconds,
+                    candidates_per_page=request.candidates_per_page,
+                    generation_mode=request.generation_mode,
+                    seed_strategy=request.seed_strategy,
                 ):
                     yield sse_event(event, payload)
             except Exception as exc:
@@ -313,10 +501,14 @@ def stream_generate_for_page(
             try:
                 async for event, payload in service.stream_generate_for_page(
                     page_id=page_id,
+                    width=request.width,
+                    height=request.height,
                     tool_preset_id=request.effective_tool_preset_id,
                     poll_interval_seconds=request.poll_interval_seconds,
+                    wait_timeout_seconds=request.wait_timeout_seconds,
                     candidates_per_page=request.candidates_per_page,
-                    negative_prompt=request.negative_prompt,
+                    generation_mode=request.generation_mode,
+                    seed_strategy=request.seed_strategy,
                 ):
                     yield sse_event(event, payload)
             except Exception as exc:
@@ -370,3 +562,17 @@ def get_image_file(image_id: int, http_request: Request) -> FileResponse:
                 request_locale(http_request),
             )
         return FileResponse(local_path)
+
+
+@router.get("/runs/{run_id}", response_model=GenerationRunResponse)
+def get_generation_run(run_id: int, http_request: Request) -> GenerationRunResponse:
+    """读取某张新候选图关联的完整模型、规格、Workflow 和资产溯源。"""
+
+    with SessionLocal() as db_session:
+        run = GenerationRepository(db_session).get_run(run_id)
+        if run is None:
+            raise http_exception(
+                ValueError(f"GenerationRun not found: {run_id}"),
+                request_locale(http_request),
+            )
+        return run_to_response(run)

@@ -70,6 +70,32 @@ export type AppSettings = {
   script_section_max_concurrency: number
 }
 
+export type SystemPrompt = {
+  key: string
+  content: string
+  default_content: string
+  is_overridden: boolean
+  default_files: string[]
+}
+
+export const listSystemPrompts = (): Promise<SystemPrompt[]> =>
+  requestJson<SystemPrompt[]>('/api/settings/system-prompts')
+
+export const updateSystemPrompt = (key: string, content: string | null): Promise<SystemPrompt> =>
+  requestJson<SystemPrompt>(`/api/settings/system-prompts/${encodeURIComponent(key)}`, {
+    method: 'PUT', body: JSON.stringify({ content }),
+  })
+
+export const listModelSystemPrompts = (configId: number): Promise<SystemPrompt[]> =>
+  requestJson<SystemPrompt[]>(`/api/settings/llm/configs/${configId}/system-prompts`)
+
+export const updateModelSystemPrompt = (
+  configId: number, model: string, content: string | null,
+): Promise<SystemPrompt> =>
+  requestJson<SystemPrompt>(`/api/settings/llm/configs/${configId}/system-prompts`, {
+    method: 'PUT', body: JSON.stringify({ model, content }),
+  })
+
 const requestJson = async <T>(url: string, options: RequestInit = {}): Promise<T> => {
   const response = await fetch(url, {
     ...options,

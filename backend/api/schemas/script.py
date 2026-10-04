@@ -1,6 +1,7 @@
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+from backend.models.scene_conditions import SceneConditions
 
 
 class GenerateSinglePageScriptRequest(BaseModel):
@@ -28,7 +29,28 @@ class ContinueBatchScriptRequest(BaseModel):
     user_requirement: str | None = None
 
 
-class CreatePageScriptRequest(BaseModel):
+class ReviewScriptPagesRequest(BaseModel):
+    """复审已落库页面；不传页码时只审查当前未通过页面。"""
+
+    page_nos: list[int] | None = None
+
+
+class PageVisualBindingsRequest(BaseModel):
+    """省略表示保留；场景和条件不能用 null 清空，空人物列表允许。"""
+
+    scene_id: int | None = Field(default=None, gt=0)
+    character_ids: list[int] | None = None
+    scene_conditions: SceneConditions | None = None
+
+    @model_validator(mode="after")
+    def validate_explicit_bindings(self):
+        for name in ("scene_id", "character_ids", "scene_conditions"):
+            if name in self.model_fields_set and getattr(self, name) is None:
+                raise ValueError(f"{name} cannot be null")
+        return self
+
+
+class CreatePageScriptRequest(PageVisualBindingsRequest):
     """人工新增页面脚本请求体。"""
 
     page_no: int = Field(gt=0)
@@ -42,7 +64,7 @@ class CreatePageScriptRequest(BaseModel):
     dialogue: str
 
 
-class UpdatePageScriptRequest(BaseModel):
+class UpdatePageScriptRequest(PageVisualBindingsRequest):
     """人工更新页面脚本请求体。"""
 
     task_id: int | None = Field(default=None, gt=0)
@@ -53,6 +75,13 @@ class UpdatePageScriptRequest(BaseModel):
     composition: str
     character_action: str
     dialogue: str
+
+
+class PageCharacterBinding(BaseModel):
+    id: int
+    name: str
+    outline_character_id: int | None = None
+    outfit_variant_id: int | None = None
 
 
 class ScriptPageResponse(BaseModel):
@@ -66,6 +95,11 @@ class ScriptPageResponse(BaseModel):
     scene_id: int | None = None
     scene_key: str | None = None
     character_keys: list[str] = Field(default_factory=list)
+    scene_name: str | None = None
+    reference_subject_id: int | None = None
+    reference_subject_name: str | None = None
+    character_bindings: list[PageCharacterBinding] = Field(default_factory=list)
+    scene_conditions: SceneConditions = Field(default_factory=SceneConditions)
     page_no: int
     summary: str | None
     characters: str | None
@@ -74,7 +108,6 @@ class ScriptPageResponse(BaseModel):
     composition: str | None
     character_action: str | None
     dialogue: str | None
-    image_prompt: str | None
     status: str
     script_review_status: str
     script_review_error: str | None = None
@@ -124,6 +157,7 @@ class ScriptTaskResponse(BaseModel):
     status: str
     mode: str
     total_pages: int
+    scene_definition_version: int = 1
     target_page_no: int | None
     user_requirement: str | None
     section_plan: str | None
@@ -149,6 +183,7 @@ class ScriptSceneResponse(BaseModel):
 
     id: int
     task_id: int
+    scene_definition_version: int = 1
     scene_key: str
     name: str
     location_type: str
@@ -157,8 +192,9 @@ class ScriptSceneResponse(BaseModel):
     weather: str
     environment_details: str
     color_palette: str
-    visual_anchors: str
     negative_constraints: str
+    selected_visual_version_id: int | None = None
+    reference_subject_id: int | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -177,6 +213,7 @@ class ScriptCharacterResponse(BaseModel):
     section_id: int
     section_no: int | None = None
     outline_character_id: int | None = None
+    outfit_variant_id: int | None = None
     character_key: str
     name: str
     section_role: str
@@ -186,7 +223,6 @@ class ScriptCharacterResponse(BaseModel):
     current_state: str
     emotion: str
     temporary_changes: str
-    visual_anchors: str
     negative_constraints: str
     outline_character: dict | None = None
     created_at: datetime

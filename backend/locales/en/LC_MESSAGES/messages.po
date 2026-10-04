@@ -1,9 +1,307 @@
+
 msgid ""
 msgstr ""
 "Project-Id-Version: comaic 0.1.0\n"
-"Content-Type: text/plain; charset=UTF-8\n"
-"Content-Transfer-Encoding: 8bit\n"
+"Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
+"POT-Creation-Date: 2026-10-02 13:57+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
+"Language-Team: en <LL@li.org>\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
 
 msgid "common.internal_error"
 msgstr "The service is temporarily unavailable. Please try again later."
+
+msgid "image_generation.batch_not_found"
+msgstr "The image generation batch was not found."
+
+msgid "image_generation.batch_busy"
+msgstr "This batch is still processing a page. Wait for the current page to finish before continuing."
+
+msgid "image_generation.batch_recovery_unavailable"
+msgstr ""
+"The original image request status could not be confirmed. It was preserved. Check the image "
+"service and its history before continuing."
+
+msgid "image_generation.batch_recovery_unsupported"
+msgstr ""
+"This image service cannot query submitted requests, so automatic continuation is unavailable. "
+"Check the original request result first."
+
+msgid "image_generation.batch_configuration_mismatch"
+msgstr "The tool, mode, seed strategy, and candidate count cannot change while continuing a batch."
+
+msgid "consistency.runtime_not_ready"
+msgstr "ViStoryBench dependencies, weights, or CUDA are not ready."
+
+msgid "consistency.threshold_invalid"
+msgstr "The consistency gate thresholds are invalid."
+
+msgid "consistency.batch_not_found"
+msgstr "The image generation batch was not found."
+
+msgid "consistency.batch_legacy"
+msgstr "The legacy generation record has no reliable track identity. Generate a new FINAL batch."
+
+msgid "consistency.final_required"
+msgstr "Only FINAL image generation batches can be evaluated for release."
+
+msgid "consistency.batch_not_complete"
+msgstr "The image generation batch is not complete."
+
+msgid "consistency.script_task_not_found"
+msgstr "The script task was not found."
+
+msgid "consistency.script_pages_incomplete"
+msgstr "The script task page range is incomplete."
+
+msgid "consistency.no_complete_track"
+msgstr "No candidate track covers every page."
+
+msgid "consistency.character_binding_missing"
+msgstr "A page character cannot be traced to an outline character."
+
+msgid "consistency.characters_missing"
+msgstr "The script task has no structured character bindings."
+
+msgid "consistency.reference_missing"
+msgstr "An on-stage character is missing an approved local identity reference."
+
+msgid "consistency.generated_file_missing"
+msgstr "A local candidate-track image is missing."
+
+msgid "consistency.reference_file_missing"
+msgstr "A character reference image is missing."
+
+msgid "consistency.generated_hash_mismatch"
+msgstr "A generated candidate image has changed."
+
+msgid "consistency.reference_hash_mismatch"
+msgstr "A character reference image has changed."
+
+msgid "consistency.task_not_found"
+msgstr "The consistency evaluation task was not found."
+
+msgid "consistency.track_not_found"
+msgstr "The consistency candidate track was not found."
+
+msgid "consistency.track_not_passed"
+msgstr "Only a passed consistency track can be adopted."
+
+msgid "consistency.result_stale"
+msgstr "The consistency result is stale. Evaluate again."
+
+msgid "consistency.comfyui_busy_timeout"
+msgstr "Timed out waiting for the ComfyUI queue to become idle."
+
+msgid "consistency.evaluation_failed"
+msgstr "The ViStoryBench consistency evaluation failed."
+
+msgid "consistency.worker_result_missing"
+msgstr "The evaluator did not return a result for this candidate track."
+
+msgid "consistency.runtime_interrupted"
+msgstr "The consistency evaluation was interrupted by a service restart. Submit it again."
+
+msgid "character_reference.character_not_found"
+msgstr "The character baseline was not found."
+
+msgid "character_reference.task_not_found"
+msgstr "The reference image generation task was not found."
+
+msgid "character_reference.tool_not_found"
+msgstr "The image-generation tool was not found."
+
+msgid "character_reference.style_not_approved"
+msgstr "The selected style is missing, unapproved, or belongs to another project."
+
+msgid "character_reference.txt2img_required"
+msgstr "The selected tool does not support text-to-image generation."
+
+msgid "character_reference.tool_invalid"
+msgstr "The selected image-generation tool is incomplete."
+
+msgid "character_reference.candidate_count_invalid"
+msgstr "The number of candidate reference images per role must be between 1 and 4."
+
+msgid "character_reference.prompts_invalid"
+msgstr "Face and full-body prompts must both be valid."
+
+msgid "character_reference.task_state_invalid"
+msgstr "The task is not in a state that allows this operation."
+
+msgid "character_reference.no_image"
+msgstr "The image-generation tool returned no reference image."
+
+msgid "character_reference.partial_failure"
+msgstr "Some reference images failed; continue to fill the missing images."
+
+msgid "character_reference.candidate_incomplete"
+msgstr "The selected candidate reference images are not complete yet."
+
+msgid "character_reference.already_approved"
+msgstr "Another reference image set from this task has already been confirmed."
+
+msgid "character_reference.image_not_found"
+msgstr "The candidate reference image was not found."
+
+msgid "character_reference.image_missing"
+msgstr "The candidate reference image file is missing."
+
+msgid "character_reference.invalid_image"
+msgstr "The image-generation tool returned an invalid image file."
+
+msgid "character_reference.runtime_interrupted"
+msgstr "Reference image generation was interrupted by a service restart and can be continued."
+
+msgid "reference.project_not_found"
+msgstr "The project was not found."
+
+msgid "reference.subject_not_found"
+msgstr "The reference subject was not found."
+
+msgid "reference.subject_type_invalid"
+msgstr "Choose a character, scene, or object reference category."
+
+msgid "reference.subject_invalid"
+msgstr "Enter a valid reference name and key."
+
+msgid "reference.subject_key_exists"
+msgstr "This reference key already exists."
+
+msgid "reference.scene_not_found"
+msgstr "The script scene was not found."
+
+msgid "reference.owner_invalid"
+msgstr "The reference owner does not match the project and category."
+
+msgid "reference.outfit_invalid"
+msgstr "Choose an active outfit belonging to this character."
+
+msgid "reference.roles_invalid"
+msgstr "Choose distinct reference roles belonging to this category."
+
+msgid "reference.sources_invalid"
+msgstr "Input references must be approved assets from this project."
+
+msgid "reference.prompts_invalid"
+msgstr "Provide a valid prompt for every selected reference role."
+
+msgid "reference.tool_capability_missing"
+msgstr "The selected tool cannot apply these inputs; choose another tool or adjust the input."
+
+msgid "reference.input.capacity_exceeded"
+msgstr "The reference image count exceeds the tool capacity. Reduce the inputs or choose another tool."
+
+msgid "reference.input.canvas_required"
+msgstr "This tool requires an explicit editing canvas. Choose an original image first."
+
+msgid "reference.input.file_unavailable"
+msgstr "The original reference file is unavailable. Upload it again or choose another image."
+
+msgid "reference.input.file_changed"
+msgstr "The original image file changed. Confirm the image again and create a new task."
+
+msgid "reference.input.configuration_invalid"
+msgstr "The tool reference image configuration is incomplete. Check the tool settings."
+
+msgid "reference.auto.text_only_tool"
+msgstr "This tool has no available image input. This request uses text only."
+
+msgid "reference.auto.text_only_no_face"
+msgstr "No approved face reference is available. This request uses text only."
+
+msgid "image_spec.continuity_timeout"
+msgstr ""
+"Continuity extraction exceeded the {seconds}-second total limit. Compilation stopped; please "
+"retry."
+
+msgid "reference.size_invalid"
+msgstr "Reference dimensions must be multiples of 32 between 256 and 2048 pixels, for selected roles only."
+
+msgid "reference.size_unsupported"
+msgstr "This tool does not bind both width and height. Choose a tool that supports custom dimensions."
+
+msgid "reference.size_mismatch"
+msgstr "The generated dimensions differ from the requested size. Check the tool's size configuration."
+
+msgid "outline.characters_invalid"
+msgstr ""
+"Character extraction did not pass entity classification and settings validation. This outline "
+"update was not saved. Please try again."
+
+msgid "visual.configuration_delete_requires_draft"
+msgstr "Only drafts can be deleted. Keep approved or archived versions in the archive."
+
+msgid "visual.configuration_deleted"
+msgstr "This setting draft was deleted and its status cannot be changed."
+
+msgid "reference.batch_invalid"
+msgstr "Select between 1 and 100 reference subjects."
+
+msgid "reference.batch_duplicate"
+msgstr "Each subject can only be selected once per batch."
+
+msgid "reference.profile_model_missing"
+msgstr "Configure a valid language model and API key in Settings before preparing a visual summary."
+
+msgid "reference.profile_extraction_failed"
+msgstr "Visual extraction failed. Your previous preview is preserved; retry preparation."
+
+msgid "reference.profile_empty"
+msgstr "No visual facts are available for this view. Check the source and visual summary."
+
+msgid "reference.profile_stale"
+msgstr "The visual summary or its source changed. Prepare the preview again."
+
+msgid "reference.profile_conflict"
+msgstr "The visual summary was updated by another operation. Prepare it again."
+
+msgid "reference.profile_invalid"
+msgstr "Invalid visual summary. Keep source evidence, English descriptions and valid views."
+
+msgid "reference.profile_not_found"
+msgstr "Visual summary not found. Prepare it again."
+
+msgid "reference.profile_rebuilt"
+msgstr "The source or extraction format changed; the visual summary was rebuilt."
+
+msgid "image_spec.continuity_retired"
+msgstr ""
+"Cross-page continuity event editing is retired. Update the page script or visual settings and "
+"prepare prompts again. Historical records remain available."
+
+msgid "visual.configuration_apply_target_invalid"
+msgstr "The application target does not match these settings. Reopen the editor."
+
+msgid "visual.configuration_binding_changed"
+msgstr "The current version for this character or scene has changed. Reopen the editor before applying."
+
+msgid "image_generation.page_scope_invalid"
+msgstr "Select valid pages from the current script task."
+
+msgid "consistency.track_not_ready"
+msgstr "This candidate set has not finished evaluation."
+
+msgid "script.scene_required"
+msgstr "Choose a scene linked to this page."
+
+msgid "script.scene_binding_invalid"
+msgstr "Choose a valid scene in this project and script batch."
+
+msgid "script.character_binding_invalid"
+msgstr "Choose distinct characters in this section."
+
+msgid "script.edit_running"
+msgstr "Wait until script generation finishes or is suspended before editing."
+
+msgid "settings.prompt_empty"
+msgstr "Task system prompts cannot be empty."
+
+msgid "settings.prompt_model_invalid"
+msgstr "Select a model in the current API configuration."

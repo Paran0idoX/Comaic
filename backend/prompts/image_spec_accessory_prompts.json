@@ -1,0 +1,8 @@
+{
+  "accessory_description": "Their fixed accessories are {description}. Show one and only one physical instance of each named accessory in the entire image; preserve each object's actual position and attachment described for this shot without creating extra copies.",
+  "held_chain": "In this shot, the currently hand-held accessory appears only in that hand at the end of its still-attached chain.",
+  "empty_chest": "Its normal chest resting position is completely empty, with no second copy there.",
+  "lifted_chest_zh": "当前由一只手托起且挂链仍连接",
+  "lifted_chest_en": "currently lifted by one hand while its chain remains attached",
+  "pocket_watch_negative_tags": "(second pocket watch:1.7), (multiple pocket watches:1.7)"
+}

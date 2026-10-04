@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import InfoTip from '@/components/workspace/InfoTip.vue'
 import { Promotion } from '@element-plus/icons-vue'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
@@ -13,6 +14,7 @@ export type ConversationMessage = {
 const props = defineProps<{
   messages: ConversationMessage[]
   threadId: string
+  loading: boolean
   streaming: boolean
   disabled: boolean
 }>()
@@ -94,7 +96,7 @@ watch(messageScrollKey, () => {
 })
 
 onMounted(() => {
-  panelHeight.value = clampHeight(window.innerHeight - 170)
+  panelHeight.value = clampHeight(window.innerHeight - 272)
   void scrollToBottom()
 })
 
@@ -104,14 +106,18 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="conversation-panel panel" :style="panelStyle">
+  <section
+    v-loading="loading"
+    class="conversation-panel panel"
+    :style="panelStyle"
+    :aria-busy="loading"
+  >
     <header class="conversation-panel__header">
       <div>
-        <h3>{{ t('outline.conversation.title') }}</h3>
-        <p>{{ t('outline.conversation.description') }}</p>
+        <div class="title-with-info"><h3>{{ t('outline.conversation.title') }}</h3><InfoTip :content="t('outline.conversation.description')" :label="t('outline.conversation.title')" /></div>
       </div>
-      <el-tag type="info" effect="plain">
-        {{ threadId || t('outline.conversation.noThread') }}
+      <el-tag v-if="loading" type="info" effect="plain" aria-live="polite">
+        {{ t('outline.conversation.loadingSession') }}
       </el-tag>
     </header>
 
@@ -119,7 +125,9 @@ onBeforeUnmount(() => {
       <div class="conversation-panel__messages">
         <el-empty
           v-if="messages.length === 0"
-          :description="t('outline.conversation.empty')"
+          :description="
+            loading ? t('outline.conversation.loadingDescription') : t('outline.conversation.empty')
+          "
         />
         <div
           v-for="message in messages"
@@ -150,9 +158,8 @@ onBeforeUnmount(() => {
         @keydown.enter.exact.prevent="sendMessage"
       />
       <div class="conversation-panel__composer-actions">
-        <el-text type="info">
-          {{ streaming ? t('outline.conversation.streamingHint') : t('outline.conversation.readyHint') }}
-        </el-text>
+        <el-text v-if="streaming" type="info" role="status">{{ t('outline.conversation.streamingHint') }}</el-text>
+        <InfoTip v-else :content="t('outline.conversation.readyHint')" :label="t('outline.conversation.send')" />
         <el-button
           class="ai-gradient-button"
           type="primary"
@@ -178,6 +185,7 @@ onBeforeUnmount(() => {
 .conversation-panel {
   position: relative;
   display: flex;
+  min-width: 0;
   min-height: 620px;
   flex-direction: column;
 }
@@ -204,6 +212,21 @@ onBeforeUnmount(() => {
 .conversation-panel__header p {
   margin-top: 6px;
   color: var(--text-soft);
+}
+
+.conversation-panel__header > div {
+  min-width: 0;
+}
+
+.conversation-panel__header :deep(.el-tag) {
+  max-width: 48%;
+  flex: 0 1 auto;
+}
+
+.conversation-panel__header :deep(.el-tag__content) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .conversation-panel__body {
@@ -287,5 +310,28 @@ onBeforeUnmount(() => {
 :global(body.is-resizing-conversation) {
   cursor: ns-resize;
   user-select: none;
+}
+
+@media (max-width: 640px) {
+  .conversation-panel__header {
+    align-items: stretch;
+    flex-direction: column;
+    padding: 18px;
+  }
+
+  .conversation-panel__header :deep(.el-tag) {
+    max-width: 100%;
+    align-self: flex-start;
+  }
+
+  .conversation-panel__messages,
+  .conversation-panel__composer {
+    padding-right: 18px;
+    padding-left: 18px;
+  }
+
+  .conversation-panel__composer-actions {
+    align-items: flex-start;
+  }
 }
 </style>

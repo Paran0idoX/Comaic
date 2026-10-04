@@ -1,14 +1,17 @@
 import type { ScriptTask } from './scripts'
 import { ApiError, apiHeaders, normalizeBackendError, parseApiErrorResponse } from './errors'
 
-export type ComfyWorkflowPreset = {
+export type ImageGenerationTool = {
   id: number
   name: string
-  kind: 'comfyui' | 'openai_images_compatible'
+  provider: 'comfyui' | 'openai_images_compatible'
+  prompt_type: 'tag' | 'natural_language' | 'hybrid'
   description: string | null
   comfy_base_url: string | null
   workflow_json: string | null
   is_default: boolean
+  capabilities: { features?: string[]; limits?: Record<string, number>; reference_images?: { max_images: number; label_format: 'image_N' | 'picture_N' | 'bracket_N'; requires_canvas: boolean; transport: 'none' | 'multipart' | 'json_data_url'; edit_endpoint_path?: string | null; image_field_name: string } }
+  bindings: { schema_version?: number; bindings?: Array<{ source: string; node_id: string; input_name: string }>; reference_slots?: Array<{ node_id: string; input_name: string; disconnect: Array<{ node_id: string; input_name: string }> }> }
   positive_node_id: string | null
   positive_input_name: string | null
   negative_node_id: string | null
@@ -28,11 +31,14 @@ export type ComfyWorkflowPreset = {
   updated_at: string
 }
 
-export type ComfyWorkflowPresetPayload = {
+export type ImageGenerationToolPayload = {
   name: string
-  kind: 'comfyui' | 'openai_images_compatible'
+  provider: 'comfyui' | 'openai_images_compatible'
+  prompt_type: 'tag' | 'natural_language' | 'hybrid'
   description?: string | null
   is_default: boolean
+  capabilities?: Record<string, unknown>
+  bindings?: Record<string, unknown>
   comfy_base_url?: string | null
   workflow_json?: string | null
   positive_node_id?: string | null
@@ -55,6 +61,8 @@ export type ComfyWorkflowPresetPayload = {
 export type GeneratedImage = {
   id: number
   page_id: number
+  generation_run_id: number | null
+  artifact_index: number
   image_url: string | null
   local_path: string | null
   seed: number | null
@@ -62,6 +70,9 @@ export type GeneratedImage = {
   prompt: string | null
   negative_prompt: string | null
   score: number | null
+  sha256: string | null
+  width: number | null
+  height: number | null
   is_selected: boolean
   created_at: string
 }
@@ -69,29 +80,80 @@ export type GeneratedImage = {
 export type ImageGenerationPage = {
   page_id: number
   page_no: number
-  image_prompt: string | null
+  prompt_type: 'tag' | 'natural_language' | 'hybrid' | null
+  positive_prompt: string | null
   status: string
   selected_image_id: number | null
+  latest_spec_id: number | null
+  spec_stale?: boolean
+  spec_warnings: Array<{ code?: string; message?: string }>
+  completed_candidates: number
   images: GeneratedImage[]
 }
 
 export type GenerateImagesPayload = {
+  width?: number
+  height?: number
+  page_ids?: number[]
   tool_preset_id: number
   poll_interval_seconds: number
+  wait_timeout_seconds: number
   candidates_per_page: number
-  negative_prompt?: string | null
+  seed_strategy: 'per_page' | 'shared_candidate'
+}
+
+export type GenerationRun = {
+  id: number
+  generation_task_id: number
+  batch_task_id: number | null
+  page_id: number
+  image_spec_id: number
+  tool_preset_id: number
+  provider: 'comfyui' | 'openai_images_compatible'
+  prompt_type: 'tag' | 'natural_language' | 'hybrid'
+  candidate_index: number
+  seed: number | null
+  seed_applied: boolean
+  seed_strategy: string
+  generation_mode: string
+  status: string
+  external_request_id: string | null
+  workflow: Record<string, unknown> | null
+  workflow_hash: string | null
+  bindings: Record<string, unknown>
+  resolved_assets: unknown[]
+  degradations: unknown[]
+  applied_spec: Record<string, unknown>
+  error_code: string | null
+  error_message: string | null
+  created_at: string
+  updated_at: string
+  finished_at: string | null
 }
 
 export type GenerationTask = {
   id: number
   project_id: number
   page_id: number | null
+  script_task_id: number | null
+  tool_preset_id: number | null
+  parent_task_id: number | null
+  task_kind: 'legacy' | 'batch' | 'page'
+  generation_mode: 'preview' | 'final' | null
+  seed_strategy: 'per_page' | 'shared_candidate' | null
+  candidate_count: number
   comfy_prompt_id: string | null
   status: string
   batch_size: number
   error_message: string | null
   created_at: string
   updated_at: string
+  progress?: {
+    completed_candidates: number
+    images_count: number
+    latest_image_id: number | null
+    active_runs: number
+  } | null
 }
 
 type SseEvent = {
@@ -121,36 +183,51 @@ const requestJson = async <T>(url: string, options: RequestInit = {}): Promise<T
   return (await response.json()) as T
 }
 
-export const listComfyWorkflows = async (): Promise<ComfyWorkflowPreset[]> => {
-  const result = await requestJson<{ items: ComfyWorkflowPreset[] }>('/api/image-generation/tools')
+export const listImageGenerationTools = async (): Promise<ImageGenerationTool[]> => {
+  const result = await requestJson<{ items: ImageGenerationTool[] }>('/api/image-generation/tools')
   return result.items
 }
 
-export const createComfyWorkflow = (
-  payload: ComfyWorkflowPresetPayload,
-): Promise<ComfyWorkflowPreset> =>
-  requestJson<ComfyWorkflowPreset>('/api/image-generation/tools', {
+export const createImageGenerationTool = (
+  payload: ImageGenerationToolPayload,
+): Promise<ImageGenerationTool> =>
+  requestJson<ImageGenerationTool>('/api/image-generation/tools', {
     method: 'POST',
     body: JSON.stringify(payload),
   })
 
-export const updateComfyWorkflow = (
-  workflowId: number,
-  payload: ComfyWorkflowPresetPayload,
-): Promise<ComfyWorkflowPreset> =>
-  requestJson<ComfyWorkflowPreset>(`/api/image-generation/tools/${workflowId}`, {
+export const updateImageGenerationTool = (
+  toolId: number,
+  payload: ImageGenerationToolPayload,
+): Promise<ImageGenerationTool> =>
+  requestJson<ImageGenerationTool>(`/api/image-generation/tools/${toolId}`, {
     method: 'PUT',
     body: JSON.stringify(payload),
   })
 
-export const deleteComfyWorkflow = (workflowId: number): Promise<void> =>
-  requestJson<void>(`/api/image-generation/tools/${workflowId}`, {
+export const deleteImageGenerationTool = (toolId: number): Promise<void> =>
+  requestJson<void>(`/api/image-generation/tools/${toolId}`, {
     method: 'DELETE',
   })
 
-export const listImageGenerationPages = async (taskId: number): Promise<ImageGenerationPage[]> => {
+export const listImageGenerationPages = async (
+  taskId: number,
+  options: {
+    promptType?: 'tag' | 'natural_language' | 'hybrid'
+  } = {},
+): Promise<ImageGenerationPage[]> => {
+  const params = new URLSearchParams()
+  if (options.promptType) params.set('prompt_type', options.promptType)
+  const query = params.size ? `?${params.toString()}` : ''
   const result = await requestJson<{ items: ImageGenerationPage[] }>(
-    `/api/image-generation/script-tasks/${taskId}/pages`,
+    `/api/image-generation/script-tasks/${taskId}/pages${query}`,
+  )
+  return result.items
+}
+
+export const listGenerationBatches = async (taskId: number): Promise<GenerationTask[]> => {
+  const result = await requestJson<{ items: GenerationTask[] }>(
+    `/api/image-generation/script-tasks/${taskId}/batches`,
   )
   return result.items
 }
@@ -168,6 +245,9 @@ export const selectGeneratedImage = (
     method: 'POST',
   })
 
+export const getGenerationRun = (runId: number): Promise<GenerationRun> =>
+  requestJson<GenerationRun>(`/api/image-generation/runs/${runId}`)
+
 export const streamGenerateImagesForTask = (
   taskId: number,
   payload: GenerateImagesPayload,
@@ -181,6 +261,13 @@ export const streamContinueImagesForTask = (
   callbacks: ImageGenerationStreamCallbacks,
 ): Promise<void> =>
   streamSse(`/api/image-generation/script-tasks/${taskId}/continue/stream`, payload, callbacks)
+
+export const streamContinueImagesForBatch = (
+  batchTaskId: number,
+  payload: GenerateImagesPayload,
+  callbacks: ImageGenerationStreamCallbacks,
+): Promise<void> =>
+  streamSse(`/api/image-generation/batches/${batchTaskId}/continue/stream`, payload, callbacks)
 
 export const streamGenerateImagesForPage = (
   pageId: number,

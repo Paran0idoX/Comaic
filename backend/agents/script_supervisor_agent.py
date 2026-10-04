@@ -33,7 +33,10 @@ class ScriptSupervisorAgent:
 
         self.llm = llm or self._default_llm()
         self.max_structured_retries = max_structured_retries
-        self.prompt = PromptLoader.load(prompt_name)
+        self.prompt = "\n\n".join([
+            PromptLoader.load_system(prompt_name),
+            PromptLoader.load("script_visual_context_protocol.md"),
+        ])
         logger.info("Initializing ScriptSupervisorAgent prompt=%s", prompt_name)
         self._agent = create_structured_agent(
             model=self.llm,

@@ -2,7 +2,14 @@
 .env
 .env.*
 !.env.example
+!.env.*.example
 !backend/.env.example
+
+# Machine-specific configuration (publish sanitized example templates only)
+*.local
+*.local.*
+!*.local.example
+!*.local.example.*
 
 # Python caches and local environments
 __pycache__/
@@ -13,14 +20,49 @@ __pycache__/
 .venv/
 venv/
 
+# Coverage artifacts
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+coverage/
+
 # Logs
 logs/
 *.log
 
+# Local agent settings and Git history-rewrite artifacts
+/.codex/*
+!/.codex/*.example.*
+/.git-rewrite/
+
+# Local Codex browser, E2E, pytest, and smoke-test artifacts
+/.codex-artifacts/
+/.codex-*.png
+/.codex-*.html
+/.codex-*.py
+/.research-*/
+
 # Local SQLite data and generated assets
-data/
-outputs/*
+/data/*
+!/data/.gitkeep
+/outputs/*
 !outputs/.gitkeep
+*.sqlite3
+*.sqlite
+*.db
+*.sqlite3-wal
+*.sqlite3-shm
+*.sqlite3-journal
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+*.db-wal
+*.db-shm
+*.db-journal
+
+# Local ComfyUI workflows and bindings
+/workflows/
 
 # Node / frontend build artifacts
 node_modules/
@@ -30,6 +72,8 @@ frontend/*.tsbuildinfo
 
 # Editor and OS files
 .DS_Store
+Thumbs.db
+Desktop.ini
 .idea/
 .vscode/*
 !.vscode/extensions.json

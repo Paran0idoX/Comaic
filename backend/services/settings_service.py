@@ -5,7 +5,8 @@ from langchain_core.messages import HumanMessage
 from backend.i18n.errors import AppError
 from backend.llm_clients.factory import LLMConfigInput, create_chat_model, ensure_llm_configs
 from backend.models.comic import LLMConfig
-from backend.models.enums import LLMProvider
+from backend.utils.system_prompt_catalog import model_prompt_overrides, model_prompt_default_files, initial_model_prompt_defaults, default_model_system_prompt
+from backend.models.enums import LLMProvider, SystemPromptKey
 from backend.repositories.comic_repository import ComicRepository, KEEP_EXISTING_VALUE
 
 
@@ -27,6 +28,53 @@ class SettingsService:
         """读取应用级运行设置；不存在时使用默认值初始化。"""
 
         return self.repository.get_app_settings()
+
+    def list_system_prompts(self) -> list[dict]:
+        """展示文件默认值与实际值，覆盖独立保存在本地数据库。"""
+        from backend.utils.prompt_loader import PromptLoader
+        from backend.utils.system_prompt_catalog import SYSTEM_PROMPT_FILES
+
+        overrides = self.repository.get_system_prompt_overrides()
+        items = []
+        for key, filename in SYSTEM_PROMPT_FILES.items():
+            default = PromptLoader.load(filename)
+            content = self.repository.get_system_prompt_content(key)
+            content = content if content is not None else default
+            items.append({"key": key.value, "default_content": default, "content": content,
+                          "is_overridden": key.value in overrides or content != default,
+                          "default_files": [filename]})
+        return items
+
+    def update_system_prompt(self, *, key: SystemPromptKey, content: str | None) -> dict:
+        """任务提示词不能为空；恢复默认不复制文件，便于后续模板维护。"""
+        if content is not None and not content.strip():
+            raise AppError("settings.prompt_empty", status_code=400)
+        from backend.utils.prompt_loader import PromptLoader
+        self.repository.update_system_prompt(key=key.value, content=content,
+            restore_shot_content=PromptLoader.load("shot_planner_prompt.md")
+                if key == SystemPromptKey.SHOT_PLANNER and content is None else None)
+        return next(item for item in self.list_system_prompts() if item["key"] == key.value)
+
+    def list_model_system_prompts(self, *, config_id: int) -> list[dict]:
+        """模型名只在当前 API 组内有效，同名模型的覆盖也彼此独立。"""
+        from backend.utils.system_prompt_catalog import default_model_system_prompt, model_prompt_overrides
+
+        config = self._get_llm_config(config_id)
+        overrides = model_prompt_overrides(config)
+        return [
+            {"key": model, "content": overrides.get(model, default_model_system_prompt(config, model)), "default_content": default_model_system_prompt(config, model),
+             "is_overridden": model in overrides,
+             "default_files": model_prompt_default_files(config, model)}
+            for model in self.model_names_from_config(config)
+        ]
+
+    def update_model_system_prompt(self, *, config_id: int, model: str, content: str | None) -> dict:
+        """空字符串允许关闭全局提示词；None 恢复 Provider 默认行为。"""
+        config = self._get_llm_config(config_id)
+        if model not in self.model_names_from_config(config):
+            raise AppError("settings.prompt_model_invalid", status_code=400)
+        self.repository.update_model_system_prompt(config_id=config_id, model=model, content=content)
+        return next(item for item in self.list_model_system_prompts(config_id=config_id) if item["key"] == model)
 
     def update_app_settings(self, *, script_section_max_concurrency: int):
         """更新应用级运行设置。"""
@@ -59,6 +107,7 @@ class SettingsService:
             provider=provider,
             base_url=self._normalize_base_url(provider=provider, base_url=base_url),
             model_names=json.dumps(normalized_models, ensure_ascii=False),
+            model_system_prompt_defaults_json=initial_model_prompt_defaults(provider, normalized_models),
             default_model=normalized_default,
             api_key=self._optional_text(api_key),
             is_active=is_active,
@@ -90,6 +139,7 @@ class SettingsService:
             provider=provider,
             base_url=self._normalize_base_url(provider=provider, base_url=base_url),
             model_names=json.dumps(normalized_models, ensure_ascii=False),
+            model_system_prompt_defaults_json=initial_model_prompt_defaults(provider, normalized_models),
             default_model=normalized_default,
             api_key=normalized_api_key if normalized_api_key is not None else KEEP_EXISTING_VALUE,
             clear_api_key=clear_api_key,
@@ -139,6 +189,9 @@ class SettingsService:
             ),
             model=self._required_text(effective_model or "", "LLM model"),
             api_key=effective_api_key,
+            global_system_prompt=(model_prompt_overrides(saved_config).get(effective_model,
+                default_model_system_prompt(saved_config, effective_model))
+                if saved_config is not None else None),
         )
         try:
             model_instance = create_chat_model(config)

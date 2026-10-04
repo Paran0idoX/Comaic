@@ -8,17 +8,29 @@
 - 输出分段计划，覆盖从第 1 页到目标总页数的所有页面。
 - 页码范围必须连续，不重叠，不遗漏。
 - 第一段必须从第 1 页开始，最后一段必须结束于目标总页数。
-- 每段需要包含：section_no、page_start、page_end、title、description。
+- 每段需要包含：section_no、page_start、page_end、title、description、page_plan。
 - section_no 从 1 开始递增。
-- description 要说明该段承担的剧情功能和主要内容。
+- description 要说明该段承担的剧情功能和主要内容，并按可独立成画的关键瞬间安排推进节奏。
+- 当前 MVP 每页是一张单一时刻的完整画面；可以表现有动势的动作和多人同时动作，但不能把需要先后发生的动作过程安排在同一页。
+- 在目标页数内分配关键剧情落点；必要的先后变化由不同页面承接，非关键过渡可以省略或在后页用已经形成的结果状态体现，不增加页码、不要求页内分镜。
+- page_plan 逐页包含 page_no、scene_key、beat，覆盖本段 page_start 到 page_end 的每一页，不能遗漏、重复或超出范围。beat 只写该页一个瞬间的核心剧情，不生成详细脚本或对白。
+- 先确定每页实际需要的地点，再列 scenes；page_plan 中每个 scene_key 都必须在本段 scenes 中存在，beat 的地点与该 key 必须一致。不要在 description 中安排 page_plan 无法承载的额外地点。
+- 可复用目录不是全部允许地点的白名单。剧情需要校园外景而目录只有教室、走廊时，必须新增校园地点并填写 reference_subject_key=null，不能一面要求画校园，一面只给 Writer 室内场景。不能把新地点留给 Writer 自行补建。
 - 每段必须包含 scenes：该分段会用到的中心化场景设定列表。
-- 每个 scene 必须包含：scene_key、name、location_type、time_of_day、lighting、weather、environment_details、color_palette、visual_anchors、negative_constraints。
-- scene_key 是同一脚本任务内稳定复用的场景标识；同一地点、同一时间段、同一视觉锚点的场景跨分段出现时必须复用同一个 scene_key。
+- 每个 scene 必须包含：scene_key、reference_subject_key、name、location_type、environment_details、color_palette、negative_constraints。
+- scene 只定义固定地点：建筑、布局、材质、固定陈设、固有颜色和禁止项。不要在名称、key、环境描述、色彩或禁止项里固化天气、时段、光照、剧情氛围、门窗开合或临时物件状态。
+- 不把“固定地点不保存天气/人物/临时物件”的编写范围说明写进 negative_constraints；尤其不能生成“禁止出现任何角色”“禁止出现天气或灯光”“禁止人物私物”等整页禁令。negative_constraints 只写不能改动的固定地点属性，例如露天连廊不能画成封闭室内；没有这种限制时为空。
+- scene_key 是固定地点标识；同一地点的白天/夜晚、晴天/雨天必须复用同一个 scene_key，不得拆成不同场景。这些条件由 Writer 在每页 scene_conditions 中表达。
+- 先检查输入中的固定地点目录；复用地点时 reference_subject_key 必须逐字复制目录 key，固定设定沿用目录内容。新地点 reference_subject_key=null；不根据相似名称合并不同地点。
+- 如果用户消息指定只规划一个目标页，只返回一个 section，section_no=1、page_start=page_end=目标页码；不要规划其它页。
 - 如果剧情需要在两个空间之间切换，分段计划只说明切换顺序，不要要求同一页同时展示两个空间；空间切换应交给相邻页面分别承接。
 - 每段必须包含 characters：该分段会用到的角色细化设定列表。
-- 每个 character 必须包含：character_key、name、section_role、current_hairstyle、current_clothing、current_accessories、current_state、emotion、temporary_changes、visual_anchors、negative_constraints。
+- 每个 character 必须包含：character_key、name、section_role、current_hairstyle、current_clothing、current_accessories、current_state、emotion、temporary_changes、negative_constraints。
 - character_key 必须优先复用“大纲阶段已确认的角色基准设定”中的 key。
-- 大纲角色基准设定中的名称、身份、背景、固定样貌、视觉锚点和禁止项不能被改写。
+- 大纲角色基准设定中的名称、身份、背景、固定样貌和禁止项不能被改写。
 - 大纲角色基准中的默认发型、默认服装、默认配件和默认色彩只是默认值；当前分段可以根据剧情写入 current_* 覆盖。
+- current_hairstyle、current_clothing 与 current_accessories 只描述本段采用的基础造型版本。若基础造型未更换，必须原样沿用大纲默认值；雨水、灰尘、油渍、凌乱、破损、卷袖、手持/收起位置等临时状态统一写入 temporary_changes，不要混入 current_*。
+- 只有剧情明确发生真正换装或增减服装层时，才改写 current_clothing；不要仅因状态或措辞差异制造新的服装版本。
+- current_state、emotion、temporary_changes 只提示本段可能发生的剧情变化，不代表每一页从开头就处于该状态。明确变化发生的阶段，交由 Writer 在对应页面写清当时实际可见的状态；生图阶段不会根据前页自动推演或延续状态。
 - 不要生成具体分页脚本，不要生成对白，不要生成图片 Prompt。
 - 如果输入里包含上一次校验失败原因，请重新输出完整分段计划，不要只修补局部字段。

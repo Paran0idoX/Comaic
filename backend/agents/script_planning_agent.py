@@ -1,4 +1,5 @@
 import logging
+import json
 from typing import Any
 
 from langchain_core.messages import HumanMessage
@@ -27,7 +28,10 @@ class ScriptPlanningAgent:
 
         self.llm = llm or self._default_llm()
         self.max_structured_retries = max_structured_retries
-        self.prompt = PromptLoader.load(prompt_name)
+        self.prompt = "\n\n".join([
+            PromptLoader.load_system(prompt_name),
+            PromptLoader.load("script_visual_context_protocol.md"),
+        ])
         logger.info("Initializing ScriptPlanningAgent prompt=%s", prompt_name)
         self._agent = create_structured_agent(
             model=self.llm,
@@ -44,6 +48,8 @@ class ScriptPlanningAgent:
         outline_characters: list[dict] | None = None,
         user_requirement: str = "",
         feedback: str = "",
+        scene_catalog: list[dict] | None = None,
+        target_page_no: int | None = None,
     ) -> list[dict]:
         """生成完整分段计划和每段视觉设定；校验和保存由 Service 负责。"""
 
@@ -65,6 +71,8 @@ class ScriptPlanningAgent:
                         outline_characters=outline_characters or [],
                         user_requirement=user_requirement,
                         feedback=feedback,
+                        scene_catalog=scene_catalog or [],
+                        target_page_no=target_page_no,
                     )
                 )
             ],
@@ -79,15 +87,15 @@ class ScriptPlanningAgent:
 
     @staticmethod
     def _validate_response(response: StoryPacingResponse) -> None:
-        """分段规划至少需要返回分段、场景和角色；连续性由 Service 校验。"""
+        """规划必须有分段和场景；无人分段的角色列表允许为空。"""
 
         if not response.sections:
             raise ValueError("ScriptPlanningAgent structured_response contains no sections.")
         for section in response.sections:
             if not section.scenes:
                 raise ValueError(f"section {section.section_no} contains no scenes.")
-            if not section.characters:
-                raise ValueError(f"section {section.section_no} contains no characters.")
+            if not section.page_plan:
+                raise ValueError(f"section {section.section_no} contains no page_plan.")
 
     @staticmethod
     def _build_input(
@@ -97,6 +105,8 @@ class ScriptPlanningAgent:
         outline_characters: list[dict],
         user_requirement: str,
         feedback: str,
+        scene_catalog: list[dict] | None = None,
+        target_page_no: int | None = None,
     ) -> str:
         """构造规划输入；feedback 用于校验失败后的完整重试。"""
 
@@ -108,7 +118,11 @@ class ScriptPlanningAgent:
             format_outline_characters(outline_characters),
             "用户补充要求：",
             user_requirement or "无",
+            "可复用的固定地点目录（reference_subject_key 只能逐字选择 key，或新地点填写 null）：",
+            json.dumps(scene_catalog or [], ensure_ascii=False),
         ]
+        if target_page_no is not None:
+            parts.append(f"本轮只规划第 {target_page_no} 页：仅返回一个 section，section_no=1，page_start=page_end={target_page_no}，不划分整部漫画节奏。")
         if feedback:
             parts.extend(
                 [
