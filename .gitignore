@@ -29,6 +29,9 @@ data/
 outputs/*
 !outputs/.gitkeep
 
+# Local ComfyUI workflows and bindings
+/workflows/
+
 # Node / frontend build artifacts
 node_modules/
 frontend/node_modules/
