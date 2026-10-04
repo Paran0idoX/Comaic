@@ -1,4 +1,4 @@
-"""基于 ViStoryBench 的候选轨道一致性评估与准出编排。"""
+"""基于 ViStoryBench 的旁路一致性评测，不限制人工选图。"""
 
 from __future__ import annotations
 
@@ -30,7 +30,6 @@ from backend.models.comic import (
 from backend.models.enums import (
     ConsistencyEvaluationStatus,
     ConsistencyTrackStatus,
-    GenerationMode,
     GenerationRunStatus,
     GenerationTaskStatus,
     ImageGenerationProvider,
@@ -57,7 +56,7 @@ THRESHOLD_FIELDS = (
 
 
 class ConsistencyEvaluationService:
-    """组装严格输入清单、执行官方指标并管理准出状态。"""
+    """检查评测自身的输入并执行官方指标，阈值仅供参考。"""
 
     def __init__(
         self,
@@ -295,13 +294,13 @@ class ConsistencyEvaluationService:
                 debug_message=f"ConsistencyEvaluationTrack not found: {track_id}",
             )
         if (
-            not track.passed
+            track.status not in {ConsistencyTrackStatus.PASSED, ConsistencyTrackStatus.FAILED}
             or track.task.status != ConsistencyEvaluationStatus.SUCCEEDED
         ):
             raise AppError(
-                code="consistency.track_not_passed",
+                code="consistency.track_not_ready",
                 status_code=409,
-                debug_message=f"Consistency track has not passed: {track_id}",
+                debug_message=f"Consistency track has not been evaluated: {track_id}",
             )
         current = self.batch_readiness(track.task.batch_task_id, include_runtime=False)
         if not current["ready"] or current["source_hash"] != track.task.source_hash:
@@ -313,36 +312,22 @@ class ConsistencyEvaluationService:
         return self.repository.adopt_track(track_id)
 
     def script_gate(self, script_task_id: int) -> dict[str, Any]:
-        if self.comic_repository.get_script_task(script_task_id) is None:
+        """兼容历史准出查询；完成条件只看人工选图，不依赖评测分数。"""
+
+        script_task = self.comic_repository.get_script_task(script_task_id)
+        if script_task is None:
             raise AppError(
                 code="consistency.script_task_not_found",
                 status_code=404,
                 debug_message=f"ScriptGenerationTask not found: {script_task_id}",
             )
         pages = self.comic_repository.list_script_task_pages(script_task_id)
-        selected = {str(page.id): page.selected_image_id for page in pages}
-        for batch in self.comic_repository.list_generation_batches(script_task_id):
-            for task in self.repository.list_batch_tasks(batch.id):
-                if task.status != ConsistencyEvaluationStatus.SUCCEEDED:
-                    continue
-                for track in task.tracks:
-                    if not track.passed or json.loads(track.image_ids_json) != selected:
-                        continue
-                    # 只有当前人工选择恰好命中一条通过轨道时，才做较昂贵的
-                    # 文件哈希与参考资产新鲜度复核，避免历史批次越多查询越慢。
-                    current = self.batch_readiness(batch.id, include_runtime=False)
-                    if current["ready"] and current["source_hash"] == task.source_hash:
-                        return {
-                            "passed": True,
-                            "script_task_id": script_task_id,
-                            "batch_task_id": batch.id,
-                            "evaluation_task_id": task.id,
-                            "track_id": track.id,
-                            "candidate_index": track.candidate_index,
-                            "source_hash": task.source_hash,
-                        }
         return {
-            "passed": False,
+            "passed": (
+                {page.page_no for page in pages} == set(range(1, script_task.total_pages + 1))
+                and bool(pages)
+                and all(page.selected_image_id is not None for page in pages)
+            ),
             "script_task_id": script_task_id,
             "batch_task_id": None,
             "evaluation_task_id": None,
@@ -374,12 +359,6 @@ class ConsistencyEvaluationService:
                 )
             )
             return None
-        if batch.generation_mode != GenerationMode.FINAL:
-            errors.append(
-                self._issue(
-                    "consistency.final_required", "Only FINAL batches can be evaluated."
-                )
-            )
         if batch.status != GenerationTaskStatus.SUCCEEDED:
             errors.append(
                 self._issue(
@@ -410,7 +389,6 @@ class ConsistencyEvaluationService:
             run
             for run in self.generation_repository.list_batch_runs(batch.id)
             if run.status == GenerationRunStatus.SUCCEEDED
-            and run.generation_mode == GenerationMode.FINAL
         ]
         latest_runs: dict[tuple[int, int], GenerationRun] = {}
         for run in runs:
@@ -538,7 +516,7 @@ class ConsistencyEvaluationService:
                     "vistorybench_tag": self._vistorybench_tag(
                         character.visual_type.value
                     ),
-                    "prompt": character.appearance or character.visual_anchors,
+                    "prompt": character.appearance,
                     "references": references,
                 }
             )

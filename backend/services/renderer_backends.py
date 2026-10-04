@@ -65,7 +65,7 @@ class ComfyUIBackend:
         self.preset = preset
         self.client = (
             ComfyUIClient(preset.comfy_base_url)
-            if preset.comfy_base_url
+            if preset.comfy_base_url and preset.comfy_base_url != getattr(default_client, "base_url", None)
             else default_client
         )
         self.compiler = WorkflowCompiler()
@@ -111,12 +111,16 @@ class ComfyUIBackend:
             self.client.queue_prompt,
             compiled.workflow,
         )
+        # 保存实际使用的地址，默认环境地址日后变化也不能把恢复查询发往另一台服务。
+        if getattr(self.client, "base_url", None):
+            compiled.applied_spec.setdefault("renderer_config", {})["comfy_base_url"] = self.client.base_url
         return RendererSubmission(
             external_id=external_id,
             applied_spec=compiled.applied_spec,
             workflow=compiled.workflow,
             workflow_hash=canonical_hash(compiled.workflow),
-            degradations=compiled.degradations,
+            # 容量裁减与预览缺图也进入运行摘要，避免界面把少传的参考图显示为完整应用。
+            degradations=compiled.degradations + (applied_spec.get("reference_inputs") or {}).get("degradations", []),
             seed_applied=any(
                 item.source == "render.seed"
                 for item in bindings.bindings
@@ -136,9 +140,7 @@ class ComfyUIBackend:
                 self.client.get_history,
                 submission.external_id,
             )
-            images = self.client.extract_output_images(history, submission.external_id)
-            if images:
-                break
+            # 工作流失败时 history 仍可能带有参考预览或部分产物，不能把它们当作成功结果。
             execution_error = self.client.extract_execution_error(
                 history,
                 submission.external_id,
@@ -152,6 +154,9 @@ class ComfyUIBackend:
                         f"{execution_error}"
                     ),
                 )
+            images = self.client.extract_output_images(history, submission.external_id)
+            if images:
+                break
             remaining = deadline - monotonic()
             if remaining <= 0:
                 raise AppError(
@@ -312,6 +317,9 @@ class OpenAIImagesBackend:
             if protected.intersection(extra):
                 raise ValueError("Extra API body cannot override frozen prompt, images, model or seed")
             body.update(extra)
+        if spec.get("render", {}).get("width") and spec.get("render", {}).get("height"):
+            # 本次参考图的冻结尺寸优先于工具的扩展 body，避免静默覆盖用户输入。
+            body["size"] = f"{spec['render']['width']}x{spec['render']['height']}"
         if preset.seed_field_name:
             body[preset.seed_field_name] = seed
         negative = spec.get("prompt", {}).get("negative")

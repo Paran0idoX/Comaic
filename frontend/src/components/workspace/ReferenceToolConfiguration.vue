@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import InfoTip from '@/components/workspace/InfoTip.vue'
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 
@@ -20,8 +21,8 @@ const update = (key: string, next: unknown) => {
 
 <template>
   <el-collapse class="reference-tool">
-    <el-collapse-item :title="t('referenceInputs.planned')" name="references">
-      <p>{{ t('toolReference.helpTransport') }}</p>
+    <el-collapse-item name="references">
+      <template #title><span class="field-with-info">{{ t('toolReference.title') }}<InfoTip :content="t('toolReference.helpTransport')" :label="t('toolReference.title')" /></span></template>
       <div class="reference-tool-grid">
         <el-form-item :label="t('toolReference.maxImages')"><el-input-number :model-value="value.max_images ?? 0" :min="0" :max="100" @update:model-value="update('max_images', $event)" /></el-form-item>
         <el-form-item :label="t('toolReference.labelFormat')">
@@ -40,7 +41,7 @@ const update = (key: string, next: unknown) => {
           <el-form-item :label="t('toolReference.imageField')"><el-input :model-value="value.image_field_name ?? 'image[]'" @update:model-value="update('image_field_name', $event)" /></el-form-item>
         </template>
       </div>
-      <p v-if="provider === 'comfyui'">{{ t('toolReference.helpSlots') }}</p>
+      <p v-if="provider === 'comfyui'" class="title-with-info">{{ t('toolReference.slots') }}<InfoTip :content="t('toolReference.helpSlots')" :label="t('toolReference.slots')" /></p>
     </el-collapse-item>
   </el-collapse>
 </template>

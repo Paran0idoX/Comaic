@@ -3,6 +3,7 @@ import { ArrowRight, Check, Clock, Warning } from '@element-plus/icons-vue'
 import type { RouteLocationRaw } from 'vue-router'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
+import InfoTip from '@/components/workspace/InfoTip.vue'
 
 export type ReadinessItem = {
   key: string
@@ -38,12 +39,12 @@ const iconFor = (status: ReadinessItem['status']) => {
 <template>
   <section class="workflow-readiness panel" aria-live="polite">
     <header class="workflow-readiness__header">
-      <div>
+      <div class="title-with-info">
         <h2>{{ title }}</h2>
-        <p>{{ description }}</p>
+        <InfoTip :content="description" :label="title" />
       </div>
     </header>
-    <div class="workflow-readiness__items">
+    <div class="workflow-readiness__items" :class="{ 'workflow-readiness__items--balanced': items.length === 4 }">
       <article
         v-for="item in items"
         :key="item.key"
@@ -53,8 +54,7 @@ const iconFor = (status: ReadinessItem['status']) => {
         <el-icon class="workflow-readiness__icon"><component :is="iconFor(item.status)" /></el-icon>
         <div class="workflow-readiness__copy">
           <strong>{{ item.label }}</strong>
-          <small v-if="item.status !== 'info'" class="workflow-readiness__status">{{ t(statusKey(item.status)) }}</small>
-          <span v-if="item.status === 'info' || item.detail !== t(statusKey(item.status))">{{ item.detail }}</span>
+          <span>{{ item.detail || t(statusKey(item.status)) }}</span>
         </div>
         <el-button
           v-if="item.to && item.actionLabel"
@@ -71,12 +71,14 @@ const iconFor = (status: ReadinessItem['status']) => {
 </template>
 
 <style scoped>
-.workflow-readiness {
+.workflow-readiness.panel {
+  container-type: inline-size;
+  padding: 0;
   overflow: hidden;
 }
 
 .workflow-readiness__header {
-  padding: 12px 16px 8px;
+  padding: 16px 18px 12px;
 }
 
 .workflow-readiness__header h2,
@@ -96,11 +98,13 @@ const iconFor = (status: ReadinessItem['status']) => {
 
 .workflow-readiness__items {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr));
   gap: 1px;
   border-top: 1px solid var(--panel-border);
   background: var(--panel-border);
 }
+
+.workflow-readiness__items--balanced { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 
 .workflow-readiness__item {
   display: grid;
@@ -108,8 +112,16 @@ const iconFor = (status: ReadinessItem['status']) => {
   align-items: center;
   gap: 10px;
   min-width: 0;
-  padding: 10px 12px;
+  padding: 14px 16px;
   background: #fff;
+}
+
+@container (max-width: 900px) {
+  .workflow-readiness__items--balanced { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@container (max-width: 440px) {
+  .workflow-readiness__items { grid-template-columns: minmax(0, 1fr); }
 }
 
 .workflow-readiness__item .el-button {

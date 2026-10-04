@@ -60,6 +60,24 @@ class ComfyUIClient:
 
         return not payload.get("queue_running") and not payload.get("queue_pending")
 
+    @staticmethod
+    def queued_prompt_ids(payload: dict[str, Any]) -> set[str]:
+        """严格读取队列中的请求 ID；异常响应不能被解释成队列空闲。"""
+
+        result: set[str] = set()
+        for key in ("queue_running", "queue_pending"):
+            entries = payload.get(key) if isinstance(payload, dict) else None
+            if not isinstance(entries, list):
+                raise ValueError("ComfyUI queue response is incomplete.")
+            for entry in entries:
+                if (
+                    not isinstance(entry, (list, tuple)) or len(entry) < 2
+                    or not isinstance(entry[1], str) or not entry[1]
+                ):
+                    raise ValueError("ComfyUI queue entry is invalid.")
+                result.add(str(entry[1]))
+        return result
+
     def upload_image(
         self,
         *,

@@ -118,6 +118,7 @@ export type ConsistencyEvaluationTask = {
 
 export type ConsistencyGate = {
   passed: boolean
+  evaluation_required: boolean
   script_task_id: number
   batch_task_id: number | null
   evaluation_task_id: number | null

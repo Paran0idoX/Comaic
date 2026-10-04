@@ -85,17 +85,20 @@ export type ImageGenerationPage = {
   status: string
   selected_image_id: number | null
   latest_spec_id: number | null
+  spec_stale?: boolean
   spec_warnings: Array<{ code?: string; message?: string }>
   completed_candidates: number
   images: GeneratedImage[]
 }
 
 export type GenerateImagesPayload = {
+  width?: number
+  height?: number
+  page_ids?: number[]
   tool_preset_id: number
   poll_interval_seconds: number
   wait_timeout_seconds: number
   candidates_per_page: number
-  generation_mode: 'preview' | 'final'
   seed_strategy: 'per_page' | 'shared_candidate'
 }
 
@@ -145,6 +148,12 @@ export type GenerationTask = {
   error_message: string | null
   created_at: string
   updated_at: string
+  progress?: {
+    completed_candidates: number
+    images_count: number
+    latest_image_id: number | null
+    active_runs: number
+  } | null
 }
 
 type SseEvent = {
@@ -205,12 +214,10 @@ export const listImageGenerationPages = async (
   taskId: number,
   options: {
     promptType?: 'tag' | 'natural_language' | 'hybrid'
-    generationMode?: 'preview' | 'final'
   } = {},
 ): Promise<ImageGenerationPage[]> => {
   const params = new URLSearchParams()
   if (options.promptType) params.set('prompt_type', options.promptType)
-  if (options.generationMode) params.set('generation_mode', options.generationMode)
   const query = params.size ? `?${params.toString()}` : ''
   const result = await requestJson<{ items: ImageGenerationPage[] }>(
     `/api/image-generation/script-tasks/${taskId}/pages${query}`,

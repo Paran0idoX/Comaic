@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import re
 from collections.abc import Awaitable
 from dataclasses import dataclass
 from typing import TypeVar
@@ -24,7 +25,10 @@ from backend.models.enums import (
     ScriptGenerationMode,
     ScriptGenerationTaskStatus,
     ScriptSectionStatus,
+    VisualEntityType,
 )
+from backend.models.scene_conditions import SCENE_DEFINITION_VERSION, SceneConditions, page_binding_payload, page_scene_conditions
+from backend.repositories.reference_subject_repository import ReferenceSubjectRepository
 from backend.repositories.comic_repository import ComicRepository
 from backend.repositories.visual_bible_repository import VisualBibleRepository
 from backend.services.task_runtime import RuntimeTaskType, running_task_registry
@@ -32,6 +36,7 @@ from backend.services.visual_bible_service import (
     VisualBibleDraftSummary,
     VisualBibleService,
 )
+from backend.utils.prompt_loader import PromptLoader
 
 
 AgentResultT = TypeVar("AgentResultT")
@@ -145,6 +150,9 @@ class ScriptService:
         composition: str,
         character_action: str,
         dialogue: str,
+        scene_id: int | None = None,
+        character_ids: list[int] | None = None,
+        scene_conditions: dict | None = None,
     ) -> ComicPage:
         """人工新增或更新结构化单页脚本；生成任务结束后由前端编辑使用。"""
 
@@ -158,11 +166,44 @@ class ScriptService:
             character_action=character_action,
             dialogue=dialogue,
         )
-        section = self._resolve_manual_section(project_id=project_id, page_no=page_no, task_id=task_id)
+        existing = (self.repository.get_script_task_page(task_id=task_id, page_no=page_no)
+                    if task_id is not None else self.repository.get_project_page(project_id=project_id, page_no=page_no))
+        if scene_id is None and (existing is None or existing.scene_id is None):
+            raise AppError("script.scene_required", status_code=422)
+        task = (self.get_script_task(task_id) if task_id is not None else
+                existing.section.task if existing is not None and existing.section is not None else
+                self.repository.get_latest_script_task_for_project(project_id))
+        selected_scene_id = scene_id if scene_id is not None else existing.scene_id
+        selected_scene = self.repository.session.get(ScriptScene, selected_scene_id)
+        if (task is None or task.project_id != project_id or selected_scene is None
+                or selected_scene.task_id != task.id or selected_scene.task.project_id != project_id):
+            raise AppError("script.scene_binding_invalid", status_code=422)
+        if task.status == ScriptGenerationTaskStatus.RUNNING:
+            raise AppError("script.edit_running", status_code=409)
+        if page_no < 1 or page_no > task.total_pages:
+            raise ValueError("page_no must be between 1 and task.total_pages")
+        section = self.repository.find_section_for_page(task_id=task.id, page_no=page_no)
+        if character_ids is not None:
+            if len(set(character_ids)) != len(character_ids) or any(type(value) is not int or value <= 0 for value in character_ids):
+                raise AppError("script.character_binding_invalid", status_code=422)
+            available = {character.id for character in self.repository.list_script_section_characters(section.id)} if section is not None else set()
+            if not set(character_ids) <= available:
+                raise AppError("script.character_binding_invalid", status_code=422)
+        if scene_conditions is not None:
+            scene_conditions = SceneConditions.model_validate(scene_conditions).model_dump()
+        elif existing is not None and selected_scene_id != existing.scene_id and existing.scene_conditions_json is None:
+            # 改绑不应让省略的条件隐式变成新场景的旧默认值。
+            scene_conditions = page_scene_conditions(existing)
+        # 所有归属与输入校验通过后才能创建缺失分段，拒绝请求不留下空分段。
+        if section is None:
+            section = self._resolve_manual_section(project_id=project_id, page_no=page_no, task_id=task.id)
         return self.repository.upsert_page_script(
             project_id=project_id,
             page_no=page_no,
             section_id=section.id,
+            scene_id=selected_scene_id,
+            character_ids=character_ids,
+            scene_conditions=scene_conditions,
             **page_payload,
         )
 
@@ -233,6 +274,7 @@ class ScriptService:
             status=ScriptGenerationTaskStatus.RUNNING,
             total_pages=total_pages,
             target_page_no=page_no,
+            scene_definition_version=SCENE_DEFINITION_VERSION,
             user_requirement=user_requirement,
         )
         running_task_registry.register(RuntimeTaskType.SCRIPT_GENERATION_TASK, task.id)
@@ -243,8 +285,31 @@ class ScriptService:
                 page_no=page_no,
             )
             outline_characters = self._outline_characters_context(outline_version.id)
-            section_scenes = [self._default_single_page_scene()]
-            section_characters = self._default_single_page_characters(outline_characters)
+            # 单页也先锁定真实地点，不能用占位场景把环境条件混入固定设定。
+            planning_agent = ScriptPlanningAgent()
+            planning_feedback = ""
+            for attempt in range(1, 4):
+                plans = await planning_agent.generate_section_plan(
+                    outline=outline_version.content, total_pages=total_pages,
+                    outline_characters=outline_characters, user_requirement=user_requirement or "",
+                    scene_catalog=self._neutral_scene_catalog(project_id), target_page_no=page_no,
+                    feedback=planning_feedback,
+                )
+                try:
+                    if (
+                        len(plans) != 1 or plans[0]["section_no"] != 1
+                        or plans[0]["page_start"] != page_no or plans[0]["page_end"] != page_no
+                    ):
+                        raise ValueError("single-page planning must use section_no=1 and cover only the target page")
+                    self._validate_neutral_scene_plan(plans, project_id=project_id, require_page_plan=True)
+                    break
+                except ValueError as exc:
+                    planning_feedback = str(exc)
+                    if attempt >= 3:
+                        raise ValueError(f"单页规划连续 3 次校验失败：{planning_feedback}") from exc
+            section_scenes = plans[0]["scenes"]
+            section_characters = plans[0]["characters"]
+            self.repository.update_script_task(task_id=task.id, section_plan=json.dumps(plans, ensure_ascii=False))
             self._save_section_visual_settings(
                 task_id=task.id,
                 section_id=section.id,
@@ -252,6 +317,8 @@ class ScriptService:
                 scenes=section_scenes,
                 characters=section_characters,
             )
+            locked = self._section_visual_context(task_id=task.id, section=section, outline_version_id=outline_version.id)
+            section_scenes, section_characters = locked["scenes"], locked["characters"]
             writer_agent = PageScriptWriterAgent()
             supervisor_agent = ScriptSupervisorAgent()
             previous_context = {"completed_section_summaries": [], "recent_full_sections": []}
@@ -261,7 +328,7 @@ class ScriptService:
                 pages = await writer_agent.generate_page(
                     outline=outline_version.content,
                     total_pages=total_pages,
-                    current_section=self._section_to_payload(section),
+                    current_section=self._section_agent_context(section, locked),
                     target_page_no=page_no,
                     section_scenes=section_scenes,
                     section_characters=section_characters,
@@ -275,9 +342,10 @@ class ScriptService:
                     section=section,
                     page_no=page_no,
                 )
+                self._validate_page_visual_references(pages=normalized_pages, visual_context=locked)
                 review_result = await supervisor_agent.review_section_pages(
                     outline=outline_version.content,
-                    current_section=self._section_to_payload(section),
+                    current_section=self._section_agent_context(section, locked),
                     section_scenes=section_scenes,
                     section_characters=section_characters,
                     outline_characters=outline_characters,
@@ -344,6 +412,7 @@ class ScriptService:
             project_id=project_id,
             outline_version_id=outline_version.id,
             mode=ScriptGenerationMode.BATCH,
+            scene_definition_version=SCENE_DEFINITION_VERSION,
             status=ScriptGenerationTaskStatus.RUNNING,
             total_pages=total_pages,
             user_requirement=user_requirement,
@@ -513,6 +582,12 @@ class ScriptService:
                     section=section,
                     outline_version_id=outline_version.id,
                 )
+                # 人工可选本批次的其它锁定场景；复审读实际绑定，不扩展自动 Writer 的范围。
+                scene_map = {scene["scene_key"]: scene for scene in visual_context["scenes"]}
+                for page in section_pages:
+                    if getattr(page, "script_scene", None) is not None:
+                        scene_map[page.script_scene.scene_key] = self._scene_to_payload(page.script_scene)
+                visual_context["scenes"] = list(scene_map.values())
                 yield "phase", {
                     "code": "script.section.review_started",
                     "section_no": section.section_no,
@@ -521,7 +596,7 @@ class ScriptService:
                 }
                 review_result = await supervisor_agent.review_section_pages(
                     outline=outline_version.content,
-                    current_section=self._section_to_payload(section),
+                    current_section=self._section_agent_context(section, visual_context),
                     section_scenes=visual_context["scenes"],
                     section_characters=visual_context["characters"],
                     outline_characters=outline_characters,
@@ -535,7 +610,20 @@ class ScriptService:
                 reviews_by_page_no = {
                     int(review["page_no"]): review for review in reviews
                 }
-                feedback_by_page_no = self._review_feedback_by_page_no(reviews)
+                # 人工编辑和旧页面也可能漏绑角色，LLM 的通过结论不能绕过结构校验。
+                for page in section_pages:
+                    try:
+                        self._validate_page_visual_references(
+                            pages=[self._page_to_writer_payload(page)], visual_context=visual_context
+                        )
+                    except ValueError as exc:
+                        reviews_by_page_no[page.page_no] = {
+                            "page_no": page.page_no,
+                            "passed": False,
+                            "summary": str(exc),
+                            "revision_suggestions": [str(exc)],
+                        }
+                feedback_by_page_no = self._review_feedback_by_page_no(list(reviews_by_page_no.values()))
                 for page in section_pages:
                     review = reviews_by_page_no[page.page_no]
                     passed = bool(review.get("passed"))
@@ -639,6 +727,7 @@ class ScriptService:
                             outline_characters=outline_characters,
                             user_requirement=user_requirement,
                             feedback=planning_feedback,
+                            scene_catalog=self._neutral_scene_catalog(task.project_id),
                         ),
                     )
                     if suspended:
@@ -652,6 +741,10 @@ class ScriptService:
                             sections=raw_sections,
                             total_pages=total_pages,
                         )
+                        if task.scene_definition_version >= SCENE_DEFINITION_VERSION:
+                            self._validate_neutral_scene_plan(
+                                normalized_sections, project_id=task.project_id, require_page_plan=True,
+                            )
                         break
                     except ValueError as exc:
                         planning_feedback = str(exc)
@@ -784,6 +877,7 @@ class ScriptService:
                 total_pages=max(page_no, 1),
                 target_page_no=page_no,
                 user_requirement="manual",
+                scene_definition_version=SCENE_DEFINITION_VERSION,
             )
 
         section = self.repository.find_section_for_page(task_id=task.id, page_no=page_no)
@@ -792,7 +886,7 @@ class ScriptService:
 
         return self.repository.upsert_script_section(
             task_id=task.id,
-            section_no=page_no,
+            section_no=max((section.section_no for section in self.repository.list_script_sections(task.id)), default=0) + 1,
             page_start=page_no,
             page_end=page_no,
             title="手动新增",
@@ -1297,7 +1391,7 @@ class ScriptService:
                 task_id,
                 supervisor_agent.review_section_pages(
                     outline=outline,
-                    current_section=self._section_to_payload(section),
+                    current_section=self._section_agent_context(section, job.visual_context),
                     section_scenes=job.visual_context["scenes"],
                     section_characters=job.visual_context["characters"],
                     outline_characters=outline_characters,
@@ -1463,7 +1557,7 @@ class ScriptService:
                 writer_agent.generate_page(
                     outline=outline,
                     total_pages=total_pages,
-                    current_section=self._section_to_payload(section),
+                    current_section=self._section_agent_context(section, visual_context),
                     target_page_no=page_no,
                     section_scenes=visual_context["scenes"],
                     section_characters=visual_context["characters"],
@@ -1522,6 +1616,9 @@ class ScriptService:
         for page in pages:
             page_no = page.get("page_no")
             scene_key = str(page.get("scene_key", "")).strip()
+            selected_scene = next((scene for scene in visual_context.get("scenes", []) if scene.get("scene_key") == scene_key), {})
+            if selected_scene.get("scene_definition_version", 1) >= SCENE_DEFINITION_VERSION and page.get("scene_conditions") is None:
+                raise ValueError(f"第 {page_no} 页必须提供 scene_conditions，本页条件不能写入固定场景。")
             if scene_key not in scene_keys:
                 allowed = "、".join(sorted(scene_keys)) or "无"
                 raise ValueError(
@@ -1530,9 +1627,6 @@ class ScriptService:
                     "请用其中一个场景重写整页，删除未锁定场景的空间、家具和主光源。"
                 )
             page_character_keys = page.get("character_keys", [])
-            page_characters_text = str(page.get("characters", "")).strip()
-            if page_characters_text and page_characters_text != "无" and not page_character_keys:
-                raise ValueError(f"page {page_no} has characters text but no character_keys")
             for character_key in page_character_keys:
                 if character_key not in character_keys:
                     allowed = "、".join(sorted(character_keys)) or "无"
@@ -1540,6 +1634,74 @@ class ScriptService:
                         f"第 {page_no} 页 character_key={character_key} 不属于当前分段；"
                         f"只能逐字选择以下 character_key：{allowed}。"
                     )
+            ScriptService._validate_visible_character_bindings(
+                page=page, characters=visual_context.get("characters", [])
+            )
+
+    @staticmethod
+    def _validate_visible_character_bindings(*, page: dict, characters: list[dict]) -> None:
+        """校验人物字段的明确列举，避免漏绑身份；剧情和对白提名不代表入镜。"""
+
+        text = str(page.get("characters", "")).strip()
+        keys = set(page.get("character_keys", []))
+        aliases: dict[str, set[str]] = {}
+        for character in characters:
+            if not isinstance(character, dict):
+                continue
+            key = str(character.get("character_key", "")).strip()
+            if key:
+                for alias in (key, str(character.get("name", "")).strip()):
+                    if alias:
+                        aliases.setdefault(alias, set()).add(key)
+        # 同名角色无法仅凭文字确定归属，留给 Supervisor；较长名字优先避免子串误认。
+        names = sorted(aliases, key=lambda name: (-len(name), name))
+        occurrences: dict[str, list[bool]] = {}
+        if names:
+            name_pattern = "|".join(
+                (r"(?<![A-Za-z0-9_])" + re.escape(name) + r"(?![A-Za-z0-9_])")
+                if re.fullmatch(r"[A-Za-z0-9_]+", name)
+                else re.escape(name)
+                for name in names
+            )
+            matches = list(re.finditer(name_pattern, text))
+            for index, match in enumerate(matches):
+                matching_keys = aliases[match.group()]
+                if len(matching_keys) != 1:
+                    continue
+                # 只解释紧邻姓名的声明，不让另一人物的“不入镜”污染当前人物。
+                before = re.split(r"[，,；;。\n]", text[:match.start()])[-1]
+                end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+                after = re.split(r"[；;。\n]", text[match.end():end])[0]
+                offscreen = bool(
+                    re.search(r"(?:画外|镜头外|画面外|不入镜|未入镜|未出场)(?:音|声音)?的?\s*$", before)
+                    or re.match(
+                        r"[\s，,:：（(]*(?:(?:本页|此页|本人|仅|只|作为|以)\s*)*"
+                        r"(?:(?:不|未|没有)(?:在画面中?)?(?:入镜|出镜|出场|出现)|"
+                        r"不在画面|画面外|镜头外|画外音|只闻其声|"
+                        r"(?:仅|只有|只)[^，,；;。\n]{0,8}(?:声音|话音))",
+                        after,
+                    )
+                )
+                occurrences.setdefault(next(iter(matching_keys)), []).append(not offscreen)
+        visible = {key for key, flags in occurrences.items() if any(flags)}
+        offscreen_only = set(occurrences) - visible
+        missing = visible - keys
+        if missing:
+            raise ValueError(
+                f"第 {page.get('page_no')} 页 characters 明确列出的入镜人物缺少 character_keys："
+                f"{'、'.join(sorted(missing))}。请补齐所有入镜人物的 key；"
+                "画外音或仅被提及的人物不要列入 characters。"
+            )
+        if keys & offscreen_only:
+            raise ValueError(
+                f"第 {page.get('page_no')} 页 character_keys 包含明确不入镜的人物："
+                f"{'、'.join(sorted(keys & offscreen_only))}。仅绑定本页实际可见人物。"
+            )
+        no_characters = bool(re.fullmatch(r"(?:无|无人|无(?:可见)?(?:角色|人物)(?:出场|入镜|出镜)?)[。.!！]?", text))
+        if no_characters and keys:
+            raise ValueError(f"第 {page.get('page_no')} 页声明无角色出场，character_keys 必须为空。")
+        if text and not no_characters and not keys and not offscreen_only:
+            raise ValueError(f"page {page.get('page_no')} has characters text but no character_keys")
 
     async def _generate_and_save_page(
         self,
@@ -1582,7 +1744,7 @@ class ScriptService:
                 writer_agent.generate_page(
                     outline=outline,
                     total_pages=total_pages,
-                    current_section=self._section_to_payload(section),
+                    current_section=self._section_agent_context(section, visual_context),
                     target_page_no=page_no,
                     section_scenes=visual_context["scenes"],
                     section_characters=visual_context["characters"],
@@ -1669,7 +1831,7 @@ class ScriptService:
         review_task = asyncio.create_task(
             supervisor_agent.review_section_pages(
                 outline=outline,
-                current_section=self._section_to_payload(section),
+                current_section=self._section_agent_context(section, visual_context),
                 section_scenes=visual_context["scenes"],
                 section_characters=visual_context["characters"],
                 outline_characters=outline_characters,
@@ -1881,6 +2043,7 @@ class ScriptService:
             "composition": str(page_payload.get("composition", "")).strip(),
             "character_action": str(page_payload.get("character_action", "")).strip(),
             "dialogue": str(page_payload.get("dialogue", "")).strip() or "无",
+            "scene_conditions": page_payload.get("scene_conditions"),
         }
 
     @staticmethod
@@ -1888,6 +2051,7 @@ class ScriptService:
         """把已落库页面转成 Writer 上下文需要的结构化页面字段。"""
 
         return {
+            "scene_conditions": page_scene_conditions(page),
             "section_no": page.section.section_no if page.section is not None else None,
             "page_no": page.page_no,
             "scene_key": page.script_scene.scene_key if page.script_scene is not None else "",
@@ -1912,6 +2076,7 @@ class ScriptService:
 
         payload = {
             "scene_key": str(raw_scene.get("scene_key", "")).strip(),
+            "reference_subject_key": raw_scene.get("reference_subject_key"),
             "name": str(raw_scene.get("name", "")).strip(),
             "location_type": str(raw_scene.get("location_type", "")).strip(),
             "time_of_day": str(raw_scene.get("time_of_day", "")).strip(),
@@ -1919,10 +2084,9 @@ class ScriptService:
             "weather": str(raw_scene.get("weather", "")).strip(),
             "environment_details": str(raw_scene.get("environment_details", "")).strip(),
             "color_palette": str(raw_scene.get("color_palette", "")).strip(),
-            "visual_anchors": str(raw_scene.get("visual_anchors", "")).strip(),
             "negative_constraints": str(raw_scene.get("negative_constraints", "")).strip(),
         }
-        for field_name in ("scene_key", "name", "environment_details", "visual_anchors"):
+        for field_name in ("scene_key", "name", "environment_details"):
             if not payload[field_name]:
                 raise ValueError(f"scene setting missing required field: {field_name}")
         return payload
@@ -1941,10 +2105,9 @@ class ScriptService:
             "current_state": str(raw_character.get("current_state", "")).strip(),
             "emotion": str(raw_character.get("emotion", "")).strip(),
             "temporary_changes": str(raw_character.get("temporary_changes", "")).strip() or "无",
-            "visual_anchors": str(raw_character.get("visual_anchors", "")).strip(),
             "negative_constraints": str(raw_character.get("negative_constraints", "")).strip(),
         }
-        for field_name in ("character_key", "name", "section_role", "visual_anchors"):
+        for field_name in ("character_key", "name", "section_role"):
             if not payload[field_name]:
                 raise ValueError(f"character setting missing required field: {field_name}")
         return payload
@@ -1972,16 +2135,31 @@ class ScriptService:
         ]
         if not scene_payloads:
             raise ValueError("section visual settings must include at least one scene")
-        if not character_payloads:
-            raise ValueError("section visual settings must include at least one character")
         outline_characters_by_key = {
             character.character_key: character
             for character in self.repository.list_outline_characters(outline_version_id)
         }
-        persisted_scenes = [
-            self.repository.upsert_script_scene(task_id=task_id, **scene)
-            for scene in scene_payloads
-        ]
+        task = self.get_script_task(task_id)
+        persisted_scenes = []
+        subjects = ReferenceSubjectRepository(self.repository.session)
+        for scene in scene_payloads:
+            subject_key = scene.pop("reference_subject_key", None)
+            subject = None
+            if task.scene_definition_version >= SCENE_DEFINITION_VERSION:
+                for field in ("time_of_day", "weather", "lighting"):
+                    scene[field] = ""
+                if subject_key:
+                    subject = subjects.get_by_key(task.project_id, VisualEntityType.SCENE, subject_key)
+                    if subject is None or subject.scene_definition_version < SCENE_DEFINITION_VERSION:
+                        raise AppError("script.scene_binding_invalid", status_code=422)
+                    # 复用目录意味着复用原地点身份，不用新措辞改写既有设定。
+                    scene.update(name=subject.name, location_type="", environment_details=subject.description,
+                                 color_palette="", negative_constraints=subject.negative_constraints)
+            persisted = self.repository.upsert_script_scene(task_id=task_id, **scene)
+            if subject is not None:
+                persisted.reference_subject_id = subject.id
+                self.repository.session.commit()
+            persisted_scenes.append(persisted)
         persisted_characters = []
         for character in character_payloads:
             persisted_character = self.repository.upsert_script_section_character(
@@ -2003,6 +2181,43 @@ class ScriptService:
             scenes=persisted_scenes,
             characters=persisted_characters,
         )
+
+    def _neutral_scene_catalog(self, project_id: int) -> list[dict]:
+        """仅向新规划提供明确符合地点规范的目录，不猜测旧日夜条目的身份。"""
+        return [{"key": item.key, "name": item.name, "description": item.description,
+                 "negative_constraints": item.negative_constraints}
+                for item in ReferenceSubjectRepository(self.repository.session).list(project_id, VisualEntityType.SCENE)
+                if item.scene_definition_version >= SCENE_DEFINITION_VERSION]
+
+    def _validate_neutral_scene_plan(
+        self, sections: list[dict], *, project_id: int, require_page_plan: bool = False,
+    ) -> None:
+        """锁定前校验目录身份、逐页地点覆盖与重复 key；旧任务允许没有逐页规划。"""
+        catalog_keys = {item["key"] for item in self._neutral_scene_catalog(project_id)}
+        definitions: dict[str, tuple] = {}
+        reused_keys: dict[str, str] = {}
+        fixed_fields = ("name", "location_type", "environment_details", "color_palette", "negative_constraints")
+        for section in sections:
+            section_keys: set[str] = set()
+            for raw in section.get("scenes", []):
+                scene = self._normalize_scene_payload(raw)
+                key, subject_key = scene["scene_key"], scene["reference_subject_key"]
+                if key in section_keys:
+                    raise ValueError(f"duplicate scene_key in section: {key}")
+                section_keys.add(key)
+                if subject_key is not None and subject_key not in catalog_keys:
+                    raise ValueError(f"unknown neutral scene catalog key: {subject_key}")
+                if subject_key is not None:
+                    if subject_key in reused_keys and reused_keys[subject_key] != key:
+                        raise ValueError(f"same catalog location must reuse scene_key: {reused_keys[subject_key]}")
+                    reused_keys[subject_key] = key
+                if any(scene[field] for field in ("time_of_day", "weather", "lighting")):
+                    raise ValueError(f"fixed location must not define page conditions: {key}")
+                definition = (subject_key,) if subject_key is not None else tuple(scene[field] for field in fixed_fields)
+                if key in definitions and definitions[key] != definition:
+                    raise ValueError(f"fixed location definition changed across sections: {key}")
+                definitions[key] = definition
+            section["page_plan"] = self._normalize_section_page_plan(section, required=require_page_plan)
 
     def _ensure_task_visual_bible_drafts(
         self,
@@ -2034,9 +2249,10 @@ class ScriptService:
             scene.scene_key: scene.id
             for scene in self.repository.list_script_scenes(task_id)
         }
+        section_characters = self.repository.list_script_section_characters(section_id)
         character_ids_by_key = {
             character.character_key: character.id
-            for character in self.repository.list_script_section_characters(section_id)
+            for character in section_characters
         }
         for page in pages:
             scene_key = str(page.get("scene_key", "")).strip()
@@ -2045,16 +2261,18 @@ class ScriptService:
             if scene_key not in scene_ids_by_key:
                 raise ValueError(f"page {page.get('page_no')} scene_key not found: {scene_key}")
             page_character_keys = page.get("character_keys", [])
-            page_characters_text = str(page.get("characters", "")).strip()
-            if page_characters_text and page_characters_text != "无" and not page_character_keys:
-                raise ValueError(
-                    f"page {page.get('page_no')} has characters text but no character_keys"
-                )
             for character_key in page_character_keys:
                 if character_key not in character_ids_by_key:
                     raise ValueError(
                         f"page {page.get('page_no')} character_key not found: {character_key}"
                     )
+            self._validate_visible_character_bindings(
+                page=page,
+                characters=[
+                    {"character_key": character.character_key, "name": character.name}
+                    for character in section_characters
+                ],
+            )
 
         return {
             "scene_ids_by_key": scene_ids_by_key,
@@ -2093,12 +2311,16 @@ class ScriptService:
         ]
         if not section_scenes:
             raise ValueError(f"section {section.section_no} has no locked scenes")
-        if not section_characters:
-            raise ValueError(f"section {section.section_no} has no locked characters")
         return {
             "scenes": section_scenes,
             "characters": section_characters,
+            "page_plan": planned_section.get("page_plan") or [],
         }
+
+    def _section_agent_context(self, section: ScriptSection, visual_context: dict) -> dict:
+        """逐页规划随锁定视觉快照传入 Agent，兼容没有 page_plan 的历史任务。"""
+
+        return {**self._section_to_payload(section), "page_plan": visual_context.get("page_plan") or []}
 
     @staticmethod
     def _planned_section_payload(*, section_plan: str | None, section_no: int) -> dict:
@@ -2150,11 +2372,7 @@ class ScriptService:
         """把监督意见按页码拆分，供单页修订时精确传入。"""
 
         feedback_by_page_no: dict[int, str] = {}
-        scene_revision_rule = (
-            "硬性结构限制：每页只能绑定一个 scene_key；修订时必须让 scene、composition、"
-            "character_action 完全服务于同一个主场景，删除其它场景的核心家具、主光源、"
-            "空间结构或主体道具。"
-        )
+        revision_rule = PromptLoader.load("script_revision_protocol.md")
         for review in reviews:
             if not isinstance(review, dict) or review.get("passed"):
                 continue
@@ -2168,7 +2386,7 @@ class ScriptService:
             if not isinstance(suggestions, list):
                 suggestions = [str(suggestions)]
             feedback_by_page_no[page_no] = "{rule}\n第 {page_no} 页：{summary}；修改意见：{suggestions}".format(
-                rule=scene_revision_rule,
+                rule=revision_rule,
                 page_no=page_no,
                 summary=review.get("summary", ""),
                 suggestions="；".join(str(item) for item in suggestions if str(item).strip()),
@@ -2204,7 +2422,6 @@ class ScriptService:
             "weather": "按当前页面脚本决定",
             "environment_details": "根据大纲和本页内容生成统一场景。",
             "color_palette": "按当前页面情绪决定。",
-            "visual_anchors": "保持大纲中的主要地点和氛围一致。",
             "negative_constraints": "不要生成与大纲冲突的地点和时代元素。",
         }
 
@@ -2224,7 +2441,6 @@ class ScriptService:
                     "current_state": "按当前页面脚本决定",
                     "emotion": "按当前页面脚本决定",
                     "temporary_changes": "无",
-                    "visual_anchors": "保持角色在大纲中的识别特征。",
                     "negative_constraints": "不要生成与大纲冲突的角色设定。",
                 }
             ]
@@ -2239,12 +2455,48 @@ class ScriptService:
                 "current_state": "按当前页面脚本决定",
                 "emotion": "按当前页面脚本决定",
                 "temporary_changes": "无",
-                "visual_anchors": str(character.get("visual_anchors", "")).strip() or "沿用大纲角色视觉锚点",
                 "negative_constraints": str(character.get("negative_constraints", "")).strip() or "不得违背大纲角色基准",
             }
             for character in outline_characters
             if str(character.get("character_key", "")).strip()
         ]
+
+    @staticmethod
+    def _normalize_section_page_plan(section: dict, *, required: bool = False) -> list[dict]:
+        """逐页落点必须完整覆盖分段并引用本段地点，不能把缺失场景留给 Writer。"""
+
+        raw_plan = section.get("page_plan")
+        if raw_plan is None or raw_plan == []:
+            if required:
+                raise ValueError(f"section {section.get('section_no')} must define page_plan for every page")
+            return []
+        if not isinstance(raw_plan, list):
+            raise ValueError("section page_plan must be a list")
+        expected_pages = set(range(int(section["page_start"]), int(section["page_end"]) + 1))
+        scene_keys = {str(scene.get("scene_key", "")).strip() for scene in section.get("scenes", [])}
+        normalized: dict[int, dict] = {}
+        for item in raw_plan:
+            if not isinstance(item, dict):
+                raise ValueError("page_plan item must be an object")
+            try:
+                page_no = int(item.get("page_no", 0))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("page_plan page_no must be an integer") from exc
+            if page_no not in expected_pages:
+                raise ValueError(f"page_plan page {page_no} outside section range")
+            if page_no in normalized:
+                raise ValueError(f"duplicate page_plan page_no: {page_no}")
+            scene_key = str(item.get("scene_key") or "").strip()
+            if not scene_key or scene_key not in scene_keys:
+                raise ValueError(f"page_plan page {page_no} scene_key not defined in section: {scene_key}")
+            beat = str(item.get("beat") or "").strip()
+            if not beat:
+                raise ValueError(f"page_plan page {page_no} missing core beat")
+            normalized[page_no] = {"page_no": page_no, "scene_key": scene_key, "beat": beat}
+        missing = sorted(expected_pages - normalized.keys())
+        if missing:
+            raise ValueError(f"page_plan missing pages: {missing}")
+        return [normalized[page_no] for page_no in sorted(normalized)]
 
     @staticmethod
     def _normalize_section_plan(*, sections: list, total_pages: int) -> list[dict]:
@@ -2272,6 +2524,7 @@ class ScriptService:
                     "page_end": page_end,
                     "title": str(raw_section.get("title", "")),
                     "description": str(raw_section.get("description", "")),
+                    "page_plan": ScriptService._normalize_section_page_plan(raw_section),
                     "scenes": [
                         ScriptService._normalize_scene_payload(scene)
                         for scene in raw_section.get("scenes", [])
@@ -2303,8 +2556,6 @@ class ScriptService:
                 )
             if not section["scenes"]:
                 raise ValueError(f"section {section['section_no']} must define at least one scene")
-            if not section["characters"]:
-                raise ValueError(f"section {section['section_no']} must define at least one character")
             expected_start = section["page_end"] + 1
         if expected_start != total_pages + 1:
             raise ValueError(
@@ -2434,6 +2685,8 @@ class ScriptService:
                     "dialogue": str(raw_page.get("dialogue", "")).strip() or "无",
                     "is_revision": bool(raw_page.get("is_revision", False)),
                     "revision_note": str(raw_page.get("revision_note", "")).strip(),
+                    "scene_conditions": (SceneConditions.model_validate(raw_page["scene_conditions"]).model_dump()
+                                         if raw_page.get("scene_conditions") is not None else None),
                 }
             )
 
@@ -2611,6 +2864,7 @@ class ScriptService:
         """把页面 ORM 对象转成 SSE 可 JSON 序列化的字典。"""
 
         return {
+            **page_binding_payload(page),
             "id": page.id,
             "project_id": page.project_id,
             "section_id": page.section_id,
@@ -2642,6 +2896,8 @@ class ScriptService:
         """把中心化场景设定转成 Agent 上下文和 API 可复用的结构。"""
 
         return {
+            "scene_definition_version": scene.task.scene_definition_version,
+            "reference_subject_id": scene.reference_subject_id,
             "id": scene.id,
             "task_id": scene.task_id,
             "scene_key": scene.scene_key,
@@ -2652,7 +2908,6 @@ class ScriptService:
             "weather": scene.weather,
             "environment_details": scene.environment_details,
             "color_palette": scene.color_palette,
-            "visual_anchors": scene.visual_anchors,
             "negative_constraints": scene.negative_constraints,
             "created_at": scene.created_at.isoformat(),
             "updated_at": scene.updated_at.isoformat(),
@@ -2676,7 +2931,6 @@ class ScriptService:
             "current_state": character.current_state,
             "emotion": character.emotion,
             "temporary_changes": character.temporary_changes,
-            "visual_anchors": character.visual_anchors,
             "negative_constraints": character.negative_constraints,
             "outline_character": (
                 ScriptService._outline_character_to_payload(character.outline_character)
@@ -2699,7 +2953,6 @@ class ScriptService:
             "role": character.role,
             "background": character.background,
             "appearance": character.appearance,
-            "visual_anchors": character.visual_anchors,
             "negative_constraints": character.negative_constraints,
             "default_hairstyle": character.default_hairstyle,
             "default_clothing": character.default_clothing,

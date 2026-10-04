@@ -1,6 +1,8 @@
 import { ApiError, apiHeaders, normalizeBackendError, parseApiErrorResponse } from './errors'
 
-export type CharacterReferenceRole = 'identity_face' | 'identity_half_body' | 'identity_full_body'
+export type CharacterReferenceRole = 'identity_face' | 'identity_full_body'
+// 已保存任务的历史用途仍可展示，不能用于创建新任务。
+export type HistoricalCharacterReferenceRole = CharacterReferenceRole | 'identity_half_body' | 'identity_side' | 'identity_back'
 
 export type CharacterReferenceCharacter = {
   id: number
@@ -31,12 +33,13 @@ export type CharacterReferenceImage = {
   width: number | null
   height: number | null
   promoted_asset_id: number | null
+  promoted_asset_status?: 'draft' | 'approved' | 'archived' | null
 }
 
 export type CharacterReferenceRun = {
   id: number
   candidate_index: number
-  role: CharacterReferenceRole
+  role: HistoricalCharacterReferenceRole
   seed: number
   provider: 'comfyui' | 'openai_images_compatible'
   prompt_type: 'tag' | 'natural_language' | 'hybrid'
@@ -61,7 +64,7 @@ export type CharacterReferenceCandidateSet = {
   status: 'pending' | 'running' | 'succeeded' | 'failed'
   review_status: 'draft' | 'approved' | 'archived'
   complete: boolean
-  roles: Partial<Record<CharacterReferenceRole, CharacterReferenceRun>>
+  roles: Partial<Record<HistoricalCharacterReferenceRole, CharacterReferenceRun>>
 }
 
 export type CharacterReferenceTask = {
@@ -81,7 +84,7 @@ export type CharacterReferenceTask = {
   status: 'pending' | 'running' | 'succeeded' | 'failed' | 'suspended'
   candidate_count: number
   prompt_type: 'tag' | 'natural_language' | 'hybrid'
-  prompts: Record<CharacterReferenceRole, CharacterReferencePromptPair>
+  prompts: Partial<Record<HistoricalCharacterReferenceRole, CharacterReferencePromptPair>>
   progress: { completed?: number; failed?: number; total?: number }
   approved_candidate_index: number | null
   error_code: string | null

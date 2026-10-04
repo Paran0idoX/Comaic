@@ -19,6 +19,8 @@ from backend.models.comic import LLMConfig
 from backend.models.database import SessionLocal
 from backend.models.enums import LLMProvider
 from backend.repositories.comic_repository import ComicRepository
+from backend.llm_clients.system_prompt import system_prompt_model_class
+from backend.utils.system_prompt_catalog import default_model_system_prompt, model_prompt_overrides, initial_model_prompt_defaults
 
 
 load_dotenv()
@@ -33,6 +35,7 @@ class LLMConfigInput:
     model: str
     api_key: str | None
     thinking_enabled: bool | None = None
+    global_system_prompt: str | None = None
 
 
 def get_thinking_chat_model() -> BaseChatModel:
@@ -63,6 +66,9 @@ def create_chat_model_from_active_config(*, thinking_enabled: bool | None = None
                 model=config.default_model,
                 api_key=config.api_key,
                 thinking_enabled=thinking_enabled,
+                global_system_prompt=model_prompt_overrides(config).get(
+                    config.default_model, default_model_system_prompt(config)
+                ),
             )
         )
 
@@ -79,34 +85,36 @@ def create_chat_model(config: LLMConfigInput) -> BaseChatModel:
     if config.provider == LLMProvider.OPENAI_COMPATIBLE:
         if not base_url:
             raise ValueError("LLMConfig base_url cannot be empty.")
-        return ChatOpenAI(model=model, api_key=_required_api_key(api_key), base_url=base_url)
+        return system_prompt_model_class(ChatOpenAI)(global_system_prompt=config.global_system_prompt, model=model, api_key=_required_api_key(api_key), base_url=base_url)
 
     if config.provider == LLMProvider.DEEPSEEK:
-        return ChatDeepSeek(
+        return system_prompt_model_class(ChatDeepSeek)(global_system_prompt=config.global_system_prompt,
             model=model,
             api_key=_required_api_key(api_key),
+            # 长篇分段规划包含重复视觉设定，显式扩大输出预算，避免默认 8K 截断。
+            max_tokens=65536,
             **_deepseek_thinking_kwargs(config.thinking_enabled),
         )
     if config.provider == LLMProvider.ANTHROPIC:
-        return ChatAnthropic(model_name=model, api_key=_required_api_key(api_key))
+        return system_prompt_model_class(ChatAnthropic)(global_system_prompt=config.global_system_prompt, model_name=model, api_key=_required_api_key(api_key))
     if config.provider == LLMProvider.GOOGLE_GENAI:
-        return ChatGoogleGenerativeAI(model=model, api_key=_required_api_key(api_key))
+        return system_prompt_model_class(ChatGoogleGenerativeAI)(global_system_prompt=config.global_system_prompt, model=model, api_key=_required_api_key(api_key))
     if config.provider == LLMProvider.MISTRALAI:
-        return ChatMistralAI(model_name=model, api_key=_required_api_key(api_key))
+        return system_prompt_model_class(ChatMistralAI)(global_system_prompt=config.global_system_prompt, model_name=model, api_key=_required_api_key(api_key))
     if config.provider == LLMProvider.GROQ:
-        return ChatGroq(model=model, api_key=_required_api_key(api_key))
+        return system_prompt_model_class(ChatGroq)(global_system_prompt=config.global_system_prompt, model=model, api_key=_required_api_key(api_key))
     if config.provider == LLMProvider.COHERE:
-        return ChatCohere(model=model, cohere_api_key=_required_api_key(api_key))
+        return system_prompt_model_class(ChatCohere)(global_system_prompt=config.global_system_prompt, model=model, cohere_api_key=_required_api_key(api_key))
     if config.provider == LLMProvider.OLLAMA:
-        return ChatOllama(model=model, **_base_url_kwargs(base_url))
+        return system_prompt_model_class(ChatOllama)(global_system_prompt=config.global_system_prompt, model=model, **_base_url_kwargs(base_url))
     if config.provider == LLMProvider.AWS_BEDROCK:
-        return ChatBedrockConverse(
+        return system_prompt_model_class(ChatBedrockConverse)(global_system_prompt=config.global_system_prompt,
             model=model,
             api_key=_required_api_key(api_key),
             **_base_url_kwargs(base_url),
         )
     if config.provider == LLMProvider.XAI:
-        return ChatXAI(model=model, api_key=_required_api_key(api_key))
+        return system_prompt_model_class(ChatXAI)(global_system_prompt=config.global_system_prompt, model=model, api_key=_required_api_key(api_key))
 
     raise ValueError(f"Unsupported LLM provider: {config.provider.value}")
 
@@ -146,6 +154,7 @@ def ensure_llm_configs(repository: ComicRepository) -> list[LLMConfig]:
         provider=LLMProvider.DEEPSEEK,
         base_url="",
         model_names=json.dumps([default_model], ensure_ascii=False),
+        model_system_prompt_defaults_json=initial_model_prompt_defaults(LLMProvider.DEEPSEEK, [default_model]),
         default_model=default_model,
         api_key=None,
         is_active=True,

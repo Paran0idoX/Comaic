@@ -53,9 +53,9 @@ from backend.services.character_reference_service import CharacterReferenceServi
 from backend.services.renderer_backends import RenderedArtifact, RendererSubmission
 
 
-def _png_bytes(color: tuple[int, int, int] = (56, 120, 210)) -> bytes:
+def _png_bytes(color: tuple[int, int, int] = (56, 120, 210), size=(32, 40)) -> bytes:
     buffer = BytesIO()
-    Image.new("RGB", (32, 40), color).save(buffer, format="PNG")
+    Image.new("RGB", size, color).save(buffer, format="PNG")
     return buffer.getvalue()
 
 
@@ -101,7 +101,9 @@ class FakeRenderer:
             raise RuntimeError("intentional fake renderer failure")
         return [
             RenderedArtifact(
-                content=_png_bytes((self.wait_calls * 20 % 255, 80, 160)),
+                content=_png_bytes((self.wait_calls * 20 % 255, 80, 160),
+                    size=(submission.applied_spec.get("render", {}).get("width", 32),
+                          submission.applied_spec.get("render", {}).get("height", 40))),
                 filename=f"{submission.external_id}-{artifact_index}.png",
             )
             for artifact_index in range(1, self.artifact_count + 1)
@@ -109,7 +111,11 @@ class FakeRenderer:
 
 
 @pytest.fixture()
-def reference_fixture(tmp_path: Path):
+def reference_fixture(tmp_path: Path, monkeypatch):
+    from backend.tests.reference_visual_fakes import FakeVisualAgent
+    import backend.agents.reference_visual_agent as visual_module
+    agent_calls = []
+    monkeypatch.setattr(visual_module, "ReferenceVisualAgent", lambda: FakeVisualAgent(agent_calls))
     engine = create_engine(
         "sqlite+pysqlite:///:memory:",
         connect_args={"check_same_thread": False},
@@ -139,7 +145,6 @@ def reference_fixture(tmp_path: Path):
             role="detective",
             background="from a coastal city",
             appearance="young woman with amber eyes and a small cheek scar",
-            visual_anchors="amber eyes, crescent scar, narrow jaw",
             negative_constraints="never remove the cheek scar",
             default_hairstyle="short black bob",
             default_clothing="navy trench coat",
@@ -181,8 +186,8 @@ def reference_fixture(tmp_path: Path):
             prompt_type=ImagePromptType.HYBRID,
             is_default=True,
             capabilities_json='{"features":["txt2img"],"limits":{}}',
-            bindings_json='{"schema_version":1,"bindings":[]}',
-            workflow_json="{}",
+            bindings_json='{"schema_version":1,"bindings":[{"source":"prompt.positive","node_id":"1","input_name":"text"}]}',
+            workflow_json='{"1":{"inputs":{"text":"placeholder"}}}',
         )
         no_txt2img_tool = ImageGenerationToolPreset(
             name="Img2Img Only",
@@ -211,6 +216,7 @@ def reference_fixture(tmp_path: Path):
         )
         yield {
             "session": session,
+            "agent_calls": agent_calls,
             "project": project,
             "character": character,
             "unused_character": unused_character,
@@ -232,7 +238,6 @@ def _prompts(prefix: str = "edited") -> dict[str, dict[str, str]]:
         }
         for role in (
             VisualAssetRole.IDENTITY_FACE,
-            VisualAssetRole.IDENTITY_HALF_BODY,
             VisualAssetRole.IDENTITY_FULL_BODY,
         )
     }
@@ -248,54 +253,56 @@ def _create_task(fixture, *, candidate_count: int = 2, prompts=None):
     )
 
 
-def test_prompt_compiler_supports_all_types_style_and_hybrid_order(
-    reference_fixture,
-) -> None:
-    compiler = CharacterReferencePromptService()
-    character = reference_fixture["character"]
-    style = reference_fixture["style"]
-
-    natural = compiler.compile(
-        character=character,
-        prompt_type=ImagePromptType.NATURAL_LANGUAGE,
-        style=style,
-    )
-    tags = compiler.compile(
-        character=character,
-        prompt_type=ImagePromptType.TAG,
-        style=style,
-    )
-    hybrid = compiler.compile(
-        character=character,
-        prompt_type=ImagePromptType.HYBRID,
-        style=style,
-    )
-
-    for role in ("identity_face", "identity_half_body", "identity_full_body"):
-        assert hybrid[role]["positive"] == (
-            natural[role]["positive"] + "\n" + tags[role]["positive"]
+def test_new_prompt_preview_and_request_exclude_half_body(reference_fixture):
+    from pydantic import ValidationError
+    from backend.api.schemas.character_reference import CreateCharacterReferenceTaskRequest
+    pairs = _prompts()
+    assert set(pairs) == {"identity_face", "identity_full_body"}
+    CreateCharacterReferenceTaskRequest(tool_preset_id=1, prompts=pairs)
+    with pytest.raises(ValidationError):
+        CreateCharacterReferenceTaskRequest(tool_preset_id=1, prompts={**pairs, "identity_half_body": {"positive": "old", "negative": ""}})
+    with pytest.raises(AppError) as error:
+        CharacterReferencePromptService().compile(
+            profiles=[], prompt_type=ImagePromptType.NATURAL_LANGUAGE,
+            roles=(VisualAssetRole.IDENTITY_HALF_BODY,),
         )
-        assert hybrid[role]["negative"] == (
-            natural[role]["negative"] + "\n" + tags[role]["negative"]
-        )
-        assert "amber eyes" in hybrid[role]["positive"]
-        assert "navy trench coat" in hybrid[role]["positive"]
-        assert "graphic-novel ink illustration" in hybrid[role]["positive"]
-        assert "graphic novel, ink linework" in hybrid[role]["positive"]
-        assert "never remove the cheek scar" in hybrid[role]["negative"]
+    assert error.value.code == "reference.roles_invalid"
 
-    without_style = compiler.compile(
-        character=character,
-        prompt_type=ImagePromptType.NATURAL_LANGUAGE,
-        style=None,
-    )
-    assert (
-        "graphic-novel ink illustration"
-        not in without_style["identity_face"]["positive"]
-    )
-    assert "head-and-shoulders" in natural["identity_face"]["positive"]
-    assert "waist-up" in natural["identity_half_body"]["positive"]
-    assert "head-to-toe" in natural["identity_full_body"]["positive"]
+
+def test_old_half_body_task_remains_readable_but_cannot_generate_again(reference_fixture, monkeypatch):
+    task = _create_task(reference_fixture, candidate_count=1)
+    task.selected_roles_json = '["identity_face","identity_half_body"]'
+    task.runs[1].role = VisualAssetRole.IDENTITY_HALF_BODY
+    task.status = GenerationTaskStatus.SUSPENDED
+    reference_fixture["session"].commit()
+    old_snapshot = task.prompt_snapshot_json
+    response = task_response(reference_fixture["service"].get_task(task.id))
+    assert "identity_half_body" in response.candidates[0].roles
+    with pytest.raises(AppError) as error:
+        reference_fixture["service"].prepare_continue(task.id)
+    assert error.value.code == "reference.roles_invalid"
+    assert task.status == GenerationTaskStatus.SUSPENDED
+    assert task.prompt_snapshot_json == old_snapshot
+    task.status = GenerationTaskStatus.PENDING
+    reference_fixture["session"].commit()
+    renderer = FakeRenderer()
+    monkeypatch.setattr(service_module, "backend_for_preset", lambda *args, **kwargs: renderer)
+    result = asyncio.run(reference_fixture["service"].run_task(task.id))
+    assert result.error_code == "reference.roles_invalid"
+    assert renderer.submissions == []
+
+
+def test_legacy_preview_uses_profiles_without_new_style_source(reference_fixture):
+    f = reference_fixture
+    tool, prompts = f["service"].preview_prompts(character_id=f["character"].id,
+        tool_preset_id=f["tool"].id, style_profile_id=f["style"].id)
+    assert len(f["agent_calls"]) == 1
+    assert "amber eyes" in prompts["identity_face"]["positive"]
+    assert "navy trench coat" not in prompts["identity_face"]["positive"]
+    assert "navy trench coat" in prompts["identity_full_body"]["positive"]
+    assert "graphic novel" not in prompts["identity_full_body"]["positive"]
+    assert "never remove the cheek scar" not in prompts["identity_face"]["negative"]
+    assert f["service"].preview_visual_profiles[0]["revision"] == 1
 
 
 def test_outline_character_list_includes_characters_without_script_appearances(
@@ -314,14 +321,14 @@ def test_outline_character_list_includes_characters_without_script_appearances(
     ]
 
 
-def test_default_two_sets_create_six_runs_with_exact_prompts_and_shared_seeds(
+def test_default_two_sets_create_four_runs_with_exact_prompts_and_shared_seeds(
     reference_fixture,
 ) -> None:
     prompts = _prompts("verbatim")
     task = _create_task(reference_fixture, prompts=prompts)
 
     assert task.candidate_count == 2
-    assert len(task.runs) == 6
+    assert len(task.runs) == 4
     seeds_by_candidate = {
         index: {run.seed for run in task.runs if run.candidate_index == index}
         for index in (1, 2)
@@ -347,7 +354,7 @@ def test_fake_renderer_runs_preview_without_creating_comic_records(
     result = asyncio.run(reference_fixture["service"].run_task(task.id))
 
     assert result.status == GenerationTaskStatus.SUCCEEDED
-    assert len(renderer.submissions) == 6
+    assert len(renderer.submissions) == 4
     assert all(mode == GenerationMode.PREVIEW for _, _, mode in renderer.submissions)
     assert all(run.status == GenerationRunStatus.SUCCEEDED for run in result.runs)
     assert all(run.seed_applied is False for run in result.runs)
@@ -358,6 +365,14 @@ def test_fake_renderer_runs_preview_without_creating_comic_records(
     assert session.scalar(select(func.count()).select_from(ComicPage)) == 0
     assert session.scalar(select(func.count()).select_from(ComicImage)) == 0
     assert session.scalar(select(func.count()).select_from(ImageSpec)) == 0
+
+    # 兼容整套入口也支持选回旧候选，两个用途分别互斥，不重复转存同一原图。
+    reference_fixture["service"].approve_candidate_set(task_id=task.id, candidate_index=2)
+    restored = reference_fixture["service"].approve_candidate_set(task_id=task.id, candidate_index=1)
+    assert restored.approved_candidate_index == 1
+    assets = list(session.scalars(select(VisualAsset).where(VisualAsset.source == VisualAssetSource.GENERATED_IMAGE)))
+    assert len(assets) == 4
+    assert len([asset for asset in assets if asset.status == ApprovalStatus.APPROVED]) == 2
 
 
 def test_failed_run_is_preserved_and_continue_only_retries_missing_run(
@@ -373,13 +388,13 @@ def test_failed_run_is_preserved_and_continue_only_retries_missing_run(
     first_result = asyncio.run(reference_fixture["service"].run_task(task.id))
 
     assert first_result.status == GenerationTaskStatus.FAILED
-    assert len(failing_renderer.submissions) == 6
+    assert len(failing_renderer.submissions) == 4
     failed_run = next(
         run for run in first_result.runs if run.status == GenerationRunStatus.FAILED
     )
     failed_seed = failed_run.seed
     failed_prompt = failed_run.positive_prompt
-    assert sum(bool(run.images) for run in first_result.runs) == 5
+    assert sum(bool(run.images) for run in first_result.runs) == 3
 
     reference_fixture["service"].prepare_continue(task.id)
     recovery_renderer = FakeRenderer()
@@ -397,7 +412,7 @@ def test_failed_run_is_preserved_and_continue_only_retries_missing_run(
     retried_run = next(run for run in final_result.runs if run.id == failed_run.id)
     assert retried_run.positive_prompt == failed_prompt
     assert all(run.status == GenerationRunStatus.SUCCEEDED for run in final_result.runs)
-    assert sum(len(run.images) for run in final_result.runs) == 6
+    assert sum(len(run.images) for run in final_result.runs) == 4
 
 
 def test_suspend_waits_for_current_provider_request_and_stops_next_submission(
@@ -418,7 +433,7 @@ def test_suspend_waits_for_current_provider_request_and_stops_next_submission(
     assert result.status == GenerationTaskStatus.SUSPENDED
     assert len(renderer.submissions) == 1
     assert sum(run.status == GenerationRunStatus.SUCCEEDED for run in result.runs) == 1
-    assert sum(run.status == GenerationRunStatus.PENDING for run in result.runs) == 5
+    assert sum(run.status == GenerationRunStatus.PENDING for run in result.runs) == 3
 
 
 def test_stale_running_task_is_suspended(reference_fixture) -> None:
@@ -445,7 +460,7 @@ def test_stale_running_task_is_suspended(reference_fixture) -> None:
     ]
 
 
-def test_whole_set_approval_is_atomic_idempotent_and_preserves_history(
+def test_whole_set_approval_is_atomic_idempotent_and_returns_old_images_to_candidates(
     reference_fixture, monkeypatch
 ) -> None:
     session = reference_fixture["session"]
@@ -491,21 +506,20 @@ def test_whole_set_approval_is_atomic_idempotent_and_preserves_history(
         )
     )
     assert approved.approved_candidate_index == 1
-    assert len(generated_assets) == 3
+    assert len(generated_assets) == 2
     assert {asset.role for asset in generated_assets} == {
         VisualAssetRole.IDENTITY_FACE,
-        VisualAssetRole.IDENTITY_HALF_BODY,
         VisualAssetRole.IDENTITY_FULL_BODY,
     }
     assert all(asset.status == ApprovalStatus.APPROVED for asset in generated_assets)
-    assert session.get(VisualAsset, historical_id).status == ApprovalStatus.APPROVED
+    assert session.get(VisualAsset, historical_id).status == ApprovalStatus.DRAFT
     assert all(
         run.review_status == ApprovalStatus.APPROVED
         for run in approved.runs
         if run.candidate_index == 1
     )
     assert all(
-        run.review_status == ApprovalStatus.ARCHIVED
+        run.review_status == ApprovalStatus.DRAFT
         for run in approved.runs
         if run.candidate_index == 2
     )
@@ -534,10 +548,10 @@ def test_whole_set_approval_is_atomic_idempotent_and_preserves_history(
             .select_from(VisualAsset)
             .where(VisualAsset.source == VisualAssetSource.GENERATED_IMAGE)
         )
-        == 3
+        == 2
     )
     assert (
-        session.scalar(select(func.count()).select_from(CharacterReferenceImage)) == 12
+        session.scalar(select(func.count()).select_from(CharacterReferenceImage)) == 8
     )
     assert session.scalar(select(func.count()).select_from(ComicPage)) == 0
     assert session.scalar(select(func.count()).select_from(ComicImage)) == 0
@@ -609,7 +623,7 @@ def test_openai_compatible_tool_uses_renderer_abstraction_without_network(
     payload = task_response(result).model_dump(mode="json")
 
     assert result.status == GenerationTaskStatus.SUCCEEDED
-    assert len(renderer.submissions) == 3
+    assert len(renderer.submissions) == 2
     assert all(
         run.provider == ImageGenerationProvider.OPENAI_IMAGES_COMPATIBLE
         for run in result.runs

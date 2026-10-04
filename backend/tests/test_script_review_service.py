@@ -121,6 +121,33 @@ async def test_review_existing_pages_updates_each_result_without_rewriting(monke
 
 
 @pytest.mark.asyncio
+async def test_existing_page_missing_visible_binding_cannot_pass_supervisor(monkeypatch) -> None:
+    section = SimpleNamespace(id=8, section_no=1, task_id=3)
+    page = _page(1, 1, section, PageScriptReviewStatus.UNREVIEWED)
+    service = _service(ReviewRepository([page]))
+    service._section_visual_context = lambda **_kwargs: {
+        "scenes": [{"scene_key": "room"}],
+        "characters": [
+            {"character_key": "lin_cheng", "name": "林澄"},
+            {"character_key": "chen_yan", "name": "陈砚"},
+        ],
+    }
+    service._page_to_writer_payload = lambda _page: {
+        "page_no": 1, "scene_key": "room", "character_keys": ["lin_cheng"],
+        "characters": "林澄走进门；陈砚从书架前转身。",
+    }
+    class Supervisor:
+        async def review_section_pages(self, **_kwargs):
+            return {"reviews": [{"page_no": 1, "passed": True, "summary": "ok"}]}
+    monkeypatch.setattr("backend.services.script_service.ScriptSupervisorAgent", lambda: Supervisor())
+    events = [event async for event in service.stream_review_script_pages(task_id=3)]
+    assert page.script_review_status == PageScriptReviewStatus.FAILED
+    assert "chen_yan" in page.script_review_error
+    assert events[-1][1]["failed_page_nos"] == [1]
+    assert events[-1][1]["passed"] == 0
+
+
+@pytest.mark.asyncio
 async def test_review_existing_pages_failure_does_not_leave_reviewing(monkeypatch) -> None:
     section = SimpleNamespace(id=8, section_no=9, task_id=3)
     page = _page(1, 41, section, PageScriptReviewStatus.UNREVIEWED)

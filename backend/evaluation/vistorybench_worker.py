@@ -132,8 +132,7 @@ def _stage(manifest: dict[str, Any], work_dir: Path) -> tuple[Path, Path, Path]:
     return dataset_root, outputs_root, results_root
 
 
-def _release_cids(evaluator_class: Any, evaluator: Any) -> None:
-    del evaluator
+def _release_cids(evaluator_class: Any) -> None:
     evaluator_class._shared_model_cache.clear()
     gc.collect()
     try:
@@ -367,7 +366,9 @@ def run(manifest: dict[str, Any], work_dir: Path) -> dict[str, Any]:
         )
         payload["applicability"].update(detail.pop("applicability"))
         payload["details"]["cids"] = detail
-    _release_cids(CIDSEvaluator, cids)
+    # 先删调用方实例；仅在 helper 内 del 参数不会释放这里持有的模型。
+    del cids
+    _release_cids(CIDSEvaluator)
 
     csd = CSDEvaluator(
         config=config,

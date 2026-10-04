@@ -4,6 +4,9 @@ import argparse
 import base64
 import json
 import re
+import time
+from concurrent.futures import ThreadPoolExecutor
+from queue import Queue
 from email import policy
 from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -15,7 +18,7 @@ PROJECTS = [dict(id=1, title="雾港故事 · 验收项目 A", **STAMP),
             dict(id=2, title="新故事 · 空项目 B", **STAMP)]
 CHARACTER = dict(id=11, outline_version_id=21, character_key="hero", name="林夏",
                  visual_type="stylized_human", role="修理师", background="海港旧城区",
-                 appearance="短发，明亮眼睛", visual_anchors="蓝色外套",
+                 appearance="短发，明亮眼睛",
                  negative_constraints="保持人物年龄", default_hairstyle="黑色短发",
                  default_clothing="蓝色工作服", default_accessories="工具包",
                  default_color_palette="蓝色、橙色", **STAMP)
@@ -26,13 +29,13 @@ TASK = dict(id=101, project_id=1, outline_version_id=21, status="succeeded", mod
             error_message=None, **STAMP)
 SCENE = dict(id=301, task_id=101, scene_key="harbor", name="雾港维修店", location_type="室内",
              time_of_day="清晨", lighting="暖灯", weather="薄雾", environment_details="旧机器与工具架",
-             color_palette="暖橙、灰蓝", visual_anchors="圆窗与工作台", negative_constraints="无现代霓虹",
+             color_palette="暖橙、灰蓝", negative_constraints="无现代霓虹",
              selected_visual_version_id=501, reference_subject_id=51, **STAMP)
 SCRIPT_CHARACTER = dict(id=401, task_id=101, section_id=201, section_no=1,
                         outline_character_id=11, outfit_variant_id=601, character_key="hero",
                         name="林夏", section_role="主角", current_hairstyle="黑色短发",
                         current_clothing="蓝色工作服", current_accessories="工具包", current_state="健康",
-                        emotion="好奇", temporary_changes="", visual_anchors="蓝色外套",
+                        emotion="好奇", temporary_changes="",
                         negative_constraints="人物年龄不变", outline_character=CHARACTER, **STAMP)
 PAGES = [dict(id=1000+n, project_id=1, task_id=101, section_id=201, section_no=1, scene_id=301,
               scene_key="harbor", character_keys=["hero"], page_no=n,
@@ -59,8 +62,37 @@ SUBJECTS = [dict(id=51, project_id=1, entity_type="scene", key="harbor", name="�
                  description="圆窗、旧机器与木制工作台", negative_constraints="不要现代霓虹", **STAMP),
             dict(id=52, project_id=1, entity_type="prop", key="mechanical-key", name="机械钥匙",
                  description="黄铜齿轮形钥匙", negative_constraints="保持齿轮数量", **STAMP)]
+VISUAL_PROFILES = {}
+
+
+def visual_profiles(project_id, data):
+    category = data["entity_type"]
+    identities = [("character", data["entity_id"])] if category == "character" else [("scene_subject" if category == "scene" else "prop_subject", data["reference_subject_id"])]
+    if data.get("outfit_variant_id"): identities.append(("outfit", data["outfit_variant_id"]))
+    if category == "scene" and data.get("entity_id"): identities.append(("scene_version", data["entity_id"]))
+    profiles = []
+    for kind, owner_id in identities:
+        key = (project_id, kind, owner_id)
+        if key not in VISUAL_PROFILES or data.get("refresh_visual_profiles"):
+            previous = VISUAL_PROFILES.get(key)
+            roles = ["identity_face", "identity_full_body", "identity_side", "identity_back"] if kind in ("character", "outfit") else ["prop_reference" if kind == "prop_subject" else "scene_master"]
+            texts = dict(character="Black hair.", outfit="Blue workwear.", scene_subject="Brick walls and a round window.", scene_version="Warm lamps at night.", prop_subject="A closed bronze watch case.")
+            alternatives = [dict(natural=texts[kind], tags=[texts[kind].strip(".").lower()])]
+            if kind == "character": alternatives.append(dict(natural="Cool brown hair.", tags=["cool brown hair"]))
+            facts = [dict(kind="head" if kind == "character" else "clothing" if kind == "outfit" else "environment" if kind.startswith("scene") else "shape",
+                attribute="hair_color" if kind == "character" else kind, polarity="required", must_keep=True,
+                source_field="default_hairstyle" if kind == "character" else "description", source_excerpt="黑或冷褐发" if kind == "character" else texts[kind],
+                views=roles if kind != "outfit" else roles[1:], options=alternatives, selected=0, default_index=0,
+                default_is_explicit=False, selection_reason="No explicit default; use the first candidate.")]
+            VISUAL_PROFILES[key] = dict(id=previous["id"] if previous else 7000+len(VISUAL_PROFILES), project_id=project_id,
+                kind=kind, owner_id=owner_id, revision=previous["revision"]+1 if previous else 1, source_hash="a"*64,
+                format_version=1, data=dict(human=kind == "character", facts=facts))
+        profiles.append(VISUAL_PROFILES[key])
+    return profiles
+
+
 REFERENCE_TASKS = []
-REFERENCE_ROLES = {"character": ["identity_face", "identity_half_body", "identity_full_body", "identity_side", "identity_back"],
+REFERENCE_ROLES = {"character": ["identity_face", "identity_full_body", "identity_side", "identity_back"],
                    "scene": ["scene_master"], "prop": ["prop_reference"]}
 REF_TASK = dict(id=801, project_id=1, outline_character_id=11, character_name="林夏", tool_id=1,
                 tool_name="模拟生图工具", style_profile_id=701, status="succeeded", candidate_count=1,
@@ -114,6 +146,58 @@ def mock_comic_image(page_id):
         width=1, height=1, is_selected=False, created_at=NOW)
 
 
+def set_reference_asset_status(asset, status):
+    """离线模拟同用途同范围互斥确认；原图与转存关联保留以支持重新确认。"""
+    def same_slot(peer):
+        if any(peer.get(key) != asset.get(key) for key in ("project_id", "entity_type", "role", "entity_id")):
+            return False
+        if asset["entity_type"] == "character":
+            return asset["role"] == "identity_face" or peer.get("outfit_variant_id") == asset.get("outfit_variant_id")
+        return peer.get("reference_subject_id") == asset.get("reference_subject_id")
+    if status == "approved":
+        for peer in ASSETS:
+            if peer["id"] != asset["id"] and peer["status"] == "approved" and same_slot(peer):
+                peer.update(status="draft", approved_at=None)
+    asset.update(status=status, approved_at=NOW if status == "approved" else None)
+    by_id = {item["id"]: item for item in ASSETS}
+    for task in REFERENCE_TASKS:
+        for candidate in task["candidates"]:
+            for run in candidate["roles"].values():
+                for image in run["images"]:
+                    target = by_id.get(image.get("promoted_asset_id"))
+                    image["promoted_asset_status"] = target["status"] if target else None
+                run["review_status"] = "approved" if any(image["promoted_asset_status"] == "approved" for image in run["images"]) else "draft"
+
+
+def create_reference_mock_task(project_id, data):
+    """单张和批量验收共用内存候选，不访问真实 Provider。"""
+    subject = next((item for item in SUBJECTS if item["id"] == data.get("reference_subject_id")), None)
+    name = subject["name"] if subject else CHARACTER["name"]
+    sources = data.get("source_asset_ids", []) if data.get("source_mode") == "manual" else []
+    task_id = 1800+len(REFERENCE_TASKS)
+    candidates = []
+    for index in range(1, data["candidate_count"]+1):
+        roles = {}
+        for offset, role in enumerate(data["roles"]):
+            image_id = task_id*100+index*10+offset
+            image = dict(id=image_id, artifact_index=0, image_url=f"/api/reference-images/images/{image_id}/file",
+                         sha256="mock", width=1, height=1, promoted_asset_id=None)
+            roles[role] = dict(id=image_id, candidate_index=index, role=role, seed=index, provider="openai_images_compatible",
+                               prompt_type="natural_language", positive_prompt=data["prompts"][role]["positive"], negative_prompt=data["prompts"][role]["negative"],
+                               status="succeeded", review_status="draft", seed_applied=False, external_request_id="mock", degradations=[], error_code=None,
+                               images=[image], primary_image=image, finished_at=NOW, **STAMP)
+        candidates.append(dict(candidate_index=index, seed=index, status="succeeded", roles=roles))
+    total = len(data["roles"])*data["candidate_count"]
+    task = dict(id=task_id, project_id=project_id, entity_type=data["entity_type"], entity_id=data.get("entity_id"),
+                entity_key=subject["key"] if subject else "hero", reference_subject_id=data.get("reference_subject_id"),
+                outfit_variant_id=data.get("outfit_variant_id"), outline_character_id=data.get("entity_id") if data["entity_type"] == "character" else None,
+                subject_name=name, tool_preset_id=1, tool_name=TOOL["name"], status="succeeded", candidate_count=data["candidate_count"],
+                selected_roles=data["roles"], source_asset_ids=sources, prompt_type="natural_language", prompts=data["prompts"],
+                progress=dict(completed=total, failed=0, total=total), error_code=None, candidates=candidates, **STAMP)
+    REFERENCE_TASKS.insert(0, task)
+    return task
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_args):
         pass
@@ -125,6 +209,48 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(content)))
         self.end_headers()
         self.wfile.write(content)
+
+    def prepare_reference_preview(self, project_id, data):
+        """模拟后端线程中的摘要准备，保持真实批量 SSE 协议。"""
+        time.sleep(getattr(self.server, "prompt_delay", 0))
+        if data["entity_type"] == "prop" and getattr(self.server, "fail_prop_once", False):
+            self.server.fail_prop_once = False
+            raise ValueError("mock extraction failure")
+        profiles = visual_profiles(project_id, data)
+        prompts = {role: dict(positive="One " + role.replace("_", " ") + " reference. " + " ".join(
+            fact["options"][fact["selected"]]["natural"] for profile in profiles for fact in profile["data"]["facts"] if role in fact["views"]),
+            negative="Additional subjects, collage, captions") for role in data["roles"]}
+        sources = data.get("source_asset_ids", []) if data.get("source_mode") == "manual" else []
+        return dict(prompt_type="natural_language", prompts=prompts, source_asset_ids=sources, visual_profiles=profiles)
+
+    def stream_reference_previews(self, project_id, items):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.end_headers()
+        events = Queue()
+        def emit(event, payload):
+            self.wfile.write(f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n".encode())
+            self.wfile.flush()
+        def prepare(index, item):
+            events.put(dict(project_id=project_id, index=index, status="running"))
+            try:
+                events.put(dict(project_id=project_id, index=index, status="succeeded", preview=self.prepare_reference_preview(project_id, item)))
+            except ValueError:
+                events.put(dict(project_id=project_id, index=index, status="failed",
+                    error={"code": "reference.profile_extraction_failed", "message": "模拟提炼失败，请重试。"}))
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            try:
+                emit("accepted", dict(project_id=project_id, total=len(items), concurrency=5))
+                futures = [executor.submit(prepare, index, item) for index, item in enumerate(items)]
+                completed = failed = 0
+                while completed + failed < len(items):
+                    event = events.get()
+                    completed += event["status"] == "succeeded"
+                    failed += event["status"] == "failed"
+                    emit("item", event)
+                emit("done", dict(project_id=project_id, total=len(items), completed=completed, failed=failed))
+            except (BrokenPipeError, ConnectionResetError):
+                for future in futures: future.cancel()
 
     def do_GET(self):
         path = urlparse(self.path).path
@@ -146,6 +272,14 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/image-specs/presets": return self.send(PRESETS)
         if path == "/api/settings/app": return self.send({"script_section_max_concurrency": 2})
         if path == "/api/settings/llm": return self.send({"items": [], "active_config_id": None})
+        if path == "/api/settings/llm/providers":
+            return self.send([dict(value="openai_compatible", label="OpenAI Compatible", requires_base_url=True, model_prefixes=[]),
+                              dict(value="deepseek", label="DeepSeek", requires_base_url=False, model_prefixes=[])])
+        if path == "/api/settings/consistency-evaluation":
+            return self.send(dict(cids_cross_min=.5, cids_self_min=.5, csd_cross_min=.5, csd_self_min=.5, occm_min=.5, copy_paste_max=.5,
+                metric_version="mock", runtime=dict(ready=False, python_executable="mock-python", source_root="mock-source", pretrain_root="mock-weights",
+                    missing_modules=[], missing_source_files=[], missing_weights=[], invalid_source_files=[], invalid_weights=[],
+                    onnx_cuda_available=False, arcface_provider="cpu", torch_version=None, cuda_available=False, cuda_device=None, detail=None, metric_version="mock")))
         if (path.startswith("/api/visual-bible/assets/") or path.startswith("/api/reference-images/images/")) and path.endswith("/file"):
             self.send_response(200)
             self.send_header("Content-Type", "image/png")
@@ -173,7 +307,17 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/character-references/tasks/801": return self.send(REF_TASK)
         if match := re.fullmatch(r"/api/image-specs/script-tasks/(\d+)(/(continuity|compilations))?", path):
             if match[3] == "compilations": return self.send([COMPILATION])
-            if match[3] == "continuity": return self.send([dict(id=1101, task_id=101, source_hash="mock", status="succeeded", events=[], snapshots=[], created_at=NOW)])
+            if match[3] == "continuity":
+                snapshots = [dict(id=page["id"], page_id=page["id"], page_no=page["page_no"],
+                                  state={"characters": [{"character_key": "lin_xia", "name": "林夏"}], "scene": {"scene_key": "workshop"}},
+                                  state_hash="mock-page", warnings=[], created_at=NOW) for page in PAGES]
+                return self.send([
+                    dict(id=1101, task_id=101, source_hash="mock", status="succeeded", events=[], snapshots=snapshots, created_at=NOW),
+                    dict(id=1100, task_id=101, source_hash="legacy", status="succeeded",
+                         events=[dict(id=1, page_id=PAGES[0]["id"], page_no=1, sequence_no=1, event_type="set_outfit",
+                                      target_type="character", target_key="lin_xia", timing="before_page", payload={"description": "旧版服装"}, source="manual")],
+                         snapshots=snapshots[:1], created_at=NOW),
+                ])
             return self.send([dict(id=2000+idx*3+i, page_id=page["id"], page_no=page["page_no"], snapshot_id=1,
                                    shot_plan_id=1, prompt_type=prompt_type, generation_mode="preview", spec={"reference_plan": planned_references()},
                                    positive_prompt="林夏在维修店检查机器，水彩漫画", negative_prompt="避免错误人物数量",
@@ -228,35 +372,18 @@ class Handler(BaseHTTPRequestHandler):
             subject = dict(data, id=100+len(SUBJECTS), project_id=int(match[1]), key=data.get("key") or f"subject-{len(SUBJECTS)}", **STAMP)
             SUBJECTS.append(subject)
             return self.send(subject)
+        if match := re.fullmatch(r"/api/reference-images/projects/(\d+)/tasks/batch", path):
+            return self.send({"items": [create_reference_mock_task(int(match[1]), item) for item in data["items"]]})
+        if match := re.fullmatch(r"/api/reference-images/projects/(\d+)/prompt-preview/batch", path):
+            return self.stream_reference_previews(int(match[1]), data["items"])
         if match := re.fullmatch(r"/api/reference-images/projects/(\d+)/(prompt-preview|tasks)", path):
-            project_id = int(match[1]); subject = next((item for item in SUBJECTS if item["id"] == data.get("reference_subject_id")), None)
-            name = subject["name"] if subject else CHARACTER["name"]
-            sources = data.get("source_asset_ids", []) if data.get("source_mode") == "manual" else []
-            labels = dict(identity_face="脸部", identity_half_body="半身", identity_full_body="正面全身", identity_side="侧面全身", identity_back="背面全身", scene_master="场景", prop_reference="物品")
-            prompts = {role: dict(positive=f"{name}，{labels[role]}，单一主体独立参考图", negative="避免拼图和重复人物") for role in data["roles"]}
-            if match[2] == "prompt-preview": return self.send(dict(prompt_type="natural_language", prompts=prompts, source_asset_ids=sources))
-            task_id = 1800+len(REFERENCE_TASKS)
-            candidates = []
-            for index in range(1, data["candidate_count"]+1):
-                roles = {}
-                for offset, role in enumerate(data["roles"]):
-                    image_id = task_id*100+index*10+offset
-                    image = dict(id=image_id, artifact_index=0, image_url=f"/api/reference-images/images/{image_id}/file",
-                                 sha256="mock", width=1, height=1, promoted_asset_id=None)
-                    roles[role] = dict(id=image_id, candidate_index=index, role=role, seed=index, provider="openai_images_compatible",
-                                       prompt_type="natural_language", positive_prompt=data["prompts"][role]["positive"], negative_prompt=data["prompts"][role]["negative"],
-                                       status="succeeded", review_status="draft", seed_applied=False, external_request_id="mock", degradations=[], error_code=None,
-                                       images=[image], primary_image=image, finished_at=NOW, **STAMP)
-                candidates.append(dict(candidate_index=index, seed=index, status="succeeded", roles=roles))
-            total = len(data["roles"])*data["candidate_count"]
-            task = dict(id=task_id, project_id=project_id, entity_type=data["entity_type"], entity_id=data.get("entity_id"),
-                        entity_key=subject["key"] if subject else "hero", reference_subject_id=data.get("reference_subject_id"),
-                        outfit_variant_id=data.get("outfit_variant_id"), outline_character_id=data.get("entity_id") if data["entity_type"] == "character" else None,
-                        subject_name=name, tool_preset_id=1, tool_name=TOOL["name"], status="succeeded", candidate_count=data["candidate_count"],
-                        selected_roles=data["roles"], source_asset_ids=sources, prompt_type="natural_language", prompts=data["prompts"],
-                        progress=dict(completed=total, failed=0, total=total), error_code=None, candidates=candidates, **STAMP)
-            REFERENCE_TASKS.insert(0, task)
-            return self.send(task)
+            project_id = int(match[1])
+            if match[2] == "prompt-preview":
+                try:
+                    return self.send(self.prepare_reference_preview(project_id, data))
+                except ValueError:
+                    return self.send({"detail": {"code": "reference.profile_extraction_failed", "message": "模拟提炼失败，请重试。"}}, 422)
+            return self.send(create_reference_mock_task(project_id, data))
         if match := re.fullmatch(r"/api/reference-images/images/(\d+)/approve", path):
             image_id = int(match[1])
             for task in REFERENCE_TASKS:
@@ -265,13 +392,16 @@ class Handler(BaseHTTPRequestHandler):
                         image = next((item for item in run["images"] if item["id"] == image_id), None)
                         if image:
                             if image["promoted_asset_id"]:
-                                return self.send(next(item for item in ASSETS if item["id"] == image["promoted_asset_id"]))
+                                asset = next(item for item in ASSETS if item["id"] == image["promoted_asset_id"])
+                                set_reference_asset_status(asset, "approved")
+                                return self.send(asset)
                             asset = dict(id=1200+len(ASSETS), project_id=task["project_id"], entity_type=task["entity_type"],
                                          entity_id=task["entity_id"], entity_key=task["entity_key"], reference_subject_id=task["reference_subject_id"],
                                          outfit_variant_id=task["outfit_variant_id"], role=role, storage_kind="local_file", local_path="mock.png",
                                          renderer_locator=None, mime_type="image/png", sha256="mock", width=1, height=1, version=1,
                                          status="approved", source="generated", source_image_id=None, crop_metadata={}, mask_asset_id=None, approved_at=NOW, **STAMP)
                             image["promoted_asset_id"] = asset["id"]; ASSETS.insert(0, asset)
+                            set_reference_asset_status(asset, "approved")
                             return self.send(asset)
         if path == "/api/outline/sessions/resolve":
             pid = data["project_id"]
@@ -279,7 +409,7 @@ class Handler(BaseHTTPRequestHandler):
                                   outline_versions=[OUTLINE] if pid == 1 else [], messages=[]))
         if match := re.fullmatch(r"/api/visual-bible/assets/(\d+)/status", path):
             asset = next(item for item in ASSETS if item["id"] == int(match[1]))
-            asset.update(status=data["status"], approved_at=NOW)
+            set_reference_asset_status(asset, data["status"])
             return self.send(asset)
         if match := re.fullmatch(r"/api/visual-bible/configurations/(outfit|style|scene)/(\d+)/status", path):
             items = {"outfit": OUTFITS, "style": STYLES, "scene": SCENE_VERSIONS}[match[1]]
@@ -298,6 +428,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_PUT(self):
         path = urlparse(self.path).path
         data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or "{}")
+        if match := re.fullmatch(r"/api/reference-images/visual-profiles/(\d+)", path):
+            item = next((profile for profile in VISUAL_PROFILES.values() if profile["id"] == int(match[1])), None)
+            if item is None or item["revision"] != data["expected_revision"]:
+                return self.send({"detail": {"code": "reference.profile_conflict", "message": "摘要已更新，请重新准备。"}}, 409)
+            item.update(data=data["data"], revision=item["revision"]+1)
+            return self.send(item)
         if match := re.fullmatch(r"/api/reference-images/subjects/(\d+)", path):
             item = next(item for item in SUBJECTS if item["id"] == int(match[1])); item.update(data)
             return self.send(item)
@@ -316,6 +452,11 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--prompt-delay", type=float, default=0, help="模拟 Prompt 请求耗时（秒）")
+    parser.add_argument("--fail-first-prop-preview", action="store_true", help="模拟首个物品 Prompt 请求失败")
     args = parser.parse_args()
     print(f"Mock workspace API: http://127.0.0.1:{args.port} (in-memory only)", flush=True)
-    ThreadingHTTPServer(("127.0.0.1", args.port), Handler).serve_forever()
+    server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    server.prompt_delay = max(0, args.prompt_delay)
+    server.fail_prop_once = args.fail_first_prop_preview
+    server.serve_forever()

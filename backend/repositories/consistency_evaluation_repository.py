@@ -34,7 +34,6 @@ from backend.utils.json_utils import canonical_json
 # 人脸身份编码只能使用有机会显示脸部的视角；背面图仍供生图选图使用。
 FACE_VISIBLE_IDENTITY_ASSET_ROLES = (
     VisualAssetRole.IDENTITY_FACE,
-    VisualAssetRole.IDENTITY_HALF_BODY,
     VisualAssetRole.IDENTITY_FULL_BODY,
     VisualAssetRole.IDENTITY_SIDE,
 )
@@ -277,8 +276,8 @@ class ConsistencyEvaluationRepository:
         track = self.get_track(track_id)
         if track is None:
             raise ValueError(f"ConsistencyEvaluationTrack not found: {track_id}")
-        if not track.passed or track.status != ConsistencyTrackStatus.PASSED:
-            raise ValueError(f"Consistency track has not passed: {track_id}")
+        if track.status not in {ConsistencyTrackStatus.PASSED, ConsistencyTrackStatus.FAILED}:
+            raise ValueError(f"Consistency track has not been evaluated: {track_id}")
         image_ids = json.loads(track.image_ids_json)
         try:
             for raw_page_id, image_id in image_ids.items():

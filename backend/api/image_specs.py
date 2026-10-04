@@ -11,11 +11,10 @@ from backend.api.schemas.image_spec import (
     ImageSpecResponse,
     ImageSpecPresetRequest,
     ImageSpecPresetResponse,
-    ReplaceContinuityEventsRequest,
     VisualSnapshotResponse,
 )
 from backend.api.scripts import SSE_HEADERS, sse_event
-from backend.i18n.errors import http_exception, sse_error_payload
+from backend.i18n.errors import AppError, http_exception, sse_error_payload
 from backend.i18n.locale import request_locale
 from backend.models.comic import ContinuityCompilation, ImagePromptPreset
 from backend.models.database import SessionLocal
@@ -212,7 +211,7 @@ def compile_task_stream(
             try:
                 async for event, data in service.stream_compile_task(
                     task_id=task_id,
-                    **payload.model_dump(),
+                    **payload.model_dump(exclude={"regenerate_continuity"}),
                 ):
                     yield sse_event(event, data)
             except Exception as exc:
@@ -223,20 +222,15 @@ def compile_task_stream(
 
 @router.put(
     "/compilations/{compilation_id}/events",
-    response_model=ContinuityCompilationResponse,
+    deprecated=True,
 )
 async def replace_continuity_events(
     compilation_id: int,
-    payload: ReplaceContinuityEventsRequest,
     request: Request,
-) -> ContinuityCompilationResponse:
-    with SessionLocal() as session:
-        service = ImageSpecService(ImageSpecRepository(session))
-        try:
-            result = await service.replace_events(
-                compilation_id=compilation_id,
-                events=[event.model_dump(mode="json") for event in payload.events],
-            )
-        except ValueError as exc:
-            raise http_exception(exc, request_locale(request)) from exc
-        return compilation_response(result)
+) -> None:
+    """旧事件编辑入口只返回退役提示，历史记录仍可通过 GET 查询。"""
+
+    raise http_exception(
+        AppError("image_spec.continuity_retired", status_code=status.HTTP_410_GONE),
+        request_locale(request),
+    )

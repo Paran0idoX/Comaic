@@ -1,5 +1,8 @@
 import { ApiError, apiHeaders, normalizeBackendError, parseApiErrorResponse } from './errors'
 
+export type SceneConditions = { time_of_day: string; weather: string; lighting: string; atmosphere: string }
+export type PageCharacterBinding = { id: number; name: string; outline_character_id: number | null; outfit_variant_id: number | null }
+
 export type ScriptPage = {
   id: number
   project_id: number
@@ -9,6 +12,11 @@ export type ScriptPage = {
   scene_id: number | null
   scene_key: string | null
   character_keys: string[]
+  scene_name?: string | null
+  reference_subject_id?: number | null
+  reference_subject_name?: string | null
+  character_bindings?: PageCharacterBinding[]
+  scene_conditions?: SceneConditions
   page_no: number
   summary: string | null
   characters: string | null
@@ -50,6 +58,8 @@ export type ScriptSectionListResponse = {
 export type ScriptScene = {
   id: number
   task_id: number
+  scene_definition_version?: number
+  reference_subject_id?: number | null
   scene_key: string
   name: string
   location_type: string
@@ -58,7 +68,6 @@ export type ScriptScene = {
   weather: string
   environment_details: string
   color_palette: string
-  visual_anchors: string
   negative_constraints: string
   selected_visual_version_id: number | null
   created_at: string
@@ -81,7 +90,6 @@ export type ScriptCharacter = {
   current_state: string
   emotion: string
   temporary_changes: string
-  visual_anchors: string
   negative_constraints: string
   outline_character: Record<string, unknown> | null
   created_at: string
@@ -120,6 +128,9 @@ export type ListProjectScriptTasksOptions = {
 export type CreatePageScriptPayload = {
   page_no: number
   task_id?: number
+  scene_id?: number
+  character_ids?: number[]
+  scene_conditions?: SceneConditions
   summary: string
   characters: string
   clothing: string
@@ -131,6 +142,9 @@ export type CreatePageScriptPayload = {
 
 export type UpdatePageScriptPayload = {
   task_id?: number
+  scene_id?: number
+  character_ids?: number[]
+  scene_conditions?: SceneConditions
   summary: string
   characters: string
   clothing: string
@@ -160,6 +174,7 @@ export type ScriptTask = {
   outline_version_id: number | null
   status: string
   mode: string
+  scene_definition_version?: number
   total_pages: number
   target_page_no: number | null
   user_requirement: string | null

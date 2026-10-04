@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import InfoTip from '@/components/workspace/InfoTip.vue'
 import {
   Delete,
   Document,
@@ -39,6 +40,7 @@ import {
   type ScriptScene,
   type ScriptSection,
   type ScriptTask,
+  type SceneConditions,
 } from '@/api/scripts'
 import { formatLocalDateTime, formatLocalNowTime } from '@/utils/datetime'
 import { useProjectContextStore } from '@/stores/projectContext'
@@ -97,6 +99,9 @@ const scriptDialogVisible = ref(false)
 const scriptDialogMode = ref<'create' | 'edit'>('create')
 const scriptFormPageNo = ref(1)
 const scriptForm = reactive({
+  scene_id: null as number | null,
+  character_ids: [] as number[],
+  scene_conditions: { time_of_day: '', weather: '', lighting: '', atmosphere: '' } as SceneConditions,
   summary: '',
   characters: '',
   clothing: '',
@@ -302,6 +307,9 @@ const scriptSummary = (summary: string | null) => {
 }
 
 const resetScriptForm = () => {
+  scriptForm.scene_id = null
+  scriptForm.character_ids = []
+  scriptForm.scene_conditions = { time_of_day: '', weather: '', lighting: '', atmosphere: '' }
   scriptForm.summary = ''
   scriptForm.characters = ''
   scriptForm.clothing = ''
@@ -312,6 +320,9 @@ const resetScriptForm = () => {
 }
 
 const fillScriptForm = (page: ScriptPage) => {
+  scriptForm.scene_id = page.scene_id ?? null
+  scriptForm.character_ids = pageCharacterBindings(page).map(character => character.id)
+  scriptForm.scene_conditions = { ...pageConditions(page) }
   scriptForm.summary = page.summary ?? ''
   scriptForm.characters = page.characters ?? ''
   scriptForm.clothing = page.clothing ?? ''
@@ -322,6 +333,9 @@ const fillScriptForm = (page: ScriptPage) => {
 }
 
 const buildScriptPayload = () => ({
+  ...(scriptForm.scene_id !== null ? { scene_id: scriptForm.scene_id } : {}),
+  character_ids: [...scriptForm.character_ids],
+  scene_conditions: { ...scriptForm.scene_conditions },
   summary: scriptForm.summary.trim(),
   characters: scriptForm.characters.trim(),
   clothing: scriptForm.clothing.trim(),
@@ -340,6 +354,35 @@ const requiredScriptFieldsFilled = () =>
       scriptForm.composition.trim() &&
       scriptForm.character_action.trim(),
   )
+
+// ID 决定关联，名称只用于阅读；历史响应缺少摘要时从当前批次的锁定设定回填。
+const pageCharacterBindings = (page: ScriptPage) => page.character_bindings ?? visualCharacters.value
+  .filter(character => character.section_id === page.section_id && (page.character_keys ?? []).includes(character.character_key))
+const pageSceneName = (page: ScriptPage) => page.reference_subject_name || page.scene_name ||
+  scenes.value.find(scene => scene.id === page.scene_id)?.name || t('scripts.bindings.unbound')
+const pageConditions = (page: ScriptPage): SceneConditions => {
+  const scene = scenes.value.find(item => item.id === page.scene_id)
+  return page.scene_conditions ?? { time_of_day: scene?.time_of_day || '', weather: scene?.weather || '', lighting: scene?.lighting || '', atmosphere: '' }
+}
+const pageCharacterDetails = (page: ScriptPage) => pageCharacterBindings(page)
+  .map(binding => visualCharacters.value.find(character => character.id === binding.id))
+  .filter((character): character is ScriptCharacter => Boolean(character))
+const pageSceneDetails = (page: ScriptPage) => scenes.value.find(scene => scene.id === page.scene_id)
+// 直接展示已保存字段，不把自由描述推断成新的设定；基准与分段变化分组阅读。
+const baselineFields = ['name', 'role', 'background', 'appearance', 'default_hairstyle', 'default_clothing', 'default_accessories', 'default_color_palette', 'negative_constraints'] as const
+const sectionCharacterFields = ['section_role', 'current_hairstyle', 'current_clothing', 'current_accessories', 'current_state', 'emotion', 'temporary_changes', 'negative_constraints'] as const
+const fixedSceneFields = ['location_type', 'environment_details', 'color_palette', 'negative_constraints'] as const
+const detailFieldValue = (value: unknown) => typeof value === 'string' && value.trim() ? value : t('scripts.bindings.unspecified')
+const editorSection = computed(() => scriptDialogMode.value === 'edit'
+  ? sections.value.find(section => section.id === pages.value.find(page => page.page_no === scriptFormPageNo.value)?.section_id)
+  : sections.value.find(section => section.page_start <= scriptFormPageNo.value && section.page_end >= scriptFormPageNo.value))
+const editorCharacters = computed(() => visualCharacters.value.filter(character => character.section_id === editorSection.value?.id))
+watch(scriptFormPageNo, () => {
+  if (scriptDialogMode.value !== 'create') return
+  const allowed = new Set(editorCharacters.value.map(character => character.id))
+  scriptForm.character_ids = scriptForm.character_ids.filter(id => allowed.has(id))
+})
+const conditionFields: Array<keyof SceneConditions> = ['time_of_day', 'weather', 'lighting', 'atmosphere']
 
 const reviewStatusLabel = (status: string) => {
   const key = `scripts.reviewStatus.${status}`
@@ -1194,6 +1237,10 @@ const saveManualScript = async () => {
     ElMessage.warning(t('scripts.errors.emptyScript'))
     return
   }
+  if (scriptForm.scene_id === null) {
+    ElMessage.warning(t('scripts.bindings.sceneRequired'))
+    return
+  }
 
   const projectId = selectedProjectId.value
   const taskId = selectedTaskId.value
@@ -1219,8 +1266,8 @@ const saveManualScript = async () => {
       scriptDialogVisible.value = false
       ElMessage.success(t('scripts.messages.scriptSaved'))
     }
-  } catch {
-    ElMessage.error(t('scripts.errors.saveScriptFailed'))
+  } catch (error) {
+    ElMessage.error(apiErrorMessage(error, t, t('scripts.errors.saveScriptFailed')))
   } finally {
     savingScript.value = false
   }
@@ -1559,11 +1606,6 @@ onDeactivated(() => {
       <div v-if="currentTask" class="script-context__actions">
         <span>{{ t('ux.currentBatch') }} #{{ currentTask.id }}</span>
         <el-tag effect="light">{{ taskStatusLabel(currentTask.status) }}</el-tag>
-        <el-button
-          v-if="completedTask"
-          type="primary"
-          @click="router.push({ path: '/visual-bible', query: { project_id: String(selectedProjectId), script_task_id: String(selectedTaskId) } })"
-        >{{ t('ux.nextStep') }} · {{ t('routeTitles.visualBible') }}</el-button>
       </div>
     </section>
 
@@ -1597,8 +1639,7 @@ onDeactivated(() => {
           <div class="panel__heading">
             <el-icon><EditPen /></el-icon>
             <div>
-              <h2>{{ t('scripts.config.title') }}</h2>
-              <p>{{ t('scripts.config.description') }}</p>
+              <div class="title-with-info"><h2>{{ t('scripts.config.title') }}</h2><InfoTip :content="t('scripts.config.description')" :label="t('scripts.config.title')" /></div>
             </div>
           </div>
 
@@ -1677,8 +1718,7 @@ onDeactivated(() => {
           <div class="panel__heading">
             <el-icon><Tickets /></el-icon>
             <div>
-              <h2>{{ t('scripts.progress.title') }}</h2>
-              <p>{{ t('scripts.progress.description') }}</p>
+              <div class="title-with-info"><h2>{{ t('scripts.progress.title') }}</h2><InfoTip :content="t('scripts.progress.description')" :label="t('scripts.progress.title')" /></div>
             </div>
           </div>
 
@@ -1715,8 +1755,7 @@ onDeactivated(() => {
             <div class="panel__heading-main">
               <el-icon><Tickets /></el-icon>
               <div>
-                <h2>{{ t('scripts.sections.title') }}</h2>
-                <p>{{ t('scripts.sections.description') }}</p>
+                <div class="title-with-info"><h2>{{ t('scripts.sections.title') }}</h2><InfoTip :content="t('scripts.sections.description')" :label="t('scripts.sections.title')" /></div>
               </div>
             </div>
             <el-dropdown trigger="click">
@@ -1783,19 +1822,21 @@ onDeactivated(() => {
                 </p>
               </div>
             </div>
-            <el-button type="primary" :icon="Plus" :disabled="!canEditScripts" @click="openCreateScript">
-              {{ t('scripts.actions.addScript') }}
-            </el-button>
-            <el-dropdown trigger="click">
-              <el-button :icon="MoreFilled" :aria-label="t('scripts.actions.more')" />
-              <template #dropdown>
-                <el-dropdown-menu>
-                  <el-dropdown-item :icon="Delete" :disabled="!canDeleteAllScripts" @click="deleteAllScripts">
-                    {{ t('scripts.actions.deleteAllScripts') }}
-                  </el-dropdown-item>
-                </el-dropdown-menu>
-              </template>
-            </el-dropdown>
+            <div class="script-results__actions">
+              <el-button type="primary" :icon="Plus" :disabled="!canEditScripts" @click="openCreateScript">
+                {{ t('scripts.actions.addScript') }}
+              </el-button>
+              <el-dropdown trigger="click">
+                <el-button :icon="MoreFilled" :aria-label="t('scripts.actions.more')" />
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item :icon="Delete" :disabled="!canDeleteAllScripts" @click="deleteAllScripts">
+                      {{ t('scripts.actions.deleteAllScripts') }}
+                    </el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
+            </div>
           </div>
 
           <div class="script-results__toolbar workspace-toolbar">
@@ -1828,7 +1869,7 @@ onDeactivated(() => {
             v-if="paginatedPages.length > 0"
             :data="paginatedPages"
             class="script-results__table"
-            height="520"
+            max-height="520"
             :aria-label="t('scripts.pages.title')"
           >
             <el-table-column prop="page_no" :label="t('scripts.pages.columns.pageNo')" width="88" />
@@ -1855,20 +1896,30 @@ onDeactivated(() => {
                 <span class="script-results__summary">{{ scriptSummary(row.summary) }}</span>
               </template>
             </el-table-column>
+            <el-table-column :label="t('scripts.bindings.characters')" min-width="150">
+              <template #default="{ row }">
+                <span>{{ pageCharacterBindings(row).map(character => character.name).join('、') || t('scripts.bindings.noCharacters') }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column :label="t('scripts.bindings.scene')" min-width="170">
+              <template #default="{ row }">{{ pageSceneName(row) }}</template>
+            </el-table-column>
             <el-table-column :label="t('scripts.pages.columns.actions')" width="200" fixed="right">
               <template #default="{ row }">
-                <el-button text type="primary" :icon="View" @click="openDetail(row)">
+                <div class="table-actions">
+                <el-button link type="primary" :icon="View" @click="openDetail(row)">
                   {{ t('scripts.actions.viewDetail') }}
                 </el-button>
-                <el-button text type="primary" :icon="EditPen" :disabled="!canEditScripts" @click="openEditScript(row)">
+                <el-button link type="primary" :icon="EditPen" :disabled="!canEditScripts" @click="openEditScript(row)">
                   {{ t('projects.edit') }}
                 </el-button>
                 <el-dropdown trigger="click">
-                  <el-button text :icon="MoreFilled" :aria-label="t('ux.moreActions')" />
+                  <el-button link :icon="MoreFilled" :aria-label="t('ux.moreActions')" />
                   <template #dropdown><el-dropdown-menu>
                     <el-dropdown-item :icon="Delete" :disabled="!canEditScripts" @click="clearManualScript(row)">{{ t('scripts.actions.clearScript') }}</el-dropdown-item>
                   </el-dropdown-menu></template>
                 </el-dropdown>
+                </div>
               </template>
             </el-table-column>
           </el-table>
@@ -1901,8 +1952,7 @@ onDeactivated(() => {
           <div class="panel__heading-main">
             <el-icon><View /></el-icon>
             <div>
-              <h2>{{ t('scripts.visual.title') }}</h2>
-              <p>{{ t('scripts.visual.description') }}</p>
+              <div class="title-with-info"><h2>{{ t('scripts.visual.title') }}</h2><InfoTip :content="t('scripts.visual.description')" :label="t('scripts.visual.title')" /></div>
             </div>
           </div>
         </div>
@@ -1942,7 +1992,6 @@ onDeactivated(() => {
                     {{ character.section_role || character.current_state || t('imageGeneration.emptyText') }}
                   </strong>
                   <p>{{ character.current_clothing || character.current_state || character.section_role }}</p>
-                  <small>{{ character.visual_anchors }}</small>
                 </article>
               </el-collapse-item>
             </el-collapse>
@@ -1954,7 +2003,6 @@ onDeactivated(() => {
               <article v-for="scene in scenes" :key="scene.id" class="visual-card">
                 <strong>{{ scene.name }}</strong>
                 <p>{{ scene.environment_details }}</p>
-                <small>{{ scene.visual_anchors }}</small>
                 <details class="script-technical-details">
                   <summary>{{ t('visualBible.review.technicalDetails') }}</summary>
                   <p>{{ t('scripts.visual.sceneKey') }} · {{ scene.scene_key }}</p>
@@ -1975,6 +2023,54 @@ onDeactivated(() => {
       width="720px"
     >
       <div v-if="selectedPage?.summary" class="script-detail">
+        <section class="script-detail__block">
+          <strong>{{ t('scripts.bindings.characters') }}</strong>
+          <p>{{ pageCharacterBindings(selectedPage).map(character => character.name).join('、') || t('scripts.bindings.noCharacters') }}</p>
+          <details v-for="binding in pageCharacterBindings(selectedPage)" :key="`${selectedPage.id}-${binding.id}`" class="script-detail__entry">
+            <summary>{{ binding.name }}</summary>
+            <template v-for="character in pageCharacterDetails(selectedPage).filter(item => item.id === binding.id)" :key="character.id">
+              <h4>{{ t('scripts.bindings.identity') }}</h4>
+              <dl v-if="character.outline_character" class="script-detail__fields">
+                <div v-for="field in baselineFields" :key="field">
+                  <dt>{{ t(`scripts.bindings.attributes.${field}`) }}</dt>
+                  <dd>{{ detailFieldValue(character.outline_character[field]) }}</dd>
+                </div>
+              </dl>
+              <p v-else>{{ t('scripts.bindings.unbound') }}</p>
+              <h4>{{ t('scripts.bindings.sectionSettings') }}</h4>
+              <dl class="script-detail__fields">
+                <div v-for="field in sectionCharacterFields" :key="field">
+                  <dt>{{ t(`scripts.bindings.attributes.${field}`) }}</dt>
+                  <dd>{{ detailFieldValue(character[field]) }}</dd>
+                </div>
+              </dl>
+            </template>
+            <p v-if="!pageCharacterDetails(selectedPage).some(item => item.id === binding.id)">{{ t('scripts.bindings.detailsUnavailable') }}</p>
+          </details>
+        </section>
+        <section class="script-detail__block">
+          <strong>{{ t('scripts.bindings.scene') }}</strong>
+          <details v-if="selectedPage.scene_id" :key="`${selectedPage.id}-${selectedPage.scene_id}`" class="script-detail__entry">
+            <summary>{{ pageSceneName(selectedPage) }}</summary>
+            <dl v-if="pageSceneDetails(selectedPage)" class="script-detail__fields">
+              <div v-for="field in fixedSceneFields" :key="field">
+                <dt>{{ t(`scripts.bindings.attributes.${field}`) }}</dt>
+                <dd>{{ detailFieldValue(pageSceneDetails(selectedPage)?.[field]) }}</dd>
+              </div>
+            </dl>
+            <p v-else>{{ t('scripts.bindings.detailsUnavailable') }}</p>
+          </details>
+          <p v-else>{{ t('scripts.bindings.unbound') }}</p>
+        </section>
+        <section class="script-detail__block">
+          <strong>{{ t('scripts.bindings.conditions') }}</strong>
+          <dl class="script-detail__fields">
+            <div v-for="field in conditionFields" :key="field">
+              <dt>{{ t(`scripts.bindings.${field}`) }}</dt>
+              <dd>{{ detailFieldValue(pageConditions(selectedPage)[field]) }}</dd>
+            </div>
+          </dl>
+        </section>
         <section class="script-detail__block">
           <strong>{{ t('scripts.fields.summary') }}</strong>
           <p>{{ selectedPage.summary }}</p>
@@ -2031,6 +2127,20 @@ onDeactivated(() => {
       width="720px"
     >
       <el-form label-position="top">
+        <el-form-item :label="t('scripts.bindings.scene')" required>
+          <el-select v-model="scriptForm.scene_id" filterable :loading="loadingVisualSettings" :placeholder="t('scripts.bindings.selectScene')" style="width:100%">
+            <el-option v-for="scene in scenes" :key="scene.id" :value="scene.id" :label="scene.name" />
+          </el-select>
+        </el-form-item>
+        <el-form-item :label="t('scripts.bindings.characters')">
+          <el-select v-model="scriptForm.character_ids" multiple filterable :loading="loadingVisualSettings" :placeholder="t('scripts.bindings.selectCharacters')" style="width:100%">
+            <el-option v-for="character in editorCharacters" :key="character.id" :value="character.id" :label="character.name" />
+          </el-select>
+        </el-form-item>
+        <el-form-item v-for="field in conditionFields" :key="field" :label="t(`scripts.bindings.${field}`)">
+          <el-input v-model="scriptForm.scene_conditions[field]" :placeholder="t('scripts.bindings.unspecified')" />
+        </el-form-item>
+        <p>{{ t('scripts.bindings.editHelp') }}</p>
         <el-form-item :label="t('scripts.pages.columns.pageNo')">
           <el-input-number
             v-model="scriptFormPageNo"
@@ -2082,6 +2192,8 @@ onDeactivated(() => {
 </template>
 
 <style scoped>
+.table-actions { display: flex; align-items: center; gap: 12px; white-space: nowrap; }
+.table-actions :deep(.el-button) { margin-left: 0; }
 .script-page {
   display: flex;
   flex-direction: column;
@@ -2257,12 +2369,15 @@ onDeactivated(() => {
 .visual-settings__grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  /* 两列内容独立靠顶，场景列表的高度不能撑开人物列和收起的卡片。 */
+  align-items: start;
   gap: 16px;
   padding: 18px 22px 22px;
 }
 
 .visual-settings__column {
   display: grid;
+  align-content: start;
   gap: 10px;
   min-width: 0;
 }
@@ -2299,6 +2414,7 @@ onDeactivated(() => {
 
 .visual-character-groups {
   display: grid;
+  align-content: start;
   gap: 10px;
   border: 0;
 }
@@ -2311,6 +2427,7 @@ onDeactivated(() => {
 }
 
 .visual-character-groups :deep(.el-collapse-item__header) {
+  height: 44px;
   min-height: 44px;
   padding: 0 12px;
   border-bottom: 0;
@@ -2460,7 +2577,17 @@ onDeactivated(() => {
 
 .script-results__heading {
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 16px;
+}
+
+/* 主操作与更多菜单作为同一组靠右，避免三个元素被均分到标题栏中间。 */
+.script-results__actions {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 12px;
+  margin-left: auto;
 }
 
 .script-results__table {
@@ -2500,6 +2627,47 @@ onDeactivated(() => {
 .script-results__summary {
   color: #334155;
   line-height: 1.55;
+}
+
+.script-detail__entry {
+  margin-top: 10px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.script-detail__entry summary {
+  cursor: pointer;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.script-detail__entry h4 {
+  margin: 16px 0 8px;
+}
+
+.script-detail__fields {
+  margin: 8px 0 0;
+}
+
+.script-detail__fields > div {
+  display: grid;
+  grid-template-columns: minmax(90px, 25%) minmax(0, 1fr);
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--el-border-color-lighter);
+}
+
+.script-detail__fields dt {
+  color: var(--el-text-color-secondary);
+  overflow-wrap: anywhere;
+}
+
+.script-detail__fields dd {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.6;
 }
 
 .script-detail {

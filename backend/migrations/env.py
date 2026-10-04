@@ -10,7 +10,7 @@ import backend.models.comic  # noqa: F401 - 注册全部 ORM metadata
 config = context.config
 config.set_main_option("sqlalchemy.url", DATABASE_URL.replace("%", "%%"))
 
-if config.config_file_name is not None:
+if config.config_file_name is not None and config.attributes.get("configure_logging", True):
     fileConfig(config.config_file_name)
 
 target_metadata = Base.metadata

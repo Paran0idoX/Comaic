@@ -1,0 +1,11 @@
+{
+  "header": "Generate a new coherent image using the following independently supplied reference sources in their exact input order:",
+  "canvas_header": "Edit the designated canvas using the following independently supplied inputs in their exact order:",
+  "source": "{label}: {name} (owner {category}:{key}); purpose={purpose}; view={role}. {reason}",
+  "identity": "Use {reference} to reinforce {name}'s identity alongside the fixed appearance description. Keep this page's confirmed hairstyle, clothing and visible local state; reference styling or past conditions do not override them.",
+  "back_identity": "Use {reference} to reinforce {name}'s identity and silhouette while showing only the requested rear view. Keep their face entirely out of frame and preserve this page's confirmed hairstyle, clothing and visible local state.",
+  "source_scope": "These are reference sources, not a canvas to preserve. Construct a new composition following the requested camera, actions, expressions and spatial relationships. Do not copy reference poses or backgrounds unless requested.",
+  "canvas_scope": "{canvas} is the editing canvas. Preserve its composition and untargeted content; change only what the instruction explicitly requests. Other inputs supply reference material rather than additional canvases.",
+  "ownership": "Images with the same owner identify the same character or object, not extra people or objects. Keep different owners distinct; do not merge identities or transfer accessories between them.",
+  "roles": "Use identity sources for identity; appearance sources only for their stated clothing or appearance. Preserve this page's confirmed clothing when a body image has no clothing association. Scene sources guide architecture, layout, materials and fixed furnishings. Time, weather, lighting and atmosphere follow this page's conditions; do not copy incidental conditions, movable objects or previous object positions from scene sources. Prop sources determine the visible object's identity and design, not extra copies. A fallback reference angle never changes the requested camera direction."
+}

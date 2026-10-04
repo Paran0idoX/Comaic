@@ -144,7 +144,6 @@ onMounted(() => {
             :prefix-icon="Search"
             clearable
           />
-          <el-button>{{ t('projects.searchAction') }}</el-button>
         </div>
       </header>
 
@@ -183,9 +182,9 @@ onMounted(() => {
       <el-empty
         v-else
         class="project-list__empty"
-        :description="t('projects.emptyDescription')"
+        :description="searchKeyword ? t('projects.noMatches') : t('projects.emptyDescription')"
       >
-        <el-button type="primary" :icon="Plus" @click="openCreateDialog">
+        <el-button v-if="!searchKeyword" type="primary" :icon="Plus" @click="openCreateDialog">
           {{ t('projects.create') }}
         </el-button>
       </el-empty>

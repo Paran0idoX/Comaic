@@ -1,6 +1,7 @@
 <script setup lang="ts">
+import InfoTip from '@/components/workspace/InfoTip.vue'
 import { Bell, Check, Clock, Close, Delete, EditPen, Plus, Refresh, Setting, Warning } from '@element-plus/icons-vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage, ElMessageBox, type SelectInstance } from 'element-plus'
 import { storeToRefs } from 'pinia'
 import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
@@ -25,6 +26,7 @@ const activityDrawerVisible = ref(false)
 const projectContext = useProjectContextStore()
 const { projects, selectedProjectId, loadingProjects } = storeToRefs(projectContext)
 const projectDialogVisible = ref(false)
+const projectSelect = ref<SelectInstance>()
 const editingProjectId = ref<number | null>(null)
 const projectTitle = ref('')
 const savingProject = ref(false)
@@ -45,6 +47,7 @@ const refreshProjects = async (force = false) => {
 }
 
 const openProjectDialog = (project?: Project) => {
+  projectSelect.value?.blur()
   editingProjectId.value = project?.id ?? null
   projectTitle.value = project?.title ?? ''
   projectDialogVisible.value = true
@@ -157,6 +160,7 @@ const formatUpdatedAt = (value: string) => {
     <div class="top-bar__context">
       <h2>{{ title }}</h2>
       <el-select
+        ref="projectSelect"
         :model-value="selectedProjectId"
         :loading="loadingProjects"
         filterable
@@ -217,8 +221,7 @@ const formatUpdatedAt = (value: string) => {
       <template #header>
         <div class="activity-drawer__header">
           <div>
-            <strong>{{ t('activityCenter.title') }}</strong>
-            <span>{{ t('activityCenter.description') }}</span>
+            <div class="title-with-info"><strong>{{ t('activityCenter.title') }}</strong><InfoTip :content="t('activityCenter.description')" :label="t('activityCenter.title')" /></div>
           </div>
           <el-button link :icon="Refresh" :loading="activityCenter.refreshing" @click="activityCenter.refreshActivities">
             {{ t('activityCenter.refresh') }}
@@ -270,7 +273,8 @@ const formatUpdatedAt = (value: string) => {
         </button>
       </div>
     </el-drawer>
-    <el-dialog v-model="projectDialogVisible" :title="t(editingProjectId ? 'projects.editDialogTitle' : 'projects.dialogTitle')" width="420px">
+    <!-- 顶栏的 backdrop-filter 会限制 fixed 遮罩；挂到 body 才能覆盖整个页面。 -->
+    <el-dialog v-model="projectDialogVisible" append-to-body :title="t(editingProjectId ? 'projects.editDialogTitle' : 'projects.dialogTitle')" width="420px">
       <el-form label-position="top" @submit.prevent="saveProject">
         <el-form-item :label="t('projects.projectName')" required>
           <el-input v-model="projectTitle" maxlength="255" show-word-limit :placeholder="t('projects.projectNamePlaceholder')" @keyup.enter="saveProject" />
@@ -322,6 +326,7 @@ const formatUpdatedAt = (value: string) => {
 }
 
 .activity-drawer__header {
+  flex-wrap: wrap;
   justify-content: space-between;
   width: 100%;
   gap: 12px;

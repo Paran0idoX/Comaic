@@ -5,10 +5,14 @@ from backend.models.enums import VisualAssetRole, VisualEntityType
 
 CHARACTER_REFERENCE_ROLES = (
     VisualAssetRole.IDENTITY_FACE,
-    VisualAssetRole.IDENTITY_HALF_BODY,
     VisualAssetRole.IDENTITY_FULL_BODY,
     VisualAssetRole.IDENTITY_SIDE,
     VisualAssetRole.IDENTITY_BACK,
+)
+# 兼容人物整套生成入口只生成脸部和正面全身；侧面、背面在目录中按需生成。
+DEFAULT_CHARACTER_REFERENCE_ROLES = (
+    VisualAssetRole.IDENTITY_FACE,
+    VisualAssetRole.IDENTITY_FULL_BODY,
 )
 REFERENCE_CATALOG = {
     VisualEntityType.CHARACTER: CHARACTER_REFERENCE_ROLES,

@@ -93,15 +93,16 @@ export type ImageSpec = {
   compiler_key: string
   compiler_version: string
   created_at: string
+  spec_stale: boolean
+  stale_reasons: string[]
 }
 
 export type CompileImageSpecsPayload = {
+  prompt_language?: 'original' | 'zh' | 'en'
   style_profile_id: number | null
   shot_planner_preset_id: number | null
   negative_prompt_preset_id: number | null
-  generation_mode: GenerationMode
   concurrency: number
-  regenerate_continuity: boolean
   resume_existing: boolean
 }
 
@@ -143,15 +144,6 @@ export const listContinuityCompilations = (taskId: number): Promise<ContinuityCo
 
 export const listImageSpecCompilations = (taskId: number): Promise<ImageSpecCompilation[]> =>
   requestJson(`/api/image-specs/script-tasks/${taskId}/compilations`)
-
-export const replaceContinuityEvents = (
-  compilationId: number,
-  events: Array<Omit<ContinuityEvent, 'id' | 'page_id' | 'source'>>,
-): Promise<ContinuityCompilation> =>
-  requestJson(`/api/image-specs/compilations/${compilationId}/events`, {
-    method: 'PUT',
-    body: JSON.stringify({ events }),
-  })
 
 export const streamCompileImageSpecs = async (
   taskId: number,

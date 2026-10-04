@@ -1,7 +1,8 @@
 from datetime import datetime
+import json
 
 from sqlalchemy import or_, select
-from sqlalchemy.orm import Session as SqlAlchemySession
+from sqlalchemy.orm import Session as SqlAlchemySession, defer
 
 from backend.models.comic import (
     AppSettings,
@@ -10,6 +11,7 @@ from backend.models.comic import (
     ComicProject,
     GenerationTask,
     ImageGenerationToolPreset,
+    ImagePromptPreset,
     LLMConfig,
     OutlineCharacter,
     OutlineVersion,
@@ -26,6 +28,8 @@ from backend.models.enums import (
     GenerationTaskStatus,
     ImageGenerationProvider,
     ImagePromptType,
+    ImagePromptPresetKind,
+    SystemPromptKey,
     LLMProvider,
     OutlineVersionStatus,
     PageScriptReviewStatus,
@@ -133,6 +137,7 @@ class ComicRepository:
         default_model: str,
         api_key: str | None,
         is_active: bool = True,
+        model_system_prompt_defaults_json: str | None = None,
     ) -> LLMConfig:
         """创建一组 LLM API 配置；active 配置仍保持全局唯一。"""
 
@@ -143,6 +148,7 @@ class ComicRepository:
             provider=provider,
             base_url=base_url,
             model_names=model_names,
+            model_system_prompt_defaults_json=model_system_prompt_defaults_json,
             default_model=default_model,
             api_key=api_key,
             is_active=is_active,
@@ -163,6 +169,7 @@ class ComicRepository:
         default_model: str,
         api_key: str | None | object,
         clear_api_key: bool = False,
+        model_system_prompt_defaults_json: str | None = None,
     ) -> LLMConfig:
         """更新一组 LLM API 配置；api_key 为 sentinel 时保留旧值。"""
 
@@ -173,6 +180,8 @@ class ComicRepository:
         config.provider = provider
         config.base_url = base_url
         config.model_names = model_names
+        if model_system_prompt_defaults_json is not None:
+            config.model_system_prompt_defaults_json = model_system_prompt_defaults_json
         config.default_model = default_model
         if clear_api_key:
             config.api_key = None
@@ -244,6 +253,57 @@ class ComicRepository:
         self.session.refresh(settings)
         return settings
 
+    def get_system_prompt_overrides(self) -> dict[str, str]:
+        """只读任务提示词覆盖，不在 Agent 加载提示词时创建配置。"""
+        raw = self.session.scalar(select(AppSettings.system_prompts_json).where(AppSettings.id == 1))
+        return json.loads(raw or "{}")
+
+    def get_system_prompt_content(self, key: SystemPromptKey, *, fallback: str | None = None) -> str | None:
+        """设置覆盖优先；旧 Shot preset 继续作为兼容回退，历史批次不改写。"""
+        values = self.get_system_prompt_overrides()
+        if key.value in values:
+            return values[key.value]
+        if key == SystemPromptKey.SHOT_PLANNER and fallback is None:
+            preset = self.session.scalar(select(ImagePromptPreset).where(
+                ImagePromptPreset.kind == ImagePromptPresetKind.SHOT_PLANNER_SYSTEM_PROMPT,
+                ImagePromptPreset.is_default.is_(True),
+            ).order_by(ImagePromptPreset.id.desc()).limit(1))
+            if preset is not None:
+                return preset.content
+        return fallback
+
+    def update_system_prompt(self, *, key: str, content: str | None, restore_shot_content: str | None = None) -> None:
+        """只更新一个任务节点；None 删除覆盖并恢复文件默认值。"""
+        settings = self.get_app_settings()
+        values = json.loads(settings.system_prompts_json or "{}")
+        if content is None:
+            values.pop(key, None)
+        else:
+            values[key] = content
+        settings.system_prompts_json = json.dumps(values, ensure_ascii=False)
+        if restore_shot_content is not None:
+            # 默认 Shot preset 是旧准备页的兼容入口，恢复操作与覆盖删除在同一事务完成。
+            presets = self.session.scalars(select(ImagePromptPreset).where(
+                ImagePromptPreset.kind == ImagePromptPresetKind.SHOT_PLANNER_SYSTEM_PROMPT,
+                ImagePromptPreset.is_default.is_(True),
+            ))
+            for preset in presets:
+                preset.content = restore_shot_content
+        self.session.commit()
+
+    def update_model_system_prompt(self, *, config_id: int, model: str, content: str | None) -> None:
+        """全局提示词属于具体 API 组和模型，不改动其它模型或 API 配置。"""
+        config = self.get_llm_config(config_id)
+        if config is None:
+            raise ValueError(f"LLMConfig not found: {config_id}")
+        values = json.loads(config.model_system_prompts_json or "{}")
+        if content is None:
+            values.pop(model, None)
+        else:
+            values[model] = content
+        config.model_system_prompts_json = json.dumps(values, ensure_ascii=False)
+        self.session.commit()
+
     def create_session(
         self,
         *,
@@ -298,8 +358,9 @@ class ComicRepository:
         session_id: int,
         content: str,
         keep_latest: int = 5,
+        characters: list[dict] | None = None,
     ) -> OutlineVersion:
-        """保存新的大纲版本，并只保留该会话最近 keep_latest 个版本。"""
+        """在同一事务保存大纲及已校验角色，并保留最近 keep_latest 个版本。"""
 
         session = self.session.get(ComicSession, session_id)
         if session is None:
@@ -332,6 +393,8 @@ class ComicRepository:
         )
         self.session.add(outline_version)
         self.session.flush()
+        for payload in characters or []:
+            self.session.add(self._outline_character_from_payload(outline_version.id, payload))
 
         versions = list(
             self.session.scalars(
@@ -411,20 +474,7 @@ class ComicRepository:
 
         saved: list[OutlineCharacter] = []
         for payload in characters:
-            character = OutlineCharacter(
-                outline_version_id=outline_version_id,
-                character_key=str(payload["character_key"]).strip(),
-                name=str(payload.get("name", "")).strip(),
-                role=str(payload.get("role", "")).strip(),
-                background=str(payload.get("background", "")).strip(),
-                appearance=str(payload.get("appearance", "")).strip(),
-                visual_anchors=str(payload.get("visual_anchors", "")).strip(),
-                negative_constraints=str(payload.get("negative_constraints", "")).strip(),
-                default_hairstyle=str(payload.get("default_hairstyle", "")).strip(),
-                default_clothing=str(payload.get("default_clothing", "")).strip(),
-                default_accessories=str(payload.get("default_accessories", "")).strip(),
-                default_color_palette=str(payload.get("default_color_palette", "")).strip(),
-            )
+            character = self._outline_character_from_payload(outline_version_id, payload)
             self.session.add(character)
             saved.append(character)
 
@@ -432,6 +482,22 @@ class ComicRepository:
         for character in saved:
             self.session.refresh(character)
         return saved
+
+    @staticmethod
+    def _outline_character_from_payload(outline_version_id: int, payload: dict) -> OutlineCharacter:
+        """统一角色落库字段，临时实体分类不进入角色表。"""
+
+        return OutlineCharacter(
+            outline_version_id=outline_version_id,
+            character_key=str(payload["character_key"]).strip(),
+            **{
+                field: str(payload.get(field, "")).strip()
+                for field in (
+                    "name", "role", "background", "appearance", "negative_constraints",
+                    "default_hairstyle", "default_clothing", "default_accessories", "default_color_palette",
+                )
+            },
+        )
 
     def get_active_outline_version_for_project(self, project_id: int) -> OutlineVersion | None:
         """读取项目最近大纲会话中的 active 大纲版本。"""
@@ -457,6 +523,7 @@ class ComicRepository:
         target_page_no: int | None = None,
         user_requirement: str | None = None,
         status: ScriptGenerationTaskStatus = ScriptGenerationTaskStatus.PENDING,
+        scene_definition_version: int = 1,
     ) -> ScriptGenerationTask:
         """创建分页脚本生成任务，用于跟踪单页或批量生成状态。"""
 
@@ -470,6 +537,7 @@ class ComicRepository:
             status=status,
             mode=mode,
             total_pages=total_pages,
+            scene_definition_version=scene_definition_version,
             target_page_no=target_page_no,
             user_requirement=user_requirement,
             heartbeat_at=utc_now() if status == ScriptGenerationTaskStatus.RUNNING else None,
@@ -621,7 +689,7 @@ class ComicRepository:
         return self.session.scalar(statement)
 
     def upsert_script_scene(self, *, task_id: int, **payload) -> ScriptScene:
-        """创建或补充任务内场景设定；已有关键视觉锚点不被后续输出覆盖。"""
+        """创建或补充任务内场景设定；已有场景设定不被后续输出覆盖。"""
 
         scene_key = str(payload["scene_key"]).strip()
         scene = self.get_script_scene_by_key(task_id=task_id, scene_key=scene_key)
@@ -639,7 +707,6 @@ class ComicRepository:
                 "weather",
                 "environment_details",
                 "color_palette",
-                "visual_anchors",
                 "negative_constraints",
             ],
         )
@@ -684,7 +751,6 @@ class ComicRepository:
                 "current_state",
                 "emotion",
                 "temporary_changes",
-                "visual_anchors",
                 "negative_constraints",
             ],
         )
@@ -854,6 +920,11 @@ class ComicRepository:
         """根据主键读取分页脚本生成任务。"""
 
         return self.session.get(ScriptGenerationTask, task_id)
+
+    def script_task_exists(self, task_id: int) -> bool:
+        """只检查任务 ID，轻量列表入口不读取整段规划或输入文本。"""
+
+        return self.session.scalar(select(ScriptGenerationTask.id).where(ScriptGenerationTask.id == task_id)) is not None
 
     def list_script_tasks(
         self,
@@ -1055,6 +1126,7 @@ class ComicRepository:
         section_id: int | None = None,
         scene_id: int | None = None,
         character_ids: list[int] | None = None,
+        scene_conditions: dict | None = None,
         script_review_status: PageScriptReviewStatus = PageScriptReviewStatus.UNREVIEWED,
         script_review_error: str | None = None,
     ) -> ComicPage:
@@ -1102,8 +1174,11 @@ class ComicRepository:
         page.composition = composition
         page.character_action = character_action
         page.dialogue = dialogue
-        # 人工编辑接口只更新结构化文本，不会重新提交 scene_key；此时必须保留
-        # 原有中心化场景绑定，否则一次文案修订就会让后续视觉链路失去场景真值。
+        if scene_conditions is not None:
+            conditions_json = json.dumps(scene_conditions, ensure_ascii=False, sort_keys=True)
+            script_changed = script_changed or page.scene_conditions_json != conditions_json
+            page.scene_conditions_json = conditions_json
+        # 省略关联字段时保留原绑定；显式空人物列表才解除本页人物关联。
         if scene_id is not None:
             page.scene_id = scene_id
         if character_ids is not None:
@@ -1219,6 +1294,7 @@ class ComicRepository:
         page.characters = None
         page.clothing = None
         page.scene = None
+        page.scene_conditions_json = None
         page.composition = None
         page.character_action = None
         page.dialogue = None
@@ -1265,7 +1341,7 @@ class ComicRepository:
 
     @staticmethod
     def _fill_empty_fields(target, payload: dict, field_names: list[str]) -> None:
-        """只填充空字段，避免后续分段改写已建立的视觉锚点。"""
+        """只填充空字段，避免后续分段改写已建立的视觉设定。"""
 
         for field_name in field_names:
             current_value = str(getattr(target, field_name, "") or "").strip()
@@ -1640,6 +1716,7 @@ class ComicRepository:
         return list(
             self.session.scalars(
                 select(GenerationTask)
+                .options(defer(GenerationTask.input_snapshot_json))
                 .where(
                     GenerationTask.script_task_id == script_task_id,
                     GenerationTask.task_kind == GenerationTaskKind.BATCH,

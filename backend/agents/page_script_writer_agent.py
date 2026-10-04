@@ -34,7 +34,10 @@ class PageScriptWriterAgent:
 
         self.llm = llm or self._default_llm()
         self.max_structured_retries = max_structured_retries
-        self.prompt = PromptLoader.load(prompt_name)
+        self.prompt = "\n\n".join([
+            PromptLoader.load_system(prompt_name),
+            PromptLoader.load("script_visual_context_protocol.md"),
+        ])
         logger.info("Initializing PageScriptWriterAgent prompt=%s", prompt_name)
         self._agent = create_structured_agent(
             model=self.llm,
@@ -91,7 +94,8 @@ class PageScriptWriterAgent:
             response_model=PageScriptWriterResponse,
             operation=f"page_script_writer_section_{current_section.get('section_no')}",
             max_retries=self.max_structured_retries,
-            validator=self._validate_response,
+            validator=lambda value: self._validate_response(value, require_conditions=any(
+                scene.get("scene_definition_version", 1) >= 2 for scene in section_scenes)),
         )
         pages = [page.model_dump() for page in response.pages]
         logger.info(
@@ -103,11 +107,13 @@ class PageScriptWriterAgent:
         return pages
 
     @staticmethod
-    def _validate_response(response: PageScriptWriterResponse) -> None:
+    def _validate_response(response: PageScriptWriterResponse, *, require_conditions: bool = False) -> None:
         """页面编写至少需要返回一页；具体页码范围由 Service 做权威校验。"""
 
         if not response.pages:
             raise ValueError("PageScriptWriterAgent structured_response contains no pages.")
+        if require_conditions and any(page.scene_conditions is None for page in response.pages):
+            raise ValueError("New page scripts must include scene_conditions.")
 
     @staticmethod
     def _build_section_input(

@@ -10,11 +10,7 @@ from backend.models.comic import ImageGenerationToolPreset
 from backend.i18n.errors import AppError
 from backend.models.enums import GenerationMode, ImageGenerationProvider, ImagePromptType
 from backend.services.workflow_compiler import parse_bindings, parse_capabilities
-from backend.utils.prompt_loader import PromptLoader
-
-
-def _label(index: int, format_name: str) -> str:
-    return {"image_N": f"image {index}", "picture_N": f"Picture {index}", "bracket_N": f"[{index}]"}[format_name]
+from backend.services.reference_prompt_service import apply_reference_prompt
 
 
 def frozen_preset(preset: ImageGenerationToolPreset, spec: dict[str, Any]) -> ImageGenerationToolPreset:
@@ -38,9 +34,28 @@ _PRESET_FIELDS = (
 )
 
 
+def _freeze_render_dimensions(spec: dict[str, Any], preset: ImageGenerationToolPreset) -> None:
+    """页面未指定尺寸时，从显式宽高绑定读取工作流默认值并冻结，避免删掉必需输入。"""
+    if preset.provider != ImageGenerationProvider.COMFYUI:
+        return
+    workflow = json.loads(preset.workflow_json or "{}")
+    for binding in parse_bindings(preset.bindings_json).bindings:
+        if binding.source not in {"render.width", "render.height"}:
+            continue
+        field = binding.source.split(".")[1]
+        render = spec.setdefault("render", {})
+        if field in render:
+            continue
+        value = workflow.get(binding.node_id, {}).get("inputs", {}).get(binding.input_name)
+        # 连线和示例字符串不能当作尺寸，配置问题仍须在任何外部请求前拦截。
+        if type(value) is not int or value <= 0:
+            raise AppError("reference.input.configuration_invalid")
+        render[field] = value
+
+
 def prepare_renderer_spec(spec: dict[str, Any], preset: ImageGenerationToolPreset,
                           mode: GenerationMode) -> dict[str, Any]:
-    """纯本地预检查；严格失败时还没有上传图片或提交任何生成请求。"""
+    """按工具容量冻结实际传图；被选中文件无效时在上传和提交前失败。"""
     result = deepcopy(spec)
     if result.get("reference_inputs"):
         # 继续任务使用已冻结的输入，不能重新按新素材或新工具容量裁减。
@@ -48,6 +63,7 @@ def prepare_renderer_spec(spec: dict[str, Any], preset: ImageGenerationToolPrese
         for item in result["reference_inputs"].get("items", []):
             _validate_file(item, require_local=frozen.provider == ImageGenerationProvider.OPENAI_IMAGES_COMPATIBLE)
         return result
+    _freeze_render_dimensions(result, preset)
     plan = result.get("reference_plan")
     if not isinstance(plan, dict):
         result["renderer_config"] = {key: (getattr(preset, key).value if hasattr(getattr(preset, key, None), "value") else getattr(preset, key, None)) for key in _PRESET_FIELDS}
@@ -77,14 +93,6 @@ def prepare_renderer_spec(spec: dict[str, Any], preset: ImageGenerationToolPrese
         if identity in seen:
             continue
         seen.add(identity)
-        try:
-            _validate_file(item, require_local=not is_comfy)
-        except AppError:
-            if mode == GenerationMode.FINAL or item.get("purpose") == "canvas":
-                raise
-            omitted.append({**item, "reason_code": "reference.file_unavailable", "reason": "Original image unavailable"})
-            degradations.append({"code": "reference.file_unavailable", "message": "Original reference image unavailable"})
-            continue
         valid.append(item)
     primaries = [item for item in valid if item.get("is_primary", True)]
     if mode == GenerationMode.FINAL and len(primaries) > capacity:
@@ -102,7 +110,9 @@ def prepare_renderer_spec(spec: dict[str, Any], preset: ImageGenerationToolPrese
             omitted.append({**item, "reason_code": "reference.capacity_exceeded", "reason": "Tool image capacity exceeded"})
             degradations.append({"code": "reference.capacity_exceeded", "message": "Reference image omitted due to tool capacity"})
             continue
-        item.update(order=len(selected) + 1, label=_label(len(selected) + 1, config.label_format))
+        # 参考图缺少可以只提示，但实际将要传入的原图必须可读且内容未变。
+        _validate_file(item, require_local=not is_comfy)
+        item.update(order=len(selected) + 1)
         selected.append(item)
     if config.requires_canvas and (not selected or selected[0].get("purpose") != "canvas"):
         raise AppError("reference.input.capacity_exceeded", params={"capacity": capacity, "required": 1})
@@ -117,22 +127,14 @@ def prepare_renderer_spec(spec: dict[str, Any], preset: ImageGenerationToolPrese
         required.append("reference_image")
     result["required_capabilities"] = required
     if selected:
-        lines = []
-        for item in selected:
-            owner = item.get("owner") or {}
-            lines.append(f"{item['label']}: {owner.get('name') or owner.get('key') or 'editing canvas'} "
-                         f"(owner {owner.get('category', 'canvas')}:{owner.get('key') or owner.get('id', '')}); "
-                         f"purpose={item.get('purpose')}; view={item.get('role', '')}. {item.get('reason', '')}")
-        instructions = PromptLoader.load("reference_image_order_prompt.md").format(references="\n".join(lines))
-        prompt = result.setdefault("prompt", {})
-        prompt["positive"] = str(prompt.get("positive") or "").rstrip() + "\n\n" + instructions.strip()
+        apply_reference_prompt(result, selected)
     result["renderer_config"] = {key: (getattr(preset, key).value if hasattr(getattr(preset, key, None), "value") else getattr(preset, key, None)) for key in _PRESET_FIELDS}
     return result
 
 
 def validate_renderer_spec(spec: dict[str, Any], preset: ImageGenerationToolPreset,
                            mode: GenerationMode, seed: int = 0) -> None:
-    """整批生成先验证所有页面，保证严格检查失败时零提交。"""
+    """整批生成先检查文件和工具配置，无法提交的输入保持零上传、零提交。"""
     from backend.services.workflow_compiler import WorkflowCompiler
     preset = frozen_preset(preset, spec)
     if preset.provider == ImageGenerationProvider.COMFYUI:
@@ -170,10 +172,24 @@ def validate_renderer_spec(spec: dict[str, Any], preset: ImageGenerationToolPres
                 for child in value:
                     mark_upload_names(child)
         mark_upload_names(checked)
-        WorkflowCompiler().compile(workflow=json.loads(preset.workflow_json or "{}"), spec=checked,
-                                   seed=seed, capabilities=parse_capabilities(preset.capabilities_json),
-                                   bindings=bindings, mode=mode)
-    elif mode == GenerationMode.FINAL:
+        compiled = WorkflowCompiler().compile(workflow=json.loads(preset.workflow_json or "{}"), spec=checked,
+                                              seed=seed, capabilities=parse_capabilities(preset.capabilities_json),
+                                              bindings=bindings, mode=mode)
+        if any(item["code"] == "workflow.binding_source_missing" for item in compiled.degradations):
+            raise AppError("reference.input.configuration_invalid")
+    else:
+        if not preset.api_base_url or not preset.model:
+            raise AppError("reference.input.configuration_invalid")
+        config = parse_capabilities(preset.capabilities_json).reference_images
+        if (spec.get("reference_inputs") or {}).get("items") and config.transport not in {"multipart", "json_data_url"}:
+            raise AppError("reference.input.configuration_invalid")
+        if preset.extra_body_json:
+            extra = json.loads(preset.extra_body_json)
+            protected = {"model", "prompt", "n", config.image_field_name, preset.seed_field_name, preset.negative_prompt_field_name}
+            if not isinstance(extra, dict) or protected.intersection(extra):
+                raise AppError("reference.input.configuration_invalid")
+        if mode != GenerationMode.FINAL:
+            return
         available = {"txt2img"}
         if (spec.get("reference_inputs") or {}).get("items"):
             available.add("reference_image")
@@ -194,7 +210,11 @@ def _validate_file(item: dict[str, Any], *, require_local: bool) -> None:
             return
         raise AppError("reference.input.file_unavailable")
     path = Path(str(path_text))
-    if not path.is_file():
-        raise AppError("reference.input.file_unavailable")
-    if item.get("sha256") and hashlib.sha256(path.read_bytes()).hexdigest() != item["sha256"]:
+    try:
+        if not path.is_file():
+            raise OSError("Reference is not a readable file")
+        content = path.read_bytes()
+    except OSError as exc:
+        raise AppError("reference.input.file_unavailable") from exc
+    if item.get("sha256") and hashlib.sha256(content).hexdigest() != item["sha256"]:
         raise AppError("reference.input.file_changed")

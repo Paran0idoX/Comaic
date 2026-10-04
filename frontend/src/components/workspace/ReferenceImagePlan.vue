@@ -33,7 +33,7 @@ const reason = (item: Reference) => {
           </div>
         </article>
       </div>
-      <el-empty v-else :image-size="48" :description="t(actual ? 'referenceInputs.actualEmpty' : 'referenceInputs.empty')" />
+      <p v-else class="reference-empty">{{ t(actual ? 'referenceInputs.actualEmpty' : 'referenceInputs.empty') }}</p>
       <div v-if="value.omitted?.length" class="reference-notes">
         <h4>{{ t('referenceInputs.omitted') }}</h4>
         <p v-for="(item, index) in value.omitted" :key="index">{{ item.owner?.name || item.owner?.key }} · {{ reason(item) }}</p>
@@ -47,7 +47,9 @@ const reason = (item: Reference) => {
 </template>
 
 <style scoped>
-.reference-plan { margin: 16px 0; }
+.reference-plan { margin: 16px 0; padding: 0 20px; }
+.reference-plan h3 { margin: 0 0 12px; font-size: 15px; }
+.reference-empty { margin: 0; color: var(--text-soft); font-size: 13px; }
 .reference-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
 .reference-item { display: flex; gap: 12px; padding: 12px; border: 1px solid var(--el-border-color-light); border-radius: 8px; min-width: 0; }
 .reference-item .el-image { width: 88px; height: 112px; flex-shrink: 0; background: var(--el-fill-color-light); }

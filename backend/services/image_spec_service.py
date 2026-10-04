@@ -1,8 +1,8 @@
 import asyncio
 from collections import defaultdict
+from copy import deepcopy
 from typing import Any, AsyncIterator
 
-from backend.agents.continuity_event_agent import ContinuityEventAgent
 from backend.agents.shot_planner_agent import ShotPlannerAgent
 from backend.i18n.errors import AppError, app_error_from_exception
 from backend.models.comic import (
@@ -20,24 +20,25 @@ from backend.models.comic import (
 )
 from backend.models.enums import (
     ApprovalStatus,
-    ContinuityEventSource,
-    ContinuityEventTiming,
-    ContinuityEventType,
-    ContinuityTargetType,
     GenerationMode,
     ImagePromptPresetKind,
     ImagePromptType,
+    ImageSpecStaleReason,
+    PromptLanguage,
     PageScriptReviewStatus,
     ScriptGenerationTaskStatus,
     VisualAssetRole,
     VisualEntityType,
+    SystemPromptKey,
 )
+from backend.repositories.comic_repository import ComicRepository
 from backend.repositories.image_spec_repository import ImageSpecRepository
 from backend.services.image_spec_compilers import compiler_for_prompt_type
 from backend.services.reference_selection_service import ReferenceSelectionService
-from backend.services.visual_state_reducer import VisualStateReducer
 from backend.utils.json_utils import canonical_hash, canonical_json
+from backend.models.scene_conditions import SCENE_DEFINITION_VERSION, page_scene_conditions
 from backend.utils.prompt_loader import PromptLoader
+from backend.utils.system_prompt_catalog import default_model_system_prompt, model_prompt_overrides
 
 
 CONTROL_ROLES = {
@@ -49,10 +50,10 @@ CONTROL_ROLES = {
 
 
 class ImageSpecService:
-    """编排连续性事件、确定性状态、ShotPlan 和三类 Prompt ImageSpec。"""
+    """按页组合只读视觉设定、ShotPlan 和三类 Prompt，不推演跨页状态。"""
 
-    PROMPT_VERSION = "3"
-    CONTINUITY_REDUCER_ATTEMPTS = 3
+    PROMPT_VERSION = "5"
+    PAGE_CONTEXT_VERSION = "page-context-v3"
 
     def __init__(self, repository: ImageSpecRepository):
         self.repository = repository
@@ -186,34 +187,32 @@ class ImageSpecService:
         concurrency: int = 8,
         regenerate_continuity: bool = False,
         resume_existing: bool = True,
+        page_ids: list[int] | None = None,
+        prompt_language: PromptLanguage = PromptLanguage.ORIGINAL,
     ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
-        """流式编译完整任务；视觉真值和镜头计划只计算一次，再生成三类规格。"""
+        """按需编译指定页面；未变化页面复用镜头和三类规格。"""
 
+        # 不再让历史偏好把可选参考图变成必须项；旧模式字段只保留溯源兼容。
+        generation_mode = GenerationMode.PREVIEW
         context = self._prepare_context(
             task_id=task_id,
             style_profile_id=style_profile_id,
             shot_planner_preset_id=shot_planner_preset_id,
             negative_prompt_preset_id=negative_prompt_preset_id,
+            page_ids=page_ids,
         )
+        context["prompt_language"] = prompt_language
         pages: list[ComicPage] = context["pages"]
         yield "start", {
             "task_id": task_id,
             "total_pages": len(pages),
             "prompt_types": [item.value for item in ImagePromptType],
             "generation_mode": generation_mode.value,
+            "prompt_language": prompt_language.value,
         }
 
-        compilation, reused = await self._compile_continuity(
-            context=context,
-            regenerate=regenerate_continuity,
-        )
-        yield "continuity", {
-            "compilation_id": compilation.id,
-            "source_hash": compilation.source_hash,
-            "reused": reused,
-            "event_count": len(compilation.events),
-            "snapshot_count": len(compilation.snapshots),
-        }
+        # 旧参数仅为请求兼容保留；每页设定直接构建，无事件提取或跨页归约。
+        compilation = self._compile_page_context(context)
         snapshots_by_page = {item.page_id: item for item in compilation.snapshots}
         total_specs = len(pages) * len(ImagePromptType)
         for page in pages:
@@ -222,11 +221,12 @@ class ImageSpecService:
 
         normalized_concurrency = max(1, min(concurrency, 20))
         semaphore = asyncio.Semaphore(normalized_concurrency)
-        planner = ShotPlannerAgent(system_prompt=context["planner_preset"].content)
+        planner = None
 
         async def plan_page(
             page: ComicPage,
-        ) -> tuple[ComicPage, dict[str, Any], PageShotPlan | None]:
+        ) -> tuple[ComicPage, dict[str, Any], PageShotPlan | None, dict[str, str] | None]:
+            nonlocal planner
             async with semaphore:
                 snapshot = snapshots_by_page[page.id]
                 existing = self._reusable_shot_plan(
@@ -234,17 +234,36 @@ class ImageSpecService:
                     snapshot=snapshot,
                     context=context,
                 )
-                if existing is not None:
-                    return page, self._loads_object(existing.plan_json), existing
                 snapshot_data = self._loads_object(snapshot.state_json)
+                # 完全复用时不初始化模型，避免已准备好的页面仍要求模型凭据。
+                if planner is None and (existing is None or prompt_language != PromptLanguage.ORIGINAL):
+                    planner = ShotPlannerAgent(
+                        system_prompt=context["planner_system_prompt"],
+                        language_system_prompt=context["language_system_prompt"],
+                    )
                 page_data = self._page_payload(page)
                 controls = self._available_controls(snapshot_data)
-                plan = await planner.plan(
+                plan = self._loads_object(existing.plan_json) if existing else await planner.plan(
                     page=page_data,
                     snapshot=snapshot_data,
                     available_controls=controls,
                 )
-                return page, plan, None
+                translated = None
+                if prompt_language != PromptLanguage.ORIGINAL:
+                    # 译文只作用于最终四个组件；同页三类表达共用一次转换。
+                    base = compiler_for_prompt_type(ImagePromptType.HYBRID).compile(
+                        snapshot=snapshot_data, shot_plan=plan, style_profile=None,
+                        negative_prompts=self._negative_prompt_payload(context["negative_preset"]),
+                        generation_mode=generation_mode, source_hash="",
+                    )
+                    components = {key: base.spec["prompt"][key] for key in (
+                        "tag_text", "natural_language_text", "negative_tag_text", "negative_natural_language_text",
+                    )}
+                    try:
+                        translated = await planner.translate_prompt_components(components, prompt_language)
+                    except Exception as exc:
+                        raise AppError("image_spec.prompt_language_failed", debug_message=str(exc)) from exc
+                return page, plan, existing, translated
 
         reusable = (
             self._reusable_specs_by_page(
@@ -294,18 +313,18 @@ class ImageSpecService:
             # 会显式取消并等待所有未完成 Task，避免留下无人接收的模型调用。
             async def guarded_plan(
                 page: ComicPage,
-            ) -> tuple[ComicPage, dict[str, Any] | None, PageShotPlan | None, Exception | None]:
+            ) -> tuple[ComicPage, dict[str, Any] | None, PageShotPlan | None, dict[str, str] | None, Exception | None]:
                 try:
-                    planned_page, plan_data, existing_plan = await plan_page(page)
-                    return planned_page, plan_data, existing_plan, None
+                    planned_page, plan_data, existing_plan, translated = await plan_page(page)
+                    return planned_page, plan_data, existing_plan, translated, None
                 except Exception as exc:  # 单页模型失败不取消其它页面
-                    return page, None, None, exc
+                    return page, None, None, None, exc
 
             planning_tasks = [
                 asyncio.create_task(guarded_plan(page)) for page in pending_pages
             ]
             for completed_task in asyncio.as_completed(planning_tasks):
-                page, plan_data, existing_plan, plan_error = await completed_task
+                page, plan_data, existing_plan, translated, plan_error = await completed_task
                 if plan_error is not None or plan_data is None:
                     failure = self._page_compilation_failure(
                         page,
@@ -333,6 +352,8 @@ class ImageSpecService:
                             plan=plan_data,
                             planner_preset=context["planner_preset"],
                             planner_model=context["llm_model"],
+                            planner_system_prompt=context["planner_system_prompt"],
+                            global_system_prompt_hash=context["global_system_prompt_hash"],
                         ),
                         planner_model=context["llm_model"],
                         prompt_version=self.PROMPT_VERSION,
@@ -357,6 +378,8 @@ class ImageSpecService:
                             negative_preset=context["negative_preset"],
                             generation_mode=generation_mode,
                             reference_plan=reference_plan,
+                            prompt_language=prompt_language,
+                            prompt_components=translated,
                         )
                         completed_specs += 1
                         yield "image_spec", self._spec_payload(spec, page)
@@ -482,7 +505,7 @@ class ImageSpecService:
 
         for shot_plan in self.repository.list_shot_plans(
             page_id=page.id,
-            snapshot_id=snapshot.id,
+            snapshot_hash=snapshot.state_hash,
         ):
             if shot_plan.planner_preset_id != context["planner_preset"].id:
                 continue
@@ -491,6 +514,8 @@ class ImageSpecService:
                 plan=plan,
                 planner_preset=context["planner_preset"],
                 planner_model=context["llm_model"],
+                planner_system_prompt=context["planner_system_prompt"],
+                global_system_prompt_hash=context["global_system_prompt_hash"],
             )
             if shot_plan.plan_hash == current_hash:
                 return shot_plan
@@ -529,7 +554,7 @@ class ImageSpecService:
                 continue
             shot_plan = typed_specs[0].shot_plan
             if (
-                shot_plan.snapshot_id != snapshot.id
+                shot_plan.snapshot.state_hash != snapshot.state_hash
                 or shot_plan.planner_preset_id != expected_planner_id
             ):
                 continue
@@ -537,13 +562,15 @@ class ImageSpecService:
                 plan=self._loads_object(shot_plan.plan_json),
                 planner_preset=context["planner_preset"],
                 planner_model=context["llm_model"],
+                planner_system_prompt=context["planner_system_prompt"],
+                global_system_prompt_hash=context["global_system_prompt_hash"],
             )
             if shot_plan.plan_hash != current_plan_hash:
                 continue
             valid = True
             for spec in typed_specs:
                 if (
-                    spec.snapshot_id != snapshot.id
+                    spec.snapshot.state_hash != snapshot.state_hash
                     or spec.style_profile_id != expected_style_id
                     or spec.negative_prompt_preset_id != expected_negative_id
                 ):
@@ -556,6 +583,7 @@ class ImageSpecService:
                     style_profile=context["style"],
                     style_assets=context["style_assets"],
                     negative_preset=context["negative_preset"],
+                    prompt_language=context["prompt_language"],
                 )
                 if spec.source_hash != expected_source_hash:
                     valid = False
@@ -571,12 +599,12 @@ class ImageSpecService:
         compilation: ContinuityCompilation,
         generation_mode: GenerationMode,
     ) -> str:
-        """批量任务 Hash 用于审计本次连续性快照、Prompt 与编译器组合。"""
+        """批量任务 Hash 用于审计本次页面输入快照、Prompt 与编译器组合。"""
 
         return canonical_hash(
             {
                 "schema_version": 1,
-                "continuity_source_hash": compilation.source_hash,
+                "page_context_source_hash": compilation.source_hash,
                 "snapshots": [
                     {
                         "page_id": item.page_id,
@@ -585,6 +613,7 @@ class ImageSpecService:
                     for item in sorted(compilation.snapshots, key=lambda value: value.page_id)
                 ],
                 "generation_mode": generation_mode.value,
+                "prompt_language": context["prompt_language"].value,
                 "style": (
                     self._style_payload(context["style"], context["style_assets"])
                     if context["style"] is not None
@@ -592,7 +621,7 @@ class ImageSpecService:
                 ),
                 "planner_preset": {
                     "id": context["planner_preset"].id,
-                    "content_hash": canonical_hash(context["planner_preset"].content),
+                    "content_hash": canonical_hash(context["planner_system_prompt"]),
                 },
                 "negative_prompt": self._negative_prompt_payload(
                     context["negative_preset"]
@@ -680,16 +709,47 @@ class ImageSpecService:
         if task is None:
             raise ValueError(f"ScriptGenerationTask not found: {task_id}")
         pages = {page.id: page for page in self.repository.list_task_pages(task_id)}
-        return [
-            self._spec_payload(spec, pages[spec.page_id])
-            for spec in self.repository.list_latest_specs(
-                task_id=task_id,
-                prompt_type=prompt_type,
-            )
-        ]
+        specs = self.repository.list_latest_specs(task_id=task_id, prompt_type=prompt_type)
+        if not specs:
+            return []
+        # 与出图前校验使用相同的实时输入和 Hash；历史完成数不代表当前可用数。
+        context = self._prepare_context(
+            task_id=task_id, style_profile_id=None, shot_planner_preset_id=None,
+            negative_prompt_preset_id=None, require_review=False,
+        )
+        current = {item["page_id"]: item for item in self._build_page_contexts(context)}
+        result = []
+        for spec in specs:
+            payload = self._spec_payload(spec, pages[spec.page_id])
+            reasons = self.spec_stale_reasons(spec, current[spec.page_id])
+            payload.update(spec_stale=bool(reasons), stale_reasons=reasons)
+            result.append(payload)
+        return result
 
-    def current_continuity_source_hash(self, task_id: int) -> str:
-        """计算当前脚本与获批视觉资产的 hash，生成前用它拒绝过期规格。"""
+    def spec_stale_reasons(
+        self, spec: ImageSpec, current_context: dict[str, Any],
+    ) -> list[ImageSpecStaleReason]:
+        """只读比较来源，按用户可处理的输入分类解释过期，不修改历史快照。"""
+
+        reasons = []
+        if not self.page_context_is_current(spec.snapshot, canonical_hash(current_context)):
+            previous = self._loads_object(spec.snapshot.state_json)
+            for fields, reason in (
+                (("page_script", "scene_conditions"), ImageSpecStaleReason.PAGE_SCRIPT_CHANGED),
+                (("characters",), ImageSpecStaleReason.CHARACTER_INPUTS_CHANGED),
+                (("scene",), ImageSpecStaleReason.SCENE_INPUTS_CHANGED),
+                (("prop_catalog",), ImageSpecStaleReason.PROP_INPUTS_CHANGED),
+            ):
+                if any(previous.get(field) != current_context.get(field) for field in fields):
+                    reasons.append(reason)
+            if not reasons:
+                reasons.append(ImageSpecStaleReason.INPUTS_CHANGED)
+        if spec.source_hash != self.current_image_spec_source_hash(spec):
+            reasons.append(ImageSpecStaleReason.PROMPT_RULES_CHANGED)
+        return reasons
+
+    def current_page_context_source_hash(self, task_id: int) -> str:
+        """保留整批输入 Hash 用于历史审计，生成过期校验使用逐页 Hash。"""
 
         context = self._prepare_context(
             task_id=task_id,
@@ -697,7 +757,23 @@ class ImageSpecService:
             shot_planner_preset_id=None,
             negative_prompt_preset_id=None,
         )
-        return canonical_hash(self._continuity_source_payload(context))
+        return canonical_hash(self._page_context_source_payload(context))
+
+    def current_page_context_hashes(
+        self, task_id: int, page_ids: list[int] | None = None,
+    ) -> dict[int, str]:
+        """从实时绑定重新构建页面来源；其它页修改不使本页规格过期。"""
+
+        context = self._prepare_context(
+            task_id=task_id, style_profile_id=None,
+            shot_planner_preset_id=None, negative_prompt_preset_id=None,
+            page_ids=page_ids,
+            require_review=False,
+        )
+        return {
+            value["page_id"]: canonical_hash(value)
+            for value in self._build_page_contexts(context)
+        }
 
     def current_image_spec_source_hash(self, spec: ImageSpec) -> str:
         """按当前 Prompt 类型、风格和预设重算来源，用于生成前判定 stale。"""
@@ -726,42 +802,27 @@ class ImageSpecService:
             style_profile=style,
             style_assets=style_assets,
             negative_preset=negative_preset,
+            prompt_language=PromptLanguage(self._loads_object(spec.spec_json).get("prompt_language", "original")),
         )
 
-    async def replace_events(
-        self,
-        *,
-        compilation_id: int,
-        events: list[dict[str, Any]],
-    ) -> ContinuityCompilation:
-        """人工校正创建新编译版本；保留系统事件并替换非系统事件。"""
+    def page_context_is_current(
+        self, snapshot: VisualStateSnapshot, current_context_hash: str,
+    ) -> bool:
+        """兼容输入结构未变的 v2 标记；真实设定变化和历史事件快照仍要求重新准备。"""
 
-        original = self.repository.get_compilation(compilation_id)
-        if original is None:
-            raise ValueError(f"ContinuityCompilation not found: {compilation_id}")
-        context = self._prepare_context(
-            task_id=original.script_task_id,
-            style_profile_id=None,
-            shot_planner_preset_id=None,
-            negative_prompt_preset_id=None,
-        )
-        # 系统事件来自当前脚本分段和当前获批版本，不能沿用旧 compilation 的快照。
-        system_events = self._section_boundary_events(context)
-        manual_events = [
-            {**event, "source": ContinuityEventSource.MANUAL.value}
-            for event in events
-        ]
-        combined = self._normalize_events(
-            system_events + manual_events,
-            context=context,
-        )
-        return self._persist_reduced_compilation(
-            context=context,
-            source_hash=canonical_hash(self._continuity_source_payload(context)),
-            events=combined,
-        )
+        if snapshot.state_hash == current_context_hash:
+            return True
+        state = self._loads_object(snapshot.state_json)
+        if (
+            self.PAGE_CONTEXT_VERSION != "page-context-v3"
+            or state.get("context_builder_version") != "page-context-v2"
+            or canonical_hash(state) != snapshot.state_hash
+        ):
+            return False
+        # 只替换已知兼容的标记，再与实时输入的完整 Hash 比较，不改历史记录。
+        state["context_builder_version"] = self.PAGE_CONTEXT_VERSION
+        return canonical_hash(state) == current_context_hash
 
-    # Context and continuity -------------------------------------------
     def _prepare_context(
         self,
         *,
@@ -769,7 +830,10 @@ class ImageSpecService:
         style_profile_id: int | None,
         shot_planner_preset_id: int | None,
         negative_prompt_preset_id: int | None,
+        page_ids: list[int] | None = None,
+        require_review: bool = True,
     ) -> dict[str, Any]:
+        """编译要求已审查；只读来源 Hash 查询允许包含待审查页，避免阻塞其它页的有效性展示。"""
         self.ensure_default_presets()
         task = self.repository.get_script_task(task_id)
         if task is None:
@@ -783,6 +847,11 @@ class ImageSpecService:
                 ),
             )
         pages = [page for page in self.repository.list_task_pages(task_id) if page.summary]
+        if page_ids is not None:
+            requested = set(page_ids)
+            if not requested or requested - {page.id for page in pages}:
+                raise AppError("image_generation.page_scope_invalid", status_code=400)
+            pages = [page for page in pages if page.id in requested]
         if not pages:
             raise ValueError(f"Script pages not found for task: {task_id}")
         unreviewed_page_nos = [
@@ -790,7 +859,7 @@ class ImageSpecService:
             for page in pages
             if page.script_review_status != PageScriptReviewStatus.PASSED
         ]
-        if unreviewed_page_nos:
+        if require_review and unreviewed_page_nos:
             page_list = ", ".join(str(page_no) for page_no in unreviewed_page_nos)
             raise AppError(
                 "script.pages_not_reviewed",
@@ -875,6 +944,9 @@ class ImageSpecService:
             "style": style,
             "style_assets": [],
             "planner_preset": planner_preset,
+            "planner_system_prompt": self._planner_system_prompt(planner_preset),
+            "language_system_prompt": self._language_system_prompt(),
+            "global_system_prompt_hash": self._global_system_prompt_hash(),
             "negative_preset": negative_preset,
             "assets": assets,
             "asset_payloads": asset_payloads,
@@ -882,214 +954,134 @@ class ImageSpecService:
             "assets_by_reference_subject": assets_by_subject,
             "reference_subjects": subject_payloads,
             "prop_catalog": prop_catalog,
-            "outfits": self.repository.list_project_outfits(
-                task.project_id, approved_only=True
-            ),
             "scenes": self.repository.list_task_scenes(task_id),
             "llm_config_id": active_llm.id if active_llm else None,
             "llm_model": active_llm.default_model if active_llm else None,
         }
 
-    async def _compile_continuity(
-        self,
-        *,
-        context: dict[str, Any],
-        regenerate: bool,
-    ) -> tuple[ContinuityCompilation, bool]:
-        source_payload = self._continuity_source_payload(context)
-        source_hash = canonical_hash(source_payload)
-        if not regenerate:
-            reusable = self.repository.find_reusable_compilation(
-                task_id=context["task"].id,
-                source_hash=source_hash,
-            )
-            if reusable is not None:
-                return reusable, True
-        validation_feedback: str | None = None
-        last_error: Exception | None = None
-        for attempt in range(1, self.CONTINUITY_REDUCER_ATTEMPTS + 1):
-            compilation = self.repository.create_compilation(
-                task_id=context["task"].id,
-                source_hash=source_hash,
-                llm_config_id=context["llm_config_id"],
-                llm_model=context["llm_model"],
-                prompt_version=self.PROMPT_VERSION,
-                reducer_version=VisualStateReducer.VERSION,
-            )
-            try:
-                llm_events = await ContinuityEventAgent().extract(
-                    pages=[self._page_payload(page) for page in context["pages"]],
-                    characters=self._character_agent_payloads(context["pages"]),
-                    scenes=[self._scene_text_payload(scene) for scene in context["scenes"]],
-                    outfits=[self._outfit_payload(item, []) for item in context["outfits"]],
-                    validation_feedback=validation_feedback,
-                )
-                system_events = self._section_boundary_events(context)
-                events = self._normalize_events(system_events + llm_events, context=context)
-                completed = self._persist_reduced_compilation(
-                    context=context,
-                    source_hash=source_hash,
-                    events=events,
-                    existing_compilation=compilation,
-                )
-                return completed, False
-            except Exception as exc:
-                last_error = exc
-                validation_feedback = str(exc)
-                self.repository.fail_compilation(
-                    compilation,
-                    error_code="image_spec.continuity_failed",
-                    error_message=(
-                        f"attempt {attempt}/{self.CONTINUITY_REDUCER_ATTEMPTS}: {exc}"
-                    ),
-                )
+    def _compile_page_context(self, context: dict[str, Any]) -> ContinuityCompilation:
+        """复用历史表保存不可变输入；新记录的 events 始终为空，不需要模型调用。"""
 
-        raise AppError(
-            "image_spec.continuity_invalid",
-            status_code=400,
-            debug_message=(
-                "Continuity reducer validation failed after "
-                f"{self.CONTINUITY_REDUCER_ATTEMPTS} attempts: {last_error}"
-            ),
+        page_contexts = self._build_page_contexts(context)
+        source_hash = canonical_hash(self._page_context_source_payload(context, page_contexts))
+        reusable = self.repository.find_reusable_compilation(
+            task_id=context["task"].id, source_hash=source_hash,
         )
-
-    def _persist_reduced_compilation(
-        self,
-        *,
-        context: dict[str, Any],
-        source_hash: str,
-        events: list[dict[str, Any]],
-        existing_compilation: ContinuityCompilation | None = None,
-    ) -> ContinuityCompilation:
-        compilation = existing_compilation or self.repository.create_compilation(
-            task_id=context["task"].id,
-            source_hash=source_hash,
-            llm_config_id=context["llm_config_id"],
-            llm_model=context["llm_model"],
-            prompt_version=self.PROMPT_VERSION,
-            reducer_version=VisualStateReducer.VERSION,
+        if reusable is not None:
+            return reusable
+        compilation = self.repository.create_compilation(
+            task_id=context["task"].id, source_hash=source_hash,
+            llm_config_id=None, llm_model=None,
+            prompt_version=self.PAGE_CONTEXT_VERSION,
+            reducer_version=self.PAGE_CONTEXT_VERSION,
         )
-        character_baselines = self._character_baselines(context)
-        scene_baselines = self._scene_baselines(context)
-        reduced = VisualStateReducer(
-            character_baselines=character_baselines,
-            scene_baselines=scene_baselines,
-        ).reduce(
-            pages=[self._reducer_page_payload(page) for page in context["pages"]],
-            events=events,
-        )
-        prop_assets_by_key: dict[str, list[dict[str, Any]]] = defaultdict(list)
-        for asset in context["asset_payloads"]:
-            if (
-                asset["entity_type"] == VisualEntityType.PROP.value
-                and asset.get("entity_key")
-            ):
-                prop_assets_by_key[str(asset["entity_key"])].append(asset)
-        for page_state in reduced:
-            page_state["prop_catalog"] = context["prop_catalog"]
-            for character_state in page_state["characters"]:
-                character_state["held_prop_assets"] = [
+        try:
+            return self.repository.complete_compilation(
+                compilation=compilation,
+                snapshots=[
                     {
-                        "prop_key": prop_key,
-                        "assets": prop_assets_by_key.get(prop_key, []),
+                        "page_id": value["page_id"], "page_no": value["page_no"],
+                        "scene_visual_version_id": value["scene"]["visual_version_id"],
+                        "state_json": canonical_json(value),
+                        "state_hash": canonical_hash(value), "warnings_json": "[]",
                     }
-                    for prop_key in character_state.get("held_props", [])
-                ]
-        scene_version_by_key = {
-            scene.scene_key: (
-                scene.selected_visual_version.id
-                if scene.selected_visual_version is not None
-                and scene.selected_visual_version.status == ApprovalStatus.APPROVED
-                else None
+                    for value in page_contexts
+                ],
             )
-            for scene in context["scenes"]
-        }
-        snapshots = []
-        for value in reduced:
-            state_json = canonical_json(value)
-            snapshots.append(
-                {
-                    "page_id": value["page_id"],
-                    "page_no": value["page_no"],
-                    "scene_visual_version_id": scene_version_by_key.get(
-                        value["scene"]["scene_key"]
-                    ),
-                    "state_json": state_json,
-                    "state_hash": canonical_hash(value),
-                    "warnings_json": "[]",
-                }
+        except Exception:
+            self.repository.session.rollback()
+            self.repository.fail_compilation(
+                compilation, error_code="image_spec.compilation_failed",
+                error_message="Page context persistence failed.",
             )
-        stored_events = [
-            {
-                **event,
-                "payload_json": canonical_json(event.get("payload") or {}),
-            }
-            for event in events
-        ]
-        self.repository.complete_compilation(
-            compilation=compilation,
-            events=stored_events,
-            snapshots=snapshots,
-        )
-        result = self.repository.get_compilation(compilation.id)
-        if result is None:
-            raise RuntimeError("Continuity compilation disappeared after commit.")
-        return result
+            raise
 
-    # Baselines and events ---------------------------------------------
-    def _character_baselines(self, context: dict[str, Any]) -> dict[str, dict[str, Any]]:
-        assets_by_owner = context["assets_by_owner"]
-        baselines: dict[str, dict[str, Any]] = {}
+    def _build_page_contexts(self, context: dict[str, Any]) -> list[dict[str, Any]]:
+        """逐页读取实际绑定，不按角色 key 缓存造型，也不继承上一页临时状态。"""
+
+        scenes = self._scene_baselines(context)
+        page_contexts = []
         for page in context["pages"]:
-            for character in page.visual_characters:
-                key = character.character_key
-                if key in baselines:
-                    continue
+            if page.script_scene is None or page.script_scene.scene_key not in scenes:
+                raise ValueError(f"Page {page.page_no} has no bound scene.")
+            characters = []
+            bindings = []
+            for character in sorted(page.visual_characters, key=lambda value: value.character_key):
                 outline = character.outline_character
                 if outline is None:
-                    raise ValueError(f"ScriptCharacter has no outline baseline: {key}")
-                baselines[key] = {
-                    "character_key": key,
+                    raise ValueError(f"ScriptCharacter has no outline baseline: {character.character_key}")
+                selected_outfit = character.outfit_variant
+                outfit = (selected_outfit if selected_outfit is not None
+                          and selected_outfit.status == ApprovalStatus.APPROVED else None)
+                if outfit is not None:
+                    outfit_state = self._outfit_state_payload(
+                        outfit, context["assets_by_owner"].get((VisualEntityType.OUTFIT.value, outfit.id), []),
+                    )
+                    accessories = ", ".join(str(value) for value in outfit_state["accessories"])
+                else:
+                    outfit_state = {
+                        "variant_id": None, "key": "", "name": "",
+                        "description": character.current_clothing.strip() or outline.default_clothing.strip(),
+                        "garment_components": [], "layer_order": [], "colors": [],
+                        "materials": [], "patterns": [], "accessories": [],
+                        "trigger_tokens": [], "negative_constraints": "", "assets": [],
+                        "garment_states": {}, "conditions": {},
+                    }
+                    accessories = character.current_accessories.strip() or outline.default_accessories.strip()
+                characters.append({
+                    "character_key": character.character_key,
                     "outline_character_id": outline.id,
                     "name": character.name or outline.name,
                     "identity": {
-                        "role": outline.role,
-                        "background": outline.background,
+                        "role": outline.role, "background": outline.background,
                         "appearance": outline.appearance,
-                        "visual_anchors": outline.visual_anchors,
                         "negative_constraints": outline.negative_constraints,
                     },
-                    "hairstyle": outline.default_hairstyle,
-                    "outfit": {
-                        "variant_id": None,
-                        "key": "",
-                        "name": "",
-                        "description": outline.default_clothing,
-                        "garment_components": [],
-                        "layer_order": [],
-                        "colors": [],
-                        "materials": [],
-                        "patterns": [],
-                        "accessories": [],
-                        "trigger_tokens": [],
-                        "negative_constraints": "",
-                        "garment_states": {},
-                        "conditions": {},
-                        "assets": [],
-                    },
-                    "accessories": {
-                        "description": outline.default_accessories,
-                        "states": {},
-                    },
-                    "conditions": {},
-                    "held_props": [],
-                    "visual_anchors": character.visual_anchors,
+                    "hairstyle": character.current_hairstyle.strip() or outline.default_hairstyle.strip(),
+                    "outfit": outfit_state,
+                    "accessories": {"description": accessories, "states": {}},
                     "negative_constraints": character.negative_constraints,
-                    "identity_assets": assets_by_owner.get(
-                        (VisualEntityType.CHARACTER.value, outline.id), []
-                    ),
-                }
-        return baselines
+                    "identity_assets": context["assets_by_owner"].get((VisualEntityType.CHARACTER.value, outline.id), []),
+                    # 保留旧 JSON 读取形状，但新流程不维护持有者或持久状态。
+                    "conditions": {}, "held_props": [], "held_prop_assets": [],
+                    "section_context": {
+                        "current_state": character.current_state,
+                        "emotion": character.emotion,
+                        "temporary_changes": character.temporary_changes,
+                    },
+                })
+                bindings.append({
+                    "script_character_id": character.id,
+                    "outline_character_id": outline.id,
+                    "outfit_variant_id": selected_outfit.id if selected_outfit else None,
+                    "outfit_status": selected_outfit.status.value if selected_outfit else None,
+                    "outfit_version": selected_outfit.version if selected_outfit else None,
+                })
+            selected_scene = page.script_scene.selected_visual_version
+            page_scene = deepcopy(scenes[page.script_scene.scene_key])
+            if page.scene_conditions_json is not None and page.script_scene.task.scene_definition_version < SCENE_DEFINITION_VERSION:
+                # 历史页显式保存条件后也不能同时输出旧场景的日夜/灯光默认值。
+                conditions = page_scene_conditions(page)
+                page_scene.update(time=conditions["time_of_day"], weather=conditions["weather"],
+                                  lighting=conditions["lighting"], light_states={})
+            page_contexts.append({
+                "schema_version": 2,
+                "context_builder_version": self.PAGE_CONTEXT_VERSION,
+                "page_id": page.id, "page_no": page.page_no,
+                "page_script": self._page_payload(page),
+                "characters": characters,
+                "scene": page_scene,
+                "scene_conditions": page_scene_conditions(page),
+                "prop_catalog": deepcopy(context["prop_catalog"]),
+                "source_bindings": {
+                    "section_id": page.section_id, "scene_id": page.scene_id,
+                    "scene_visual_version_id": selected_scene.id if selected_scene else None,
+                    "scene_visual_status": selected_scene.status.value if selected_scene else None,
+                    "scene_visual_version": selected_scene.version if selected_scene else None,
+                    "characters": bindings,
+                },
+            })
+        return page_contexts
 
     def _scene_baselines(self, context: dict[str, Any]) -> dict[str, dict[str, Any]]:
         assets_by_owner = context["assets_by_owner"]
@@ -1103,18 +1095,19 @@ class ImageSpecService:
             result[scene.scene_key] = {
                 "scene_key": scene.scene_key,
                 "script_scene_id": scene.id,
+                "scene_definition_version": scene.task.scene_definition_version,
                 "name": scene.name,
                 "location_type": scene.location_type,
-                "time": scene.time_of_day,
-                "lighting": scene.lighting,
-                "weather": scene.weather,
+                "time": scene.time_of_day if scene.task.scene_definition_version < SCENE_DEFINITION_VERSION else "",
+                "lighting": scene.lighting if scene.task.scene_definition_version < SCENE_DEFINITION_VERSION else "",
+                "weather": scene.weather if scene.task.scene_definition_version < SCENE_DEFINITION_VERSION else "",
                 "environment_details": scene.environment_details,
                 "color_palette": self._loads_list(approved_version.color_palette_json)
                 if approved_version
                 else scene.color_palette,
-                "visual_anchors": scene.visual_anchors,
                 "negative_constraints": scene.negative_constraints,
                 "visual_version_id": approved_version.id if approved_version else None,
+                "visual_version": approved_version.version if approved_version else None,
                 "reference_subject_id": scene.reference_subject_id,
                 "reference_subject_key": reference_subject.get("key", ""),
                 "reference_subject_name": reference_subject.get("name", ""),
@@ -1129,10 +1122,10 @@ class ImageSpecService:
                 if approved_version
                 else {},
                 "object_states": self._loads_object(approved_version.object_states_json)
-                if approved_version
+                if approved_version and scene.task.scene_definition_version < SCENE_DEFINITION_VERSION
                 else {},
                 "light_states": self._loads_object(approved_version.lighting_state_json)
-                if approved_version
+                if approved_version and scene.task.scene_definition_version < SCENE_DEFINITION_VERSION
                 else {},
                 "camera_presets": self._loads_list(approved_version.camera_presets_json)
                 if approved_version
@@ -1140,312 +1133,11 @@ class ImageSpecService:
                 "assets": [asset for asset in assets_by_owner.get(
                     (VisualEntityType.SCENE.value, approved_version.id), []
                 ) if asset.get("reference_subject_id") in (None, scene.reference_subject_id)]
-                if approved_version
+                if approved_version and scene.task.scene_definition_version < SCENE_DEFINITION_VERSION
                 else [],
             }
         return result
 
-    def _section_boundary_events(self, context: dict[str, Any]) -> list[dict[str, Any]]:
-        events: list[dict[str, Any]] = []
-        last_signature: dict[str, tuple[Any, ...]] = {}
-        outfit_assets = context["assets_by_owner"]
-        for page in context["pages"]:
-            for character in sorted(page.visual_characters, key=lambda item: item.character_key):
-                outfit = (
-                    character.outfit_variant
-                    if character.outfit_variant is not None
-                    and character.outfit_variant.status == ApprovalStatus.APPROVED
-                    else None
-                )
-                outline = character.outline_character
-                effective_hairstyle = self._stable_section_feature(
-                    character.current_hairstyle,
-                    outline.default_hairstyle if outline else "",
-                )
-                if outfit is not None:
-                    effective_clothing = ", ".join(
-                        str(value) for value in self._loads_list(outfit.garment_components_json)
-                    ) or outfit.name
-                    effective_accessories = ", ".join(
-                        str(value) for value in self._loads_list(outfit.accessories_json)
-                    )
-                else:
-                    effective_clothing = self._stable_section_feature(
-                        character.current_clothing,
-                        outline.default_clothing if outline else "",
-                    )
-                    effective_accessories = self._stable_section_feature(
-                        character.current_accessories,
-                        outline.default_accessories if outline else "",
-                    )
-                signature = (
-                    effective_hairstyle,
-                    outfit.id if outfit else None,
-                    effective_clothing,
-                    effective_accessories,
-                    character.current_state,
-                    character.visual_anchors,
-                    character.negative_constraints,
-                )
-                if last_signature.get(character.character_key) == signature:
-                    continue
-                last_signature[character.character_key] = signature
-                if effective_hairstyle:
-                    events.append(
-                        self._system_event(
-                            page.page_no,
-                            ContinuityEventType.SET_HAIRSTYLE,
-                            character.character_key,
-                            {"value": effective_hairstyle},
-                        )
-                    )
-                outfit_payload = (
-                    self._outfit_state_payload(
-                        outfit,
-                        outfit_assets.get(
-                            (VisualEntityType.OUTFIT.value, outfit.id), []
-                        ),
-                    )
-                    if outfit
-                    else {
-                        "outfit_variant_id": None,
-                        "outfit_key": "",
-                        "name": "",
-                        "description": effective_clothing,
-                        "garment_components": [],
-                        "layer_order": [],
-                        "colors": [],
-                        "materials": [],
-                        "patterns": [],
-                        "accessories": [],
-                        "trigger_tokens": [],
-                        "negative_constraints": "",
-                        "assets": [],
-                    }
-                )
-                outfit_payload["character_negative_constraints"] = (
-                    character.negative_constraints
-                )
-                outfit_payload["character_visual_anchors"] = character.visual_anchors
-                events.append(
-                    self._system_event(
-                        page.page_no,
-                        ContinuityEventType.SET_OUTFIT,
-                        character.character_key,
-                        outfit_payload,
-                    )
-                )
-                events.append(
-                    self._system_event(
-                        page.page_no,
-                        ContinuityEventType.SET_ACCESSORY,
-                        character.character_key,
-                        {
-                            "accessory_key": "__description__",
-                            "value": effective_accessories,
-                        },
-                    )
-                )
-                events.append(
-                    self._system_event(
-                        page.page_no,
-                        ContinuityEventType.SET_CHARACTER_CONDITION,
-                        character.character_key,
-                        {
-                            "condition_key": "section_state",
-                            "value": character.current_state,
-                        },
-                    )
-                )
-        return events
-
-    @staticmethod
-    def _stable_section_feature(current: Any, default: Any) -> str:
-        """把湿污、凌乱和持有位置等后缀从基础造型版本中分离。"""
-
-        current_text = str(current or "").strip()
-        default_text = str(default or "").strip()
-        if not current_text:
-            return default_text
-        if not default_text:
-            return current_text
-
-        def head(value: str) -> str:
-            for separator in ("，", ",", "。", "；", ";", "（", "("):
-                value = value.split(separator, 1)[0]
-            return "".join(value.casefold().split())
-
-        current_head = head(current_text)
-        default_head = head(default_text)
-        shorter = min(len(current_head), len(default_head))
-        longer = max(len(current_head), len(default_head), 1)
-        if current_head == default_head or (
-            shorter / longer >= 0.8
-            and (current_head in default_head or default_head in current_head)
-        ):
-            return default_text
-        return current_text
-
-    @staticmethod
-    def _system_event(
-        page_no: int,
-        event_type: ContinuityEventType,
-        target_key: str,
-        payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        return {
-            "page_no": page_no,
-            "sequence_no": 0,
-            "event_type": event_type.value,
-            "target_type": ContinuityTargetType.CHARACTER.value,
-            "target_key": target_key,
-            "timing": ContinuityEventTiming.BEFORE_PAGE.value,
-            "payload": payload,
-            "source": ContinuityEventSource.SYSTEM.value,
-        }
-
-    def _normalize_events(
-        self,
-        events: list[dict[str, Any]],
-        *,
-        context: dict[str, Any],
-    ) -> list[dict[str, Any]]:
-        pages_by_no = {page.page_no: page for page in context["pages"]}
-        character_keys = {
-            character.character_key
-            for page in context["pages"]
-            for character in page.visual_characters
-        }
-        scene_keys = {scene.scene_key for scene in context["scenes"]}
-        outfits_by_id = {item.id: item for item in context["outfits"]}
-        assets_by_owner = context["assets_by_owner"]
-        locked_accessory_targets = {
-            str(raw.get("target_key", "")).strip()
-            for raw in events
-            if raw.get("event_type") == ContinuityEventType.SET_ACCESSORY.value
-            and raw.get("source") == ContinuityEventSource.SYSTEM.value
-            and str((raw.get("payload") or {}).get("accessory_key", "")).strip()
-            == "__description__"
-            and str((raw.get("payload") or {}).get("value", "")).strip()
-        }
-        normalized: list[dict[str, Any]] = []
-        for raw in events:
-            page_no = int(raw.get("page_no", 0))
-            if page_no not in pages_by_no:
-                raise ValueError(f"Continuity event page_no not found: {page_no}")
-            event_type = ContinuityEventType(raw["event_type"])
-            target_type = ContinuityTargetType(raw["target_type"])
-            target_key = str(raw.get("target_key", "")).strip()
-            if target_type == ContinuityTargetType.CHARACTER and target_key not in character_keys:
-                raise ValueError(f"Continuity character target not found: {target_key}")
-            if target_type == ContinuityTargetType.SCENE and target_key not in scene_keys:
-                raise ValueError(f"Continuity scene target not found: {target_key}")
-            source = ContinuityEventSource(
-                raw.get("source", ContinuityEventSource.LLM.value)
-            )
-            if (
-                event_type == ContinuityEventType.SET_ACCESSORY
-                and source == ContinuityEventSource.LLM
-                and target_key in locked_accessory_targets
-            ):
-                # 已批准视觉设定中的固定配件由 system event 管理。LLM 只从脚本抽取
-                # 持久变化，不能用自然语言动作覆盖“唯一且不可取下”等硬锚点。
-                continue
-            payload = dict(raw.get("payload") or {})
-            if event_type == ContinuityEventType.SET_OUTFIT and payload.get("outfit_variant_id"):
-                variant_id = int(payload["outfit_variant_id"])
-                variant = outfits_by_id.get(variant_id)
-                if variant is None:
-                    raise ValueError(f"Continuity outfit variant not found: {variant_id}")
-                payload.update(
-                    self._outfit_state_payload(
-                        variant,
-                        assets_by_owner.get(
-                            (VisualEntityType.OUTFIT.value, variant.id), []
-                        ),
-                    )
-                )
-            elif (
-                event_type == ContinuityEventType.SET_OUTFIT
-                and source != ContinuityEventSource.SYSTEM
-            ):
-                # LLM/人工事件不能注入资产或角色锚点；无获批 variant 时只保留文字变化。
-                payload = {
-                    "outfit_variant_id": None,
-                    "outfit_key": str(payload.get("outfit_key", "")).strip(),
-                    "description": str(payload.get("description", "")).strip(),
-                    "assets": [],
-                }
-            if source != ContinuityEventSource.SYSTEM:
-                payload.pop("character_visual_anchors", None)
-                payload.pop("character_negative_constraints", None)
-            normalized.append(
-                {
-                    "page_no": page_no,
-                    "sequence_no": int(raw.get("sequence_no", 0)),
-                    "event_type": event_type.value,
-                    "target_type": target_type.value,
-                    "target_key": target_key,
-                    "timing": ContinuityEventTiming(
-                        raw.get("timing", ContinuityEventTiming.AFTER_PAGE.value)
-                    ).value,
-                    "payload": payload,
-                    "source": source.value,
-                }
-            )
-        source_order = {"system": 0, "manual": 1, "llm": 2}
-        timing_order = {"before_page": 0, "after_page": 1}
-        normalized.sort(
-            key=lambda item: (
-                item["page_no"],
-                timing_order[item["timing"]],
-                source_order[item["source"]],
-                item["sequence_no"],
-                item["event_type"],
-            )
-        )
-        # 分段锁定值由 system event 表达，同一语义槽位内它优先于人工/LLM；
-        # 其它带不同 condition/object/prop key 的事件仍会完整保留。
-        discriminator_keys = {
-            ContinuityEventType.SET_ACCESSORY.value: "accessory_key",
-            ContinuityEventType.SET_GARMENT_STATE.value: "garment_key",
-            ContinuityEventType.SET_CLOTHING_CONDITION.value: "condition_key",
-            ContinuityEventType.SET_CHARACTER_CONDITION.value: "condition_key",
-            ContinuityEventType.PICK_UP_PROP.value: "prop_key",
-            ContinuityEventType.DROP_PROP.value: "prop_key",
-            ContinuityEventType.TRANSFER_PROP.value: "prop_key",
-            ContinuityEventType.SET_DOOR_STATE.value: "door_key",
-            ContinuityEventType.SET_OBJECT_STATE.value: "object_key",
-            ContinuityEventType.BREAK_OBJECT.value: "object_key",
-        }
-        deduplicated: list[dict[str, Any]] = []
-        seen_slots: set[tuple[Any, ...]] = set()
-        for item in normalized:
-            discriminator_key = discriminator_keys.get(item["event_type"])
-            discriminator = (
-                str(item["payload"].get(discriminator_key, "")).strip()
-                if discriminator_key
-                else ""
-            )
-            slot = (
-                item["page_no"],
-                item["timing"],
-                item["event_type"],
-                item["target_type"],
-                item["target_key"],
-                discriminator,
-            )
-            if slot in seen_slots:
-                continue
-            seen_slots.add(slot)
-            deduplicated.append(item)
-        counters: dict[int, int] = defaultdict(int)
-        for item in deduplicated:
-            counters[item["page_no"]] += 1
-            item["sequence_no"] = counters[item["page_no"]]
-        return deduplicated
-
-    # Prompt specs ------------------------------------------------------
     def _compile_prompt_spec(
         self,
         *,
@@ -1458,6 +1150,8 @@ class ImageSpecService:
         negative_preset: ImagePromptPreset | None,
         generation_mode: GenerationMode,
         reference_plan: dict[str, Any] | None = None,
+        prompt_language: PromptLanguage = PromptLanguage.ORIGINAL,
+        prompt_components: dict[str, str] | None = None,
     ) -> ImageSpec:
         snapshot_data = self._loads_object(snapshot.state_json)
         plan_data = self._loads_object(shot_plan.plan_json)
@@ -1473,6 +1167,7 @@ class ImageSpecService:
             style_profile=style_profile,
             style_assets=style_assets,
             negative_preset=negative_preset,
+            prompt_language=prompt_language,
         )
         compiler = compiler_for_prompt_type(prompt_type)
         compiled = compiler.compile(
@@ -1483,6 +1178,8 @@ class ImageSpecService:
             generation_mode=generation_mode,
             source_hash=combined_source_hash,
             reference_plan=reference_plan,
+            prompt_language=prompt_language,
+            prompt_components=prompt_components,
         )
         return self.repository.add_image_spec(
             page_id=page.id,
@@ -1513,6 +1210,7 @@ class ImageSpecService:
         style_profile: StyleProfile | None,
         style_assets: list[dict[str, Any]],
         negative_preset: ImagePromptPreset | None,
+        prompt_language: PromptLanguage = PromptLanguage.ORIGINAL,
     ) -> str:
         """来源锁定快照、镜头、选图规则和负向 Prompt；历史风格不再影响新规格。"""
 
@@ -1522,6 +1220,13 @@ class ImageSpecService:
                 "snapshot_hash": snapshot_hash,
                 "plan_hash": plan_hash,
                 "prompt_type": prompt_type.value,
+                "prompt_language": prompt_language.value,
+                "language_prompt_hash": canonical_hash(self._language_system_prompt())
+                if prompt_language != PromptLanguage.ORIGINAL else None,
+                "reference_language_prompt_hash": canonical_hash(PromptLoader.load(
+                    "qwen21_reference_prompt_zh.json" if prompt_language == PromptLanguage.CHINESE
+                    else "qwen21_reference_prompt.json",
+                )),
                 "compiler": {
                     "key": compiler.compiler_key,
                     "version": compiler.compiler_version,
@@ -1542,12 +1247,32 @@ class ImageSpecService:
             }
         )
 
+    def _planner_system_prompt(self, preset: ImagePromptPreset) -> str:
+        """Shot 设置覆盖同时用于实际调用与来源 Hash，避免准备复用旧镜头计划。"""
+        content = ComicRepository(self.repository.session).get_system_prompt_content(
+            SystemPromptKey.SHOT_PLANNER, fallback=preset.content,
+        )
+        return content if content is not None else PromptLoader.load("shot_planner_prompt.md")
+
+    def _language_system_prompt(self) -> str:
+        """语言转换也消费同一设置来源，修改后旧规格可检测到规则过期。"""
+        content = ComicRepository(self.repository.session).get_system_prompt_content(SystemPromptKey.SHOT_LANGUAGE)
+        return content if content is not None else PromptLoader.load("image_spec_language_prompt.md")
+
+    def _global_system_prompt_hash(self) -> str:
+        """全局上下文参与生成来源；API Key 从不进入来源或快照。"""
+        config = self.repository.get_active_llm_config()
+        content = model_prompt_overrides(config).get(config.default_model, default_model_system_prompt(config)) if config else ""
+        return canonical_hash(content.strip())
+
     def _shot_plan_source_hash(
         self,
         *,
         plan: dict[str, Any],
         planner_preset: ImagePromptPreset | None,
         planner_model: str | None,
+        planner_system_prompt: str | None = None,
+        global_system_prompt_hash: str | None = None,
     ) -> str:
         """镜头计划 Hash 同时锁定计划内容和产生它的 Agent/Prompt/模型。"""
 
@@ -1558,7 +1283,7 @@ class ImageSpecService:
                     {
                         "id": planner_preset.id,
                         "kind": planner_preset.kind.value,
-                        "content_hash": canonical_hash(planner_preset.content),
+                        "content_hash": canonical_hash(planner_system_prompt if planner_system_prompt is not None else self._planner_system_prompt(planner_preset)),
                     }
                     if planner_preset is not None
                     else None
@@ -1568,45 +1293,27 @@ class ImageSpecService:
                     "version": ShotPlannerAgent.VERSION,
                     "prompt_version": self.PROMPT_VERSION,
                     "llm_model": planner_model,
+                    "global_system_prompt_hash": global_system_prompt_hash if global_system_prompt_hash is not None else self._global_system_prompt_hash(),
                 },
             }
         )
 
-    def _continuity_source_payload(self, context: dict[str, Any]) -> dict[str, Any]:
+    def _page_context_source_payload(
+        self, context: dict[str, Any], page_contexts: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """来源包含真实页设定和参考资产；独立版本让旧事件规格要求重新准备。"""
+
         return {
-            "schema_version": 1,
+            "schema_version": 2,
+            "context_builder_version": self.PAGE_CONTEXT_VERSION,
             "task_id": context["task"].id,
-            "pages": [self._page_payload(page) for page in context["pages"]],
-            "characters": self._character_agent_payloads(context["pages"]),
-            "scenes": [self._scene_source_payload(scene) for scene in context["scenes"]],
-            "outfits": [
-                self._outfit_payload(
-                    item,
-                    context["assets_by_owner"].get(
-                        (VisualEntityType.OUTFIT.value, item.id), []
-                    ),
-                )
-                for item in context["outfits"]
-            ],
-            "assets": context["asset_payloads"],
-            "prop_catalog": context["prop_catalog"],
-            "reference_subjects": list(context["reference_subjects"].values()),
-            "agent": {
-                "key": "continuity_event_agent",
-                "version": ContinuityEventAgent.VERSION,
-                "prompt_hash": canonical_hash(
-                    PromptLoader.load("continuity_event_prompt.md")
-                ),
-                "llm_config_id": context["llm_config_id"],
-                "llm_model": context["llm_model"],
-            },
-            "prompt_version": self.PROMPT_VERSION,
-            "reducer_version": VisualStateReducer.VERSION,
+            "pages": page_contexts if page_contexts is not None else self._build_page_contexts(context),
         }
 
     @staticmethod
     def _page_payload(page: ComicPage) -> dict[str, Any]:
         return {
+            "scene_conditions": page_scene_conditions(page),
             "page_id": page.id,
             "page_no": page.page_no,
             "section_no": page.section.section_no if page.section else None,
@@ -1623,87 +1330,6 @@ class ImageSpecService:
             # dialogue 仅作为 ShotPlanner 理解剧情的上下文，编译器不会写进 Prompt。
             "dialogue": page.dialogue or "无",
         }
-
-    @staticmethod
-    def _reducer_page_payload(page: ComicPage) -> dict[str, Any]:
-        return {
-            "page_id": page.id,
-            "page_no": page.page_no,
-            "scene_key": page.script_scene.scene_key if page.script_scene else "",
-            "character_keys": sorted(
-                character.character_key for character in page.visual_characters
-            ),
-        }
-
-    @staticmethod
-    def _character_agent_payloads(pages: list[ComicPage]) -> list[dict[str, Any]]:
-        seen: dict[int, dict[str, Any]] = {}
-        for page in pages:
-            for character in page.visual_characters:
-                if character.id in seen:
-                    continue
-                seen[character.id] = {
-                    "character_key": character.character_key,
-                    "name": character.name,
-                    "section_no": character.section.section_no,
-                    "current_hairstyle": character.current_hairstyle,
-                    "current_clothing": character.current_clothing,
-                    "current_accessories": character.current_accessories,
-                    "current_state": character.current_state,
-                    "temporary_changes": character.temporary_changes,
-                    "outfit_variant_id": character.outfit_variant_id,
-                }
-        return list(seen.values())
-
-    @staticmethod
-    def _scene_text_payload(scene: ScriptScene) -> dict[str, Any]:
-        return {
-            "scene_key": scene.scene_key,
-            "name": scene.name,
-            "time": scene.time_of_day,
-            "weather": scene.weather,
-            "visual_anchors": scene.visual_anchors,
-        }
-
-    def _scene_source_payload(self, scene: ScriptScene) -> dict[str, Any]:
-        payload = self._scene_text_payload(scene)
-        payload.update(
-            {
-                "lighting": scene.lighting,
-                "reference_subject_id": scene.reference_subject_id,
-                "environment_details": scene.environment_details,
-                "color_palette": scene.color_palette,
-                "negative_constraints": scene.negative_constraints,
-                "selected_visual_version": (
-                    {
-                        "id": scene.selected_visual_version.id,
-                        "version": scene.selected_visual_version.version,
-                        "status": scene.selected_visual_version.status.value,
-                        "landmarks": self._loads_list(
-                            scene.selected_visual_version.landmarks_json
-                        ),
-                        "spatial_relations": self._loads_object(
-                            scene.selected_visual_version.spatial_relations_json
-                        ),
-                        "camera_presets": self._loads_list(
-                            scene.selected_visual_version.camera_presets_json
-                        ),
-                        "object_states": self._loads_object(
-                            scene.selected_visual_version.object_states_json
-                        ),
-                        "color_palette": self._loads_list(
-                            scene.selected_visual_version.color_palette_json
-                        ),
-                        "lighting_state": self._loads_object(
-                            scene.selected_visual_version.lighting_state_json
-                        ),
-                    }
-                    if scene.selected_visual_version
-                    else None
-                ),
-            }
-        )
-        return payload
 
     def _outfit_payload(
         self,
@@ -1742,12 +1368,15 @@ class ImageSpecService:
         item: OutfitVariant,
         assets: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        """把获批服装版本展开为 reducer 可锁定的完整结构。"""
+        """把获批服装版本展开为本页只读造型，不携带其它页面的临时状态。"""
 
         payload = self._outfit_payload(item, assets)
         return {
-            "outfit_variant_id": item.id,
-            "outfit_key": item.key,
+            "variant_id": item.id,
+            "version": item.version,
+            "key": item.key,
+            "garment_states": {},
+            "conditions": {},
             "name": item.name,
             "description": self._outfit_description(item),
             "garment_components": payload["garment_components"],
@@ -1779,6 +1408,9 @@ class ImageSpecService:
             "mime_type": asset.mime_type,
             "width": asset.width,
             "height": asset.height,
+            "crop_metadata_json": asset.crop_metadata_json,
+            "mask_asset_id": asset.mask_asset_id,
+            "derived_from_asset_id": asset.derived_from_asset_id,
         }
 
     def _style_payload(
@@ -1871,19 +1503,6 @@ class ImageSpecService:
             "compiler_key": spec.compiler_key,
             "compiler_version": spec.compiler_version,
             "created_at": spec.created_at.isoformat(),
-        }
-
-    @staticmethod
-    def _event_from_orm(item) -> dict[str, Any]:
-        return {
-            "page_no": item.page.page_no,
-            "sequence_no": item.sequence_no,
-            "event_type": item.event_type.value,
-            "target_type": item.target_type.value,
-            "target_key": item.target_key,
-            "timing": item.timing.value,
-            "payload": ImageSpecService._loads_object(item.payload_json),
-            "source": item.source.value,
         }
 
     @staticmethod

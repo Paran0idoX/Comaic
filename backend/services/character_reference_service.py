@@ -84,19 +84,20 @@ class CharacterReferenceService:
         character_id: int,
         tool_preset_id: int,
         style_profile_id: int | None = None,
+        refresh_visual_profiles: bool = False,
     ) -> tuple[ImageGenerationToolPreset, dict[str, dict[str, str]]]:
         character = self._get_character(character_id)
         tool = self._get_tool(tool_preset_id)
         self._ensure_txt2img_tool(tool)
-        style = self._get_approved_style(
+        self._get_approved_style(
             style_profile_id,
             project_id=character.outline_version.project_id,
         )
-        return tool, self.prompt_service.compile(
-            character=character,
-            prompt_type=tool.prompt_type,
-            style=style,
-        )
+        from backend.services.reference_visual_profile_service import ReferenceVisualProfileService
+        from backend.models.enums import ReferenceProfileKind
+        self.preview_visual_profiles, _ = ReferenceVisualProfileService(self.repository.session).prepare(
+            character.outline_version.project_id, [(ReferenceProfileKind.CHARACTER, character.id)], force=refresh_visual_profiles)
+        return tool, self.prompt_service.compile(profiles=self.preview_visual_profiles, prompt_type=tool.prompt_type)
 
     def create_task(
         self,
@@ -106,6 +107,7 @@ class CharacterReferenceService:
         style_profile_id: int | None,
         candidate_count: int,
         prompts: dict[str, dict[str, str]],
+        visual_profile_refs=None,
     ) -> CharacterReferenceGenerationTask:
         character = self._get_character(character_id)
         tool = self._get_tool(tool_preset_id)
@@ -121,6 +123,10 @@ class CharacterReferenceService:
                 debug_message=f"candidate_count out of range: {candidate_count}",
             )
         normalized_prompts = self._validate_prompts(prompts)
+        from backend.services.reference_visual_profile_service import ReferenceVisualProfileService
+        from backend.models.enums import ReferenceProfileKind
+        profiles = ReferenceVisualProfileService(self.repository.session).check_refs(
+            character.outline_version.project_id, [(ReferenceProfileKind.CHARACTER, character.id)], visual_profile_refs)
         seeds: list[int] = []
         while len(seeds) < candidate_count:
             seed = secrets.randbelow(2_147_483_647)
@@ -134,6 +140,7 @@ class CharacterReferenceService:
             candidate_count=candidate_count,
             prompts=normalized_prompts,
             seeds=seeds,
+            subject_snapshot={"visual_profiles": profiles},
         )
 
     def get_task(self, task_id: int) -> CharacterReferenceGenerationTask:
@@ -200,6 +207,9 @@ class CharacterReferenceService:
 
     def prepare_continue(self, task_id: int) -> CharacterReferenceGenerationTask:
         task = self.get_task(task_id)
+        if VisualAssetRole.IDENTITY_HALF_BODY in selected_task_roles(task):
+            # 旧任务只保留审计读取；不能在继续操作中重新生成已退役的用途。
+            raise AppError("reference.roles_invalid", status_code=422)
         if task.status not in {
             GenerationTaskStatus.FAILED,
             GenerationTaskStatus.SUSPENDED,
@@ -242,6 +252,8 @@ class CharacterReferenceService:
         }:
             return task
         try:
+            if VisualAssetRole.IDENTITY_HALF_BODY in selected_task_roles(task):
+                raise AppError("reference.roles_invalid", status_code=422)
             tool = self._get_tool(task.tool_preset_id)
             if task.runs:
                 tool = frozen_preset(tool, json.loads(task.runs[0].applied_spec_json))
@@ -338,6 +350,11 @@ class CharacterReferenceService:
                         ):
                             continue
                         metadata = self._image_metadata(artifact.content)
+                        requested = spec.get("render", {})
+                        if requested.get("width") and requested.get("height") and (
+                                metadata[3], metadata[4]) != (requested["width"], requested["height"]):
+                            # Provider 未兑现冻结尺寸时不能把结果标成符合用户设置的参考图。
+                            raise AppError("reference.size_mismatch", status_code=502)
                         local_path = self._save_image_file(
                             task=current_task,
                             run=run,
@@ -417,17 +434,6 @@ class CharacterReferenceService:
         candidate_index: int,
     ) -> CharacterReferenceGenerationTask:
         task = self.get_task(task_id)
-        if task.approved_candidate_index is not None:
-            if task.approved_candidate_index == candidate_index:
-                return task
-            raise AppError(
-                "character_reference.already_approved",
-                status_code=409,
-                debug_message=(
-                    f"Task {task_id} already approved candidate "
-                    f"{task.approved_candidate_index}"
-                ),
-            )
         selected = [run for run in task.runs if run.candidate_index == candidate_index]
         selected_by_role = {run.role: run for run in selected}
         expected_roles = selected_task_roles(task)
@@ -466,6 +472,8 @@ class CharacterReferenceService:
         try:
             for role, primary in primaries.items():
                 if primary.promoted_asset_id is not None:
+                    visual_service.set_asset_status(asset_id=primary.promoted_asset_id,
+                        status=ApprovalStatus.APPROVED, commit=False)
                     continue
                 asset = visual_service.upload_asset(
                     project_id=task.project_id,
@@ -485,7 +493,7 @@ class CharacterReferenceService:
                 run.review_status = (
                     ApprovalStatus.APPROVED
                     if run.candidate_index == candidate_index
-                    else ApprovalStatus.ARCHIVED
+                    else ApprovalStatus.DRAFT
                 )
             task.approved_candidate_index = candidate_index
             session.commit()

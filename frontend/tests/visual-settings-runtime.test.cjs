@@ -32,12 +32,16 @@ const harness = (query = { project_id: '1', script_task_id: '11' }) => {
   const lifecycle = {}
   const activities = new Map()
   const callbacks = new Map()
-  const saved = { outfits: [], styles: [], scenes: [], assets: [], bindings: [] }
+  const saved = { outfits: [], styles: [], scenes: [], assets: [], bindings: [], removals: [] }
+  const confirmations = []
+  let confirmation = async () => {}
   const warnings = []
+  const appliedOutfits = new Map()
+  const appliedScenes = new Map()
   const tasks = [11, 12, 21].map((id) => ({ id, project_id: id < 20 ? 1 : 2, outline_version_id: id * 10, status: 'succeeded', total_pages: 2 }))
   const outlineCharacter = (id) => ({ id, name: `角色 ${id}`, character_key: `character-${id}`, visual_type: 'stylized_human' })
   const characterIds = { 11: 100, 12: 120, 21: 200 }
-  const character = (taskId) => ({ id: taskId * 100, outline_character_id: characterIds[taskId], name: `角色 ${characterIds[taskId]}`, character_key: `character-${characterIds[taskId]}`, section_no: 1, outfit_variant_id: taskId < 20 ? 10 : 20 })
+  const character = (taskId) => ({ id: taskId * 100, outline_character_id: characterIds[taskId], name: `角色 ${characterIds[taskId]}`, character_key: `character-${characterIds[taskId]}`, section_no: 1, outfit_variant_id: appliedOutfits.get(taskId * 100) ?? (taskId < 20 ? 10 : 20) })
   const referenceTask = (characterId, id, status) => ({
     id, project_id: characterId < 200 ? 1 : 2, outline_character_id: characterId,
     character_name: `角色 ${characterId}`, candidate_count: 2, progress: { total: 6, completed: status === 'succeeded' ? 6 : 0 },
@@ -53,11 +57,13 @@ const harness = (query = { project_id: '1', script_task_id: '11' }) => {
     listStyles: async (projectId) => projectId === 1 ? [style] : [],
     listSceneVersions: async (projectId) => projectId === 1 ? [scene] : [],
     listVisualAssets: async () => [],
-    createOutfit: async (projectId, payload) => { saved.outfits.push({ projectId, payload }); const result = { ...payload, id: 15, project_id: projectId, version: 2, status: 'draft' }; outfits.push(result); return result },
+    createOutfit: async (projectId, payload) => { saved.outfits.push({ projectId, payload }); const result = { ...payload, id: 15, project_id: projectId, version: 2, status: payload.apply_to ? 'approved' : 'draft' }; if (payload.apply_to) appliedOutfits.set(payload.apply_to.script_character_id, result.id); outfits.push(result); return result },
     createStyle: async (projectId, payload) => { saved.styles.push({ projectId, payload }); return { ...payload, id: 51, project_id: projectId, version: 2, status: 'draft' } },
-    createSceneVersion: async (projectId, payload) => { saved.scenes.push({ projectId, payload }); return { ...payload, id: 1101, project_id: projectId, version: 2, status: 'draft' } },
+    createSceneVersion: async (projectId, payload) => { saved.scenes.push({ projectId, payload }); if (payload.apply_to) appliedScenes.set(payload.script_scene_id, 1101); return { ...payload, id: 1101, project_id: projectId, version: 2, status: payload.apply_to ? 'approved' : 'draft' } },
     uploadVisualAsset: async (projectId, form) => { saved.assets.push({ projectId, form }); return { id: 80, project_id: projectId } },
     setConfigurationStatus: async (kind, id, status) => { if (kind === 'outfit') outfits.find((item) => item.id === id).status = status; return { id, status } },
+    getConfigurationUsage: async (kind, id) => ({ id, binding_count: 2, bindings: [{ id: 1100, name: '角色 100' }, { id: 1200, name: '角色 120' }] }),
+    deleteConfigurationDraft: async (kind, id) => { saved.removals.push({ kind, id }); const index = outfits.findIndex(item => item.id === id); if (index !== -1) outfits.splice(index, 1); return { id } },
     assignOutfitVariant: async (characterId, versionId) => { saved.bindings.push({ characterId, versionId }); return { id: characterId, outfit_variant_id: versionId } },
   }
   const router = {
@@ -69,14 +75,15 @@ const harness = (query = { project_id: '1', script_task_id: '11' }) => {
     vue: { ...vue, onMounted: (fn) => { lifecycle.mounted = fn }, onBeforeUnmount: (fn) => { lifecycle.unmounted = fn } },
     pinia: { storeToRefs: (store) => store },
     'vue-router': { useRoute: () => route, useRouter: () => router },
+    '@/components/workspace/InfoTip.vue': {},
     'vue-i18n': { useI18n: () => ({ t: (key) => key }) },
-    'element-plus': { ElMessage: { error() {}, warning(message) { warnings.push(message) }, success() {}, info() {} }, ElMessageBox: { confirm: async () => {} } },
+    'element-plus': { ElMessage: { error() {}, warning(message) { warnings.push(message) }, success() {}, info() {} }, ElMessageBox: { confirm: async (...args) => { confirmations.push(args); await confirmation() } } },
     '@element-plus/icons-vue': {},
     '@/api/errors': { apiErrorMessage: (_error, _t, fallback) => fallback },
     '@/api/scripts': {
       listProjectScriptTasks: async (projectId) => tasks.filter((item) => item.project_id === projectId),
       listScriptTaskCharacters: async (taskId) => pendingCharacters?.taskId === taskId ? pendingCharacters.promise : [character(taskId)],
-      listScriptTaskScenes: async (taskId) => [{ id: taskId * 10, name: `场景 ${taskId}`, selected_visual_version_id: taskId === 11 ? scene.id : null }],
+      listScriptTaskScenes: async (taskId) => [{ id: taskId * 10, name: `场景 ${taskId}`, selected_visual_version_id: appliedScenes.get(taskId * 10) ?? (taskId === 11 ? scene.id : null) }],
     },
     '@/api/characterReference': {
       listProjectCharacterReferenceCharacters: async (projectId) => (projectId === 1 ? [100, 120] : [200]).map(outlineCharacter),
@@ -101,7 +108,8 @@ const harness = (query = { project_id: '1', script_task_id: '11' }) => {
   const scope = vue.effectScope()
   const state = scope.run(() => runtime.exports.default.setup({}, { expose() {} }))
   const flush = async () => { for (let i = 0; i < 10; i++) { await vue.nextTick(); await new Promise(setImmediate) } }
-  return { state, route, selectedProjectId, tasks, activities, callbacks, saved, warnings, lifecycle, referenceTask, scene, style, flush,
+  return { state, route, selectedProjectId, tasks, activities, callbacks, saved, warnings, lifecycle, referenceTask, scene, style, flush, visualApi, confirmations,
+    setConfirmation(fn) { confirmation = fn },
     holdCharacters(taskId) { pendingCharacters = { taskId, ...deferred() }; return pendingCharacters },
     close() { lifecycle.unmounted?.(); scope.stop() },
   }
@@ -229,5 +237,153 @@ test('复制场景与画风时保留光照、色彩及全部空间和提示词�
     await h.state.saveStyle(); await h.flush()
     for (const field of ['key', 'name', 'positive_tag', 'negative_tag', 'positive_natural_language', 'negative_natural_language', 'color_palette', 'lighting']) assert.deepEqual(h.saved.styles[0].payload[field], h.style[field])
     assert.equal(h.saved.bindings.length, 0)
+  } finally { h.close() }
+})
+
+test('分段角色编辑一次保存并应用，只提交当前角色和原绑定，原版本保持确认', async () => {
+  const h = harness()
+  try {
+    await h.lifecycle.mounted(); await h.flush()
+    const original = h.state.outfits.value[0]
+    h.state.openSettingDetails('outfit', original, 1100)
+    h.state.copySettingVersion()
+    assert.equal(h.state.canApplyOutfit.value, true)
+    h.state.outfitForm.name = '新造型'
+    await h.state.saveOutfit(true); await h.flush()
+    assert.deepEqual(h.saved.outfits[0].payload.apply_to, {
+      script_character_id: 1100, script_task_id: 11, expected_outfit_variant_id: 10,
+    })
+    assert.equal(h.state.characters.value[0].outfit_variant_id, 15)
+    assert.equal(original.status, 'approved')
+    assert.equal(h.saved.bindings.length, 0)
+    assert.equal(h.state.activeBibleTab.value, 'assignments')
+  } finally { h.close() }
+})
+
+test('分段场景编辑沿用明确入口并应用，素材库复制保持草稿路径', async () => {
+  const h = harness()
+  try {
+    await h.lifecycle.mounted(); await h.flush()
+    h.state.openSettingDetails('scene', h.scene, 110)
+    h.state.copySettingVersion()
+    assert.equal(h.state.canApplyScene.value, true)
+    await h.state.saveScene(true); await h.flush()
+    assert.deepEqual(h.saved.scenes[0].payload.apply_to, { script_task_id: 11, expected_visual_version_id: 1100 })
+    assert.equal(h.state.scenes.value[0].selected_visual_version_id, 1101)
+    h.state.openSceneEditor(h.scene)
+    assert.equal(h.state.canApplyScene.value, false)
+    await h.state.saveScene(false)
+    assert.equal(h.saved.scenes[1].payload.apply_to, undefined)
+  } finally { h.close() }
+})
+
+test('复制其它批次的新固定场景仍隐藏临时状态，并只保存空间字段', async () => {
+  const h = harness()
+  try {
+    await h.lifecycle.mounted(); await h.flush()
+    h.state.openSceneEditor({ ...h.scene, script_scene_id: 999, scene_definition_version: 2 })
+    assert.equal(h.state.fixedSceneEditor.value, true)
+    h.state.sceneForm.lighting_state = '历史光照无需解析'
+    h.state.sceneForm.object_states = '临时状态无需解析'
+    await h.state.saveScene(false)
+    assert.deepEqual(h.saved.scenes[0].payload.lighting_state, {})
+    assert.deepEqual(h.saved.scenes[0].payload.object_states, {})
+  } finally { h.close() }
+})
+
+test('有应用目标仍可仅存草稿，且重新打开素材库不会沿用旧目标', async () => {
+  const h = harness()
+  try {
+    await h.lifecycle.mounted(); await h.flush()
+    h.state.openOutfitEditor(fixtureOutfit(), 1100)
+    await h.state.saveOutfit(false); await h.flush()
+    assert.equal(h.saved.outfits[0].payload.apply_to, undefined)
+    assert.equal(h.state.characters.value[0].outfit_variant_id, 10)
+    h.state.openOutfitEditor(fixtureOutfit())
+    assert.equal(h.state.outfitEditTarget.value, null)
+    await h.state.saveOutfit(true)
+    assert.equal(h.saved.outfits.length, 1)
+  } finally { h.close() }
+})
+
+test('编辑期间切换任务禁用应用，但草稿仍保存到原项目', async () => {
+  const h = harness()
+  try {
+    await h.lifecycle.mounted(); await h.flush()
+    h.state.openOutfitEditor(fixtureOutfit(), 1100)
+    h.state.openSceneEditor(h.scene, 110)
+    h.route.query = { project_id: '2', script_task_id: '21' }
+    await h.flush()
+    assert.equal(h.state.canApplyOutfit.value, false)
+    assert.equal(h.state.canApplyScene.value, false)
+    await h.state.saveOutfit(true); await h.state.saveScene(true)
+    assert.equal(h.saved.outfits.length + h.saved.scenes.length, 0)
+    await h.state.saveOutfit(false); await h.state.saveScene(false)
+    assert.equal(h.saved.outfits[0].projectId, 1)
+    assert.equal(h.saved.scenes[0].projectId, 1)
+    assert.equal(h.saved.outfits[0].payload.apply_to, undefined)
+    assert.equal(h.saved.scenes[0].payload.apply_to, undefined)
+  } finally { h.close() }
+})
+
+test('保存并应用失败保留输入和编辑器，不追加批准或绑定请求', async () => {
+  const h = harness()
+  try {
+    await h.lifecycle.mounted(); await h.flush()
+    h.state.openOutfitEditor(fixtureOutfit(), 1100)
+    h.state.outfitForm.name = '保留编辑'
+    h.visualApi.createOutfit = async () => { throw new Error('binding changed') }
+    await h.state.saveOutfit(true)
+    assert.equal(h.state.outfitDialog.value, true)
+    assert.equal(h.state.outfitForm.name, '保留编辑')
+    assert.equal(h.state.savingConfiguration.value, null)
+    assert.equal(h.saved.bindings.length, 0)
+    assert.equal(h.state.characters.value[0].outfit_variant_id, 10)
+  } finally { h.close() }
+})
+
+
+test('删除草稿确认后刷新列表，归档版本只出现在归档筛选', async () => {
+  const h = harness()
+  try {
+    await h.lifecycle.mounted(); await h.flush()
+    const draft = h.state.outfits.value[0]
+    draft.status = 'draft'
+    await h.state.removeConfiguration('outfit', draft)
+    assert.deepEqual(h.saved.removals, [{ kind: 'outfit', id: 10 }])
+    assert.equal(h.state.outfits.value.length, 0)
+    assert.equal(h.state.removingConfiguration.value, null)
+    const archived = await h.visualApi.createOutfit(1, { ...fixtureOutfit(), name: '新版本' })
+    archived.status = 'approved'
+    await h.state.loadProjectData()
+    await h.state.removeConfiguration('outfit', archived)
+    assert.equal(archived.status, 'archived')
+    h.state.libraryStatusFilter.value = 'all'
+    assert.equal(h.state.filteredOutfits.value.length, 0)
+    h.state.libraryStatusFilter.value = 'archived'
+    assert.equal(h.state.filteredOutfits.value.length, 1)
+  } finally { h.close() }
+})
+
+test('取消删除或确认期间切换项目不会提交删除', async () => {
+  const h = harness()
+  try {
+    await h.lifecycle.mounted(); await h.flush()
+    const draft = h.state.outfits.value[0]
+    draft.status = 'draft'
+    h.setConfirmation(async () => { throw 'cancel' })
+    await h.state.removeConfiguration('outfit', draft)
+    assert.equal(h.saved.removals.length, 0)
+    assert.equal(h.state.removingConfiguration.value, null)
+    const wait = deferred()
+    h.setConfirmation(() => wait.promise)
+    const removing = h.state.removeConfiguration('outfit', draft)
+    await h.flush()
+    h.route.query = { project_id: '2', script_task_id: '21' }
+    await h.flush()
+    wait.resolve()
+    await removing
+    assert.equal(h.saved.removals.length, 0)
+    assert.equal(h.state.removingConfiguration.value, null)
   } finally { h.close() }
 })

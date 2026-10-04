@@ -130,6 +130,16 @@ class WorkflowCompiler:
                     connection = node["inputs"][target.input_name]
                     if not isinstance(connection, list) or len(connection) != 2 or str(connection[0]) != slot.node_id:
                         raise ValueError("Workflow binding reference slot consumer does not connect to its declared image loader")
+            # 空槽会移除独立 loader，所有输出（包括 mask）的消费者必须显式声明断开。
+            declared_consumers = {(target.node_id, target.input_name) for target in slot.disconnect}
+            for node_id, node in workflow.items():
+                for input_name, connection in (node.get("inputs", {}) if isinstance(node, dict) else {}).items():
+                    if (isinstance(connection, list) and len(connection) == 2
+                            and str(connection[0]) == slot.node_id
+                            and (str(node_id), input_name) not in declared_consumers):
+                        raise ValueError(
+                            f"Workflow binding reference slot has undeclared consumer: {node_id}.{input_name}"
+                        )
             if not {WorkflowCapability.REFERENCE_IMAGE, WorkflowCapability.IMG2IMG}.intersection(capabilities.features):
                 raise ValueError("Reference slots require capability reference_image")
         sources = {binding.source for binding in bindings.bindings}

@@ -1,0 +1,8 @@
+{
+  "header": "Use only the actually supplied images listed below to generate the requested single reference image.",
+  "source": "{label}: {name} (owner {category}:{key}), purpose {purpose}, source view {role}.",
+  "scope": "Each source guides only its stated owner and purpose. Keep different owners distinct, with their own established details. Render the requested target in the requested view. The selected visual description determines the visible appearance.",
+  "identity": "For {name}, use {reference} as the established identity reference, preserving its age and recognizable structure within the requested view.",
+  "back_identity": "For {name}, use {reference} to preserve recognizable identity through rear head shape and silhouette. Keep the head facing away.",
+  "canvas": "{canvas} is the editing canvas. Preserve untargeted content; make only the requested reference-image changes. Other images are reference sources."
+}

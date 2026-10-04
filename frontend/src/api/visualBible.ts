@@ -65,6 +65,7 @@ export type SceneVisualVersion = {
   id: number
   project_id: number
   script_scene_id: number
+  scene_definition_version?: number
   version: number
   landmarks: unknown[]
   spatial_relations: Record<string, unknown>
@@ -116,7 +117,9 @@ export const listOutfits = (projectId: number): Promise<OutfitVariant[]> =>
 
 export const createOutfit = (
   projectId: number,
-  payload: Omit<OutfitVariant, 'id' | 'project_id' | 'version' | 'status' | 'approved_at' | 'created_at' | 'updated_at'>,
+  payload: Omit<OutfitVariant, 'id' | 'project_id' | 'version' | 'status' | 'approved_at' | 'created_at' | 'updated_at'> & {
+    apply_to?: { script_character_id: number; script_task_id: number; expected_outfit_variant_id: number | null }
+  },
 ): Promise<OutfitVariant> =>
   requestJson(`/api/visual-bible/projects/${projectId}/outfits`, {
     method: 'POST',
@@ -140,7 +143,9 @@ export const listSceneVersions = (projectId: number): Promise<SceneVisualVersion
 
 export const createSceneVersion = (
   projectId: number,
-  payload: Omit<SceneVisualVersion, 'id' | 'project_id' | 'version' | 'status' | 'approved_at' | 'created_at' | 'updated_at'>,
+  payload: Omit<SceneVisualVersion, 'id' | 'project_id' | 'version' | 'status' | 'approved_at' | 'created_at' | 'updated_at'> & {
+    apply_to?: { script_task_id: number; expected_visual_version_id: number | null }
+  },
 ): Promise<SceneVisualVersion> =>
   requestJson(`/api/visual-bible/projects/${projectId}/scene-versions`, {
     method: 'POST',
@@ -156,6 +161,13 @@ export const setConfigurationStatus = (
     method: 'POST',
     body: JSON.stringify({ status }),
   })
+
+export const getConfigurationUsage = (kind: 'outfit' | 'scene', id: number): Promise<{
+  id: number; status: ApprovalStatus; binding_count: number; bindings: { id: number; name: string }[]
+}> => requestJson(`/api/visual-bible/configurations/${kind}/${id}/usage`)
+
+export const deleteConfigurationDraft = (kind: 'outfit' | 'scene', id: number): Promise<{ id: number }> =>
+  requestJson(`/api/visual-bible/configurations/${kind}/${id}`, { method: 'DELETE' })
 
 export const assignOutfitVariant = (
   scriptCharacterId: number,

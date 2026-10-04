@@ -40,6 +40,7 @@ from backend.repositories.character_reference_repository import (
 )
 from backend.services.character_reference_runtime import character_reference_runtime
 from backend.services.character_reference_service import CharacterReferenceService
+from backend.services.reference_prompt_runtime import reference_prompt_runtime
 from backend.services.reference_catalog import selected_task_roles
 
 
@@ -117,6 +118,7 @@ def image_response(image: CharacterReferenceImage) -> CharacterReferenceImageRes
         width=image.width,
         height=image.height,
         promoted_asset_id=image.promoted_asset_id,
+        promoted_asset_status=image.promoted_asset.status if image.promoted_asset else None,
     )
 
 
@@ -157,7 +159,7 @@ def candidate_response(
     expected_roles: tuple | None = None,
 ) -> CharacterReferenceCandidateSetResponse:
     role_responses = {run.role.value: run_response(run) for run in runs}
-    expected = {role.value for role in expected_roles} if expected_roles else {"identity_face", "identity_half_body", "identity_full_body"}
+    expected = {role.value for role in expected_roles} if expected_roles else {"identity_face", "identity_full_body"}
     complete = set(role_responses) == expected and all(
         run.status == GenerationRunStatus.SUCCEEDED
         and any(image.artifact_index == 1 for image in run.images)
@@ -206,6 +208,7 @@ def task_response(
     except json.JSONDecodeError:
         progress = {}
     return CharacterReferenceTaskResponse(
+        visual_profiles=json.loads(task.subject_snapshot_json or "{}").get("visual_profiles", []),
         id=task.id,
         project_id=task.project_id,
         outline_character_id=task.outline_character_id,
@@ -242,30 +245,36 @@ def service_for_session(session) -> CharacterReferenceService:
     "/outline-characters/{character_id}/prompt-preview",
     response_model=CharacterReferencePromptPreviewResponse,
 )
-def preview_prompts(
+async def preview_prompts(
     character_id: int,
     payload: CharacterReferencePromptPreviewRequest,
     http_request: Request,
 ) -> CharacterReferencePromptPreviewResponse:
-    with SessionLocal() as session:
-        try:
-            tool, prompts = service_for_session(session).preview_prompts(
+    def prepare_preview():
+        with SessionLocal() as session:
+            try:
+                service = service_for_session(session)
+                tool, prompts = service.preview_prompts(
+                    character_id=character_id,
+                    tool_preset_id=payload.tool_preset_id,
+                    style_profile_id=payload.style_profile_id,
+                    refresh_visual_profiles=payload.refresh_visual_profiles,
+                )
+            except Exception as exc:
+                raise http_exception(exc, request_locale(http_request)) from exc
+            return CharacterReferencePromptPreviewResponse(
+                visual_profiles=service.preview_visual_profiles,
                 character_id=character_id,
-                tool_preset_id=payload.tool_preset_id,
+                tool_preset_id=tool.id,
                 style_profile_id=payload.style_profile_id,
+                prompt_type=tool.prompt_type,
+                prompts={
+                    role: CharacterReferencePromptPair(**prompt)
+                    for role, prompt in prompts.items()
+                },
             )
-        except Exception as exc:
-            raise http_exception(exc, request_locale(http_request)) from exc
-        return CharacterReferencePromptPreviewResponse(
-            character_id=character_id,
-            tool_preset_id=tool.id,
-            style_profile_id=payload.style_profile_id,
-            prompt_type=tool.prompt_type,
-            prompts={
-                role: CharacterReferencePromptPair(**prompt)
-                for role, prompt in prompts.items()
-            },
-        )
+
+    return await reference_prompt_runtime.run(prepare_preview)
 
 
 @router.post(
@@ -285,6 +294,7 @@ def create_task(
                 tool_preset_id=payload.tool_preset_id,
                 style_profile_id=payload.style_profile_id,
                 candidate_count=payload.candidate_count,
+                visual_profile_refs=[ref.model_dump() for ref in payload.visual_profile_refs] if payload.visual_profile_refs is not None else None,
                 prompts={
                     role: prompt.model_dump()
                     for role, prompt in payload.prompts.items()

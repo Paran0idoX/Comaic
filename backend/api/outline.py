@@ -62,7 +62,6 @@ def outline_character_to_response(character: OutlineCharacter) -> OutlineCharact
         role=character.role,
         background=character.background,
         appearance=character.appearance,
-        visual_anchors=character.visual_anchors,
         negative_constraints=character.negative_constraints,
         default_hairstyle=character.default_hairstyle,
         default_clothing=character.default_clothing,
@@ -175,12 +174,9 @@ def stream_outline_chat(request: OutlineChatStreamRequest, http_request: Request
                     outline = agent.consume_updated_outline()
 
                 if outline:
-                    outline_version = service.save_outline_snapshot(
+                    outline_version = await service.generate_and_save_outline_snapshot(
                         thread_id=request.thread_id,
                         outline=outline,
-                    )
-                    await service.generate_and_save_outline_characters(
-                        outline_version=outline_version,
                         user_message=request.message,
                     )
                     yield sse_event(

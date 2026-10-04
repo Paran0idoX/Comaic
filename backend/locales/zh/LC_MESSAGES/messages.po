@@ -1,15 +1,33 @@
+
 msgid ""
 msgstr ""
 "Project-Id-Version: comaic 0.1.0\n"
-"Content-Type: text/plain; charset=UTF-8\n"
-"Content-Transfer-Encoding: 8bit\n"
+"Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
+"POT-Creation-Date: 2026-10-02 13:57+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh\n"
+"Language-Team: zh <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
 
 msgid "common.internal_error"
 msgstr "服务暂时不可用，请稍后再试。"
 
 msgid "image_generation.batch_not_found"
 msgstr "图片生成批次不存在。"
+
+msgid "image_generation.batch_busy"
+msgstr "当前批次仍在处理页面，请等待当前页面完成后再继续。"
+
+msgid "image_generation.batch_recovery_unavailable"
+msgstr "无法确认原生图请求的状态，已保留原请求。请检查生图服务与历史记录后再继续。"
+
+msgid "image_generation.batch_recovery_unsupported"
+msgstr "当前生图服务不支持查询已提交请求，无法安全自动续跑。请先核对原请求的结果。"
 
 msgid "image_generation.batch_configuration_mismatch"
 msgstr "继续生成时不能修改原批次的工具、模式、Seed 策略或候选数。"
@@ -108,7 +126,7 @@ msgid "character_reference.candidate_count_invalid"
 msgstr "每类候选参考图数量必须在 1 到 4 之间。"
 
 msgid "character_reference.prompts_invalid"
-msgstr "脸部、半身和全身参考图提示词必须完整且有效。"
+msgstr "脸部和全身参考图提示词必须完整且有效。"
 
 msgid "character_reference.task_state_invalid"
 msgstr "当前任务状态不允许执行此操作。"
@@ -194,3 +212,86 @@ msgstr "该工具未配置可用的图片输入，本轮仅使用文字生成。
 msgid "reference.auto.text_only_no_face"
 msgstr "还没有已确认的脸部参考图，本轮仅使用文字生成。"
 
+msgid "image_spec.continuity_timeout"
+msgstr "连续性提取超过 {seconds} 秒总时限，已停止本次编译，请重试。"
+
+msgid "reference.size_invalid"
+msgstr "参考图宽高须为 256–2048 像素内的 32 的倍数，且用途必须属于本次选择。"
+
+msgid "reference.size_unsupported"
+msgstr "当前工具没有同时绑定宽度和高度，请选择支持自定义尺寸的工具。"
+
+msgid "reference.size_mismatch"
+msgstr "生成结果尺寸与本次设置不符，请检查工具的尺寸配置。"
+
+msgid "outline.characters_invalid"
+msgstr "角色提取未通过分类与设定校验，本轮大纲未保存，请重试。"
+
+msgid "visual.configuration_delete_requires_draft"
+msgstr "只能删除待确认草稿，已确认或已归档的版本请保留归档。"
+
+msgid "visual.configuration_deleted"
+msgstr "该设定草稿已删除，不能再次确认或修改状态。"
+
+msgid "reference.batch_invalid"
+msgstr "请选择 1–100 个参考素材对象。"
+
+msgid "reference.batch_duplicate"
+msgstr "同一对象在批量任务中只能选择一次。"
+
+msgid "reference.profile_model_missing"
+msgstr "请先在设置中配置可用的语言模型及 API Key，再准备视觉摘要。"
+
+msgid "reference.profile_extraction_failed"
+msgstr "视觉摘要提炼失败，已保留原预览，请重试。"
+
+msgid "reference.profile_empty"
+msgstr "当前用途没有可用的视觉事实，请检查设定和摘要。"
+
+msgid "reference.profile_stale"
+msgstr "视觉摘要或来源已变化，请重新准备后提交。"
+
+msgid "reference.profile_conflict"
+msgstr "视觉摘要已被其它操作更新，请重新准备。"
+
+msgid "reference.profile_invalid"
+msgstr "视觉摘要无效，请保留来源依据、英文描述和适用视角。"
+
+msgid "reference.profile_not_found"
+msgstr "视觉摘要不存在，请重新准备。"
+
+msgid "reference.profile_rebuilt"
+msgstr "来源或提炼格式已变化，视觉摘要已重新提炼。"
+
+msgid "image_spec.continuity_retired"
+msgstr "跨页连续性事件编辑已停用。请修改本页脚本或画面设定后重新准备提示词；历史记录仍可查看。"
+
+msgid "visual.configuration_apply_target_invalid"
+msgstr "当前应用目标与设定不匹配，请重新打开编辑器。"
+
+msgid "visual.configuration_binding_changed"
+msgstr "该角色或场景的当前版本已变化，请重新打开编辑器后再应用。"
+
+msgid "image_generation.page_scope_invalid"
+msgstr "请选择当前脚本任务中的有效页面。"
+
+msgid "consistency.track_not_ready"
+msgstr "该候选套组尚未完成评测。"
+
+msgid "script.scene_required"
+msgstr "请选择本页关联的场景。"
+
+msgid "script.scene_binding_invalid"
+msgstr "请选择当前项目、脚本批次中的有效场景。"
+
+msgid "script.character_binding_invalid"
+msgstr "请选择当前分段中的有效人物，不能重复选择。"
+
+msgid "script.edit_running"
+msgstr "脚本生成任务运行中，请在任务结束或暂停后编辑。"
+
+msgid "settings.prompt_empty"
+msgstr "任务系统提示词不能为空。"
+
+msgid "settings.prompt_model_invalid"
+msgstr "请选择当前 API 配置中的有效模型。"

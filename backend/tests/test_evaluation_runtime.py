@@ -1,14 +1,24 @@
 import hashlib
+import json
 from pathlib import Path
+import subprocess
+import sys
+from types import ModuleType, SimpleNamespace
+import weakref
 
 from PIL import Image
 import pytest
 
-from backend.evaluation.runtime import _invalid_hashes
+from backend.evaluation.runtime import (
+    METRIC_VERSION,
+    ViStoryBenchProcessRunner,
+    _invalid_hashes,
+)
 from backend.evaluation.vistorybench_worker import (
     _cross_csd_from_reference_baseline,
     _stage,
 )
+from backend.evaluation import vistorybench_worker
 
 
 def _image(path: Path, color: tuple[int, int, int]) -> None:
@@ -31,6 +41,104 @@ def test_source_hash_normalizes_platform_line_endings(tmp_path) -> None:
         == []
     )
     assert _invalid_hashes(tmp_path, {"source.py": expected}) == ["source.py"]
+
+
+def test_worker_paths_remain_valid_when_backend_runs_outside_repository(
+    tmp_path, monkeypatch
+) -> None:
+    """隔离目录启动后端时，worker 切回仓库仍要读取同一份评估产物。"""
+
+    monkeypatch.chdir(tmp_path)
+    manifest = {"tracks": [{"candidate_index": 1}]}
+    result = {"metric_version": METRIC_VERSION, "tracks": []}
+
+    def run_worker(command, *, cwd, **kwargs):
+        def child_path(flag):
+            path = Path(command[command.index(flag) + 1])
+            return path if path.is_absolute() else Path(cwd) / path
+
+        assert json.loads(child_path("--manifest").read_text(encoding="utf-8")) == manifest
+        assert child_path("--work-dir") == tmp_path / "outputs" / "evaluation"
+        child_path("--result").write_text(json.dumps(result), encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, stdout="done", stderr="")
+
+    monkeypatch.setattr("backend.evaluation.runtime.subprocess.run", run_worker)
+
+    assert ViStoryBenchProcessRunner().run(
+        manifest=manifest, work_dir=Path("outputs/evaluation")
+    ) == result
+    assert (tmp_path / "outputs/evaluation/worker.stdout.log").read_text() == "done"
+
+
+def test_worker_releases_cids_models_before_constructing_csd(tmp_path, monkeypatch):
+    """CIDS 的实例和共享缓存必须都释放，才能开始下一套 GPU 模型。"""
+
+    model_refs = []
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    for variable in (
+        "API_KEY", "BASE_URL", "MODEL_ID", "OPENAI_API_KEY", "HF_HUB_OFFLINE",
+        "TRANSFORMERS_OFFLINE",
+    ):
+        monkeypatch.setenv(variable, "test-only")
+
+    class Model:
+        pass
+
+    class FakeCids:
+        _shared_model_cache = {}
+
+        def __init__(self, **kwargs):
+            self.model = Model()
+            self._shared_model_cache["model"] = self.model
+            model_refs.append(weakref.ref(self.model))
+
+        def evaluate(self, **kwargs):
+            return {"metrics": {}}
+
+    class FakeCsd:
+        def __init__(self, **kwargs):
+            assert model_refs[0]() is None, "CIDS model is still held by its evaluator"
+
+    for name in (
+        "vistorybench",
+        "vistorybench.bench",
+        "vistorybench.bench.content",
+        "vistorybench.bench.style",
+        "vistorybench.bench.content.cids_evaluator",
+        "vistorybench.bench.style.csd_evaluator",
+    ):
+        module = ModuleType(name)
+        monkeypatch.setitem(sys.modules, name, module)
+        if "." in name:
+            parent, child = name.rsplit(".", 1)
+            setattr(sys.modules[parent], child, module)
+    cids_module = sys.modules["vistorybench.bench.content.cids_evaluator"]
+    cids_module.CIDSEvaluator = FakeCids
+    cids_module.FaceRestoreHelper = type("FaceRestoreHelper", (), {})
+    cids_module.insightface = SimpleNamespace(app=SimpleNamespace(FaceAnalysis=object))
+    sys.modules["vistorybench.bench.style.csd_evaluator"].CSDEvaluator = FakeCsd
+    monkeypatch.setitem(
+        sys.modules, "torch",
+        SimpleNamespace(cuda=SimpleNamespace(empty_cache=lambda: None)),
+    )
+    monkeypatch.setattr(vistorybench_worker, "onnx_cuda_ready", lambda: True)
+    monkeypatch.setattr(
+        vistorybench_worker, "_stage", lambda *args: (tmp_path, tmp_path, tmp_path)
+    )
+    monkeypatch.setattr(
+        vistorybench_worker, "_cross_csd_from_reference_baseline",
+        lambda *args, **kwargs: (0.8, []),
+    )
+
+    result = vistorybench_worker.run(
+        {
+            "pages": [], "characters": [],
+            "tracks": [{"candidate_index": 1, "images": [{"path": "placeholder"}]}],
+        },
+        tmp_path,
+    )
+
+    assert result["tracks"][0]["metrics"]["csd_cross"] == 0.8
 
 
 def test_stage_places_only_reference_assets_in_the_cids_origin_directory(
